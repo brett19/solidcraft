@@ -158,13 +158,13 @@ macro_rules! primitive {
 }
 
 primitive!(box_, "box");
-primitive!(cylinder, "cylinder", round_trip: ignore = "solidcore: no SmCylinder::IsNurbSurfaceCylinder (nor SmCircle::IsNurbCurveCircle)");
+primitive!(cylinder, "cylinder", round_trip: ignore = "solidcore#1433, #1432: no SmCylinder::IsNurbSurfaceCylinder (nor SmCircle::IsNurbCurveCircle)");
 primitive!(sphere, "sphere",
-    volume: ignore = "solidcore: brep_volume of a sphere fails with SM_ERR at accuracy 1e-8",
-    round_trip: ignore = "solidcore: no SmCircle::IsNurbCurveCircle");
-primitive!(cone, "cone", round_trip: ignore = "solidcore: no SmCircle::IsNurbCurveCircle");
-primitive!(frustum, "frustum", round_trip: ignore = "solidcore: no SmCircle::IsNurbCurveCircle");
-primitive!(torus, "torus", round_trip: ignore = "solidcore: no SmTorus::IsNurbSurfaceTorus (nor SmCircle::IsNurbCurveCircle)");
+    volume: ignore = "solidcore#1431: brep_volume of a sphere fails with SM_ERR at accuracy 1e-8",
+    round_trip: ignore = "solidcore#1432: no SmCircle::IsNurbCurveCircle");
+primitive!(cone, "cone", round_trip: ignore = "solidcore#1432: no SmCircle::IsNurbCurveCircle");
+primitive!(frustum, "frustum", round_trip: ignore = "solidcore#1432: no SmCircle::IsNurbCurveCircle");
+primitive!(torus, "torus", round_trip: ignore = "solidcore#1433, #1432: no SmTorus::IsNurbSurfaceTorus (nor SmCircle::IsNurbCurveCircle)");
 
 #[test]
 fn hostile_arrays_are_refused() {
