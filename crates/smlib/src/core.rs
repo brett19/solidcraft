@@ -16,6 +16,12 @@ use solidcore::primitive::api_primitives as primitives;
 
 use crate::{Error, Result};
 
+mod convert;
+#[cfg(test)]
+mod convert_tests;
+
+pub(crate) use convert::{from_arrays, to_arrays};
+
 /// A solidcore body. Its own lock: solidcore's operations take `&mut Brep`, even to measure.
 pub(crate) struct Body(pub(crate) Mutex<solidcore::topology::Brep>);
 
@@ -81,6 +87,52 @@ pub(crate) fn make_box(origin: [f64; 3], size: [f64; 3]) -> Result<Body> {
     run("create_box", |k| primitives::create_box(k, Vec3::new(origin[0], origin[1], origin[2]), x, y, z)).map(Body::new)
 }
 
+fn point(p: [f64; 3]) -> Result<Vec3> {
+    if !p.iter().all(|x| x.is_finite()) {
+        return Err(Error::Argument);
+    }
+    Ok(Vec3::new(p[0], p[1], p[2]))
+}
+
+/// A cylinder about +Z from its base centre (`SmApiCreateCylinder`, as `smlib_make_cylinder`
+/// checks it: radius and height positive).
+pub(crate) fn make_cylinder(origin: [f64; 3], radius: f64, height: f64) -> Result<Body> {
+    let o = point(origin)?;
+    if !(radius > 0.0 && height > 0.0 && radius.is_finite() && height.is_finite()) {
+        return Err(Error::Argument);
+    }
+    run("create_cylinder", |k| primitives::create_cylinder(k, o, radius, height)).map(Body::new)
+}
+
+/// A sphere (`SmApiCreateSphere`; radius positive).
+pub(crate) fn make_sphere(center: [f64; 3], radius: f64) -> Result<Body> {
+    let o = point(center)?;
+    if !(radius > 0.0 && radius.is_finite()) {
+        return Err(Error::Argument);
+    }
+    run("create_sphere", |k| primitives::create_sphere(k, o, radius)).map(Body::new)
+}
+
+/// A cone or frustum about +Z (`SmApiCreateCone`; `smlib_make_cone`'s checks: base radius and
+/// height positive, top radius at least 0 and not the base radius).
+pub(crate) fn make_cone(origin: [f64; 3], base_radius: f64, top_radius: f64, height: f64) -> Result<Body> {
+    let o = point(origin)?;
+    let ok = base_radius > 0.0 && top_radius >= 0.0 && height > 0.0 && top_radius != base_radius;
+    if !(ok && base_radius.is_finite() && top_radius.is_finite() && height.is_finite()) {
+        return Err(Error::Argument);
+    }
+    run("create_cone", |k| primitives::create_cone(k, o, base_radius, top_radius, height)).map(Body::new)
+}
+
+/// A ring torus about +Z (`SmApiCreateTorus`; major radius > minor radius > 0).
+pub(crate) fn make_torus(center: [f64; 3], major_radius: f64, minor_radius: f64) -> Result<Body> {
+    let o = point(center)?;
+    if !(minor_radius > 0.0 && minor_radius < major_radius && major_radius.is_finite()) {
+        return Err(Error::Argument);
+    }
+    run("create_torus", |k| primitives::create_torus(k, o, major_radius, minor_radius)).map(Body::new)
+}
+
 /// The enclosed volume (`SmApiBrepComputeVolume`).
 pub(crate) fn volume(body: &Body, relative_accuracy: f64) -> Result<f64> {
     if !relative_accuracy.is_finite() {
@@ -96,17 +148,6 @@ pub(crate) fn volume(body: &Body, relative_accuracy: f64) -> Result<f64> {
 /// Face, edge and vertex counts.
 pub(crate) fn counts(body: &Body) -> Result<[usize; 3]> {
     with_body("counts", body, |_, b| Ok([b.face_list().len(), b.edge_list().len(), b.vertex_list().len()]))
-}
-
-/// `body` as the flat arrays the C API exports, so [`crate::export::native`] gives the same
-/// canonical record as from SMLib.
-pub(crate) fn to_arrays(_body: &Body) -> Result<crate::import::Arrays> {
-    Err(Error::Solidcore("not supported yet: a solidcore body to a record".into()))
-}
-
-/// A solidcore body from the flat arrays the C API imports ([`crate::import::arrays`]).
-pub(crate) fn from_arrays(_arrays: &crate::import::Arrays) -> Result<Body> {
-    Err(Error::Solidcore("not supported yet: a record to a solidcore body".into()))
 }
 
 #[cfg(test)]
