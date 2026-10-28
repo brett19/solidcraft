@@ -382,7 +382,7 @@ cases!(
     shell_box_outward: ignore = "solidcore#1440: the topology point solve misses faces, so SmApiFaceClosestPoint picks no face (solidcore#1440)",
     shell_cylinder_open_top: ignore = "solidcore#1440: the topology point solve misses faces, so SmApiFaceClosestPoint picks no face (solidcore#1440)",
     shell_too_thick: ignore = "solidcore#1440: the topology point solve misses faces, so SmApiFaceClosestPoint picks no face (solidcore#1440)",
-    shell_walls_touch: ignore = "solidcore#1440: no face pick (solidcore#1440); walls that meet are 1027, not WALLS_TOUCH (solidcore#1019)",
+    shell_walls_touch: ignore = "solidcore#1440: no face pick (solidcore#1440); walls that meet are 1027, not WALLS_TOUCH until fork a759622 is ported (solidcore#1442)",
     shell_pick_near_nothing: ignore = "solidcore#1440: the topology point solve misses faces, so SmApiFaceClosestPoint picks no face (solidcore#1440)",
     shell_pick_ambiguous: ignore = "solidcore#1440: the topology point solve misses faces, so SmApiFaceClosestPoint picks no face (solidcore#1440)",
     thicken_plate,
