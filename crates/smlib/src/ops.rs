@@ -6,7 +6,7 @@
 //! edge (face) nearest to it, which must lie within `tolerance` of it and be nearer than any other
 //! by more than the body's modelling tolerance ([`Error::NoMatch`], [`Error::Ambiguous`]).
 
-use crate::{Brep, Error, Result, error, ffi, init};
+use crate::{Brep, Error, Result, core, error, ffi, init, route};
 
 /// How [`Brep::boolean`] combines two bodies.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -102,6 +102,9 @@ impl Brep {
     /// as one body, counted by [`Brep::solid_count`]. Tagged operands ([`Brep::tagged`]) give a
     /// result whose [`Brep::history`] says where each face and edge came from.
     pub fn boolean(&self, other: &Brep, op: BooleanOp) -> Result<Option<Brep>> {
+        if route::Op::Boolean.backend() == route::Backend::Solidcore {
+            return core::boolean::boolean(self.core()?, other.core()?, op).map(|r| r.map(Brep::made_core));
+        }
         init()?;
         let op = match op {
             BooleanOp::Union => ffi::ops::BOOLEAN_UNION,
@@ -120,6 +123,13 @@ impl Brep {
     /// tagged each with its own number ([`Brep::tagged`]) give a result whose [`Brep::history`]
     /// names them. At least one body and at most [`MAX_UNION_BREPS`].
     pub fn union_all(breps: &[&Brep]) -> Result<Brep> {
+        if route::Op::Boolean.backend() == route::Backend::Solidcore {
+            if breps.is_empty() || breps.len() > MAX_UNION_BREPS {
+                return Err(Error::Argument);
+            }
+            let bodies = breps.iter().map(|b| b.core()).collect::<Result<Vec<&core::Body>>>()?;
+            return core::boolean::union_all(&bodies).map(Brep::made_core);
+        }
         init()?;
         if breps.is_empty() || breps.len() > MAX_UNION_BREPS {
             return Err(error(ffi::ERR_ARG));
@@ -132,6 +142,9 @@ impl Brep {
     /// as regions of that plane by `op`: `None` when the result is empty. The result's edges are
     /// the inputs' own curves, split where they cross.
     pub fn boolean2d(&self, other: &Brep, op: BooleanOp) -> Result<Option<Brep>> {
+        if route::Op::Boolean.backend() == route::Backend::Solidcore {
+            return core::boolean::boolean2d(self.core()?, other.core()?, op).map(|r| r.map(Brep::made_core));
+        }
         init()?;
         let op = match op {
             BooleanOp::Union => ffi::ops::BOOLEAN_UNION,
@@ -149,6 +162,9 @@ impl Brep {
     /// one body: `None` when the tool meets no face. Tagged operands give the pieces' history
     /// (each piece is a split of the face it was cut from).
     pub fn imprint(&self, tool: &Brep) -> Result<Option<Brep>> {
+        if route::Op::Boolean.backend() == route::Backend::Solidcore {
+            return core::boolean::imprint(self.core()?, tool.core()?).map(|r| r.map(Brep::made_core));
+        }
         init()?;
         match ffi::ops::imprint(self.cpp()?, tool.cpp()?) {
             Ok(h) => Ok(Some(Brep::made(h))),

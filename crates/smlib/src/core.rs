@@ -16,6 +16,9 @@ use solidcore::primitive::api_primitives as primitives;
 
 use crate::{Error, Result};
 
+pub(crate) mod boolean;
+#[cfg(test)]
+mod boolean_tests;
 mod convert;
 #[cfg(test)]
 mod convert_tests;
