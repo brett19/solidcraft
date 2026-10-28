@@ -47,7 +47,7 @@ pub const MAX_UNION_BREPS: usize = 100_000;
 /// Most points one selection may hold (the C API's limit).
 pub const MAX_POINTS: usize = 4096;
 
-fn pick_error((s, at): ffi::ops::PickError) -> Error {
+pub(crate) fn pick_error((s, at): ffi::ops::PickError) -> Error {
     match (s, at) {
         (ffi::ops::ERR_PICK_NONE, Some(point)) => Error::NoMatch { point },
         (ffi::ops::ERR_PICK_AMBIGUOUS, Some(point)) => Error::Ambiguous { point },
@@ -55,7 +55,7 @@ fn pick_error((s, at): ffi::ops::PickError) -> Error {
     }
 }
 
-fn setback_error((s, at, corner): ffi::ops::SetbackError) -> Error {
+pub(crate) fn setback_error((s, at, corner): ffi::ops::SetbackError) -> Error {
     match corner {
         Some(corner) => Error::CornerRefused { corner },
         None => pick_error((s, at)),
@@ -184,6 +184,9 @@ impl Brep {
     /// The edges nearest to `edges` (each within `tolerance`), exactly those, rounded
     /// at `radius`.
     pub fn fillet(&self, edges: &[[f64; 3]], tolerance: f64, radius: f64) -> Result<Brep> {
+        if route::Op::Blend.backend() == route::Backend::Solidcore {
+            return self.core_blend(Blend::Round, edges, &[radius], tolerance, &[], &[], core::blend::Corners::Filled);
+        }
         self.pick_op(ffi::ops::Pick::Fillet, edges, tolerance, radius, false)
     }
 
@@ -191,16 +194,22 @@ impl Brep {
     /// an equal-distance chamfer `distance` back along each face (measured at each edge's
     /// midpoint), with bevelled corners.
     pub fn chamfer(&self, edges: &[[f64; 3]], tolerance: f64, distance: f64) -> Result<Brep> {
+        if route::Op::Blend.backend() == route::Backend::Solidcore {
+            return self.core_blend(Blend::Chamfer, edges, &[distance], tolerance, &[], &[], core::blend::Corners::Filled);
+        }
         self.pick_op(ffi::ops::Pick::Chamfer, edges, tolerance, distance, false)
     }
 
     /// The edges nearest to `edges` (each within `tolerance`), exactly those, blended
     /// as `kind`, edge i at `sizes[i]`.
     pub fn blend(&self, kind: Blend, edges: &[[f64; 3]], sizes: &[f64], tolerance: f64) -> Result<Brep> {
-        init()?;
         if edges.len() > MAX_POINTS || edges.is_empty() || sizes.len() != edges.len() {
             return Err(Error::Argument);
         }
+        if route::Op::Blend.backend() == route::Backend::Solidcore {
+            return self.core_blend(kind, edges, sizes, tolerance, &[], &[], core::blend::Corners::Filled);
+        }
+        init()?;
         let kind = match kind {
             Blend::Round => ffi::ops::BLEND_ROUND,
             Blend::Curvature => ffi::ops::BLEND_CURVATURE,
@@ -224,7 +233,6 @@ impl Brep {
         setbacks: &[f64],
         tolerance: f64,
     ) -> Result<Brep> {
-        init()?;
         if edges.len() > MAX_POINTS
             || edges.is_empty()
             || sizes.len() != edges.len()
@@ -234,6 +242,10 @@ impl Brep {
         {
             return Err(Error::Argument);
         }
+        if route::Op::Blend.backend() == route::Backend::Solidcore {
+            return self.core_blend(kind, edges, sizes, tolerance, corners, setbacks, core::blend::Corners::Filled);
+        }
+        init()?;
         let kind = match kind {
             Blend::Round => ffi::ops::BLEND_ROUND,
             Blend::Curvature => ffi::ops::BLEND_CURVATURE,
@@ -257,7 +269,6 @@ impl Brep {
         setbacks: &[f64],
         tolerance: f64,
     ) -> Result<(Brep, Vec<Hole>)> {
-        init()?;
         if edges.len() > MAX_POINTS
             || edges.is_empty()
             || sizes.len() != edges.len()
@@ -267,6 +278,10 @@ impl Brep {
         {
             return Err(Error::Argument);
         }
+        if route::Op::Blend.backend() == route::Backend::Solidcore {
+            return self.core_blend(kind, edges, sizes, tolerance, corners, setbacks, core::blend::Corners::Open).map(|b| (b, Vec::new()));
+        }
+        init()?;
         let kind = match kind {
             Blend::Round => ffi::ops::BLEND_ROUND,
             Blend::Curvature => ffi::ops::BLEND_CURVATURE,
@@ -284,6 +299,9 @@ impl Brep {
     /// `radii` over the position along the edge, 0 at its end nearest `start` and 1 at the other
     /// (the edge curve's parameter scaled to 0..1).
     pub fn fillet_variable(&self, edge: [f64; 3], tolerance: f64, start: [f64; 3], degree: usize, knots: &[f64], radii: &[f64]) -> Result<Brep> {
+        if route::Op::Blend.backend() == route::Backend::Solidcore {
+            return core::blend::fillet_variable(self.core()?, edge, tolerance, start, degree, knots, radii).map(Brep::made_core);
+        }
         init()?;
         let degree = i32::try_from(degree).map_err(|_| Error::Argument)?;
         ffi::ops::fillet_variable(self.cpp()?, &edge, tolerance, &start, degree, knots, radii).map(Brep::made).map_err(|s| match s {
@@ -298,10 +316,13 @@ impl Brep {
     /// and by `second` on the other, with bevelled corners (setbacks measured at each edge's
     /// midpoint).
     pub fn chamfer_sides(&self, edges: &[[f64; 3]], tolerance: f64, distance: f64, second: ChamferSecond, first: [f64; 3]) -> Result<Brep> {
-        init()?;
         if edges.is_empty() || edges.len() > MAX_POINTS {
             return Err(Error::Argument);
         }
+        if route::Op::Blend.backend() == route::Backend::Solidcore {
+            return core::blend::chamfer_sides(self.core()?, edges, tolerance, distance, second, first).map(Brep::made_core);
+        }
+        init()?;
         let (value, angle) = match second {
             ChamferSecond::Distance(d) => (d, false),
             ChamferSecond::Angle(a) => (a, true),
@@ -366,6 +387,24 @@ impl Brep {
             return Err(Error::Argument);
         }
         ffi::ops::draft(self.cpp()?, faces, tolerance, &neutral_origin, &neutral_normal, &pull, angle).map(Brep::made).map_err(pick_error)
+    }
+
+    /// [`Brep::blend`] and its kin on solidcore (`core::blend::blend`).
+    #[allow(clippy::too_many_arguments)]
+    fn core_blend(
+        &self,
+        kind: Blend,
+        edges: &[[f64; 3]],
+        sizes: &[f64],
+        tolerance: f64,
+        corners: &[[f64; 3]],
+        setbacks: &[f64],
+        open: core::blend::Corners,
+    ) -> Result<Brep> {
+        if edges.len() > MAX_POINTS || edges.is_empty() {
+            return Err(Error::Argument);
+        }
+        core::blend::blend(self.core()?, kind, edges, sizes, tolerance, corners, setbacks, open).map(Brep::made_core)
     }
 
     fn pick_op(&self, kind: ffi::ops::Pick, points: &[[f64; 3]], tolerance: f64, size: f64, allow_none: bool) -> Result<Brep> {
