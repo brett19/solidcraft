@@ -53,8 +53,9 @@ pub static COMMANDS: &[CommandSpec] = &[
 
 fn kernel(_: &mut Session, p: &Value) -> Result<Value> {
     use solidcraft_kernel::kernel_route as route;
-    if let Some(id) = str_(p, "choice") {
-        let c = route::Choice::from_id(id).ok_or_else(|| bad("diagnostics.kernel", "`choice` is routed, smlib or solidcore"))?;
+    // A choice of the wrong type is refused like an unknown one, not read as no choice.
+    if let Some(v) = p.get("choice").filter(|v| !v.is_null()) {
+        let c = v.as_str().and_then(route::Choice::from_id).ok_or_else(|| bad("diagnostics.kernel", "`choice` is routed, smlib or solidcore"))?;
         route::set_choice(c);
     }
     let routes: Vec<Value> = route::Op::ALL

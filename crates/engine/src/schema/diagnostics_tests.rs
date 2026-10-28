@@ -60,3 +60,93 @@ fn diagnostics_profile_reports_commands_features_and_the_kernel() {
     assert_eq!(after["enabled"], json!(false), "{after}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Tests that set the process-wide kernel choice run one at a time, and put `routed` back however
+/// they end (a failed assertion included).
+struct KernelChoice(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+
+static KERNEL_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+impl KernelChoice {
+    fn take() -> Self {
+        KernelChoice(KERNEL_TESTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner))
+    }
+}
+
+impl Drop for KernelChoice {
+    fn drop(&mut self) {
+        solidcraft_kernel::kernel_route::set_choice(solidcraft_kernel::kernel_route::Choice::Routed);
+    }
+}
+
+/// diagnostics.kernel lists every operation family with the table's kernel and the one it runs
+/// on now, and its `choice` moves them (unless SOLIDCRAFT_KERNEL overrides it).
+#[test]
+fn diagnostics_kernel_reports_and_sets_the_choice() {
+    use solidcraft_kernel::kernel_route as route;
+    let _choice = KernelChoice::take();
+    let mut s = Session::default();
+    let r = s.execute("diagnostics.kernel", &json!({})).unwrap();
+    let routes = r["routes"].as_array().unwrap();
+    assert_eq!(routes.len(), route::Op::ALL.len(), "{r}");
+    for (row, op) in routes.iter().zip(route::Op::ALL) {
+        assert_eq!(row["op"], json!(format!("{op:?}").to_lowercase()), "{r}");
+        assert_eq!(row["route"], json!(op.route().id()), "{r}");
+        assert!(matches!(row["backend"].as_str(), Some("smlib" | "solidcore")), "{r}");
+    }
+    let environment = route::overridden();
+    assert_eq!(r["environment"], json!(environment), "{r}");
+    for choice in ["solidcore", "smlib", "routed"] {
+        let r = s.execute("diagnostics.kernel", &json!({ "choice": choice })).unwrap();
+        // Back to the table straight away: other tests in this process build bodies meanwhile.
+        if choice != "routed" {
+            route::set_choice(route::Choice::Routed);
+        }
+        if environment {
+            continue; // SOLIDCRAFT_KERNEL wins: the choice and the backends stay its own
+        }
+        assert_eq!(r["choice"], json!(choice), "{r}");
+        for (row, op) in r["routes"].as_array().unwrap().iter().zip(route::Op::ALL) {
+            // `.smb` files stay on SMLib whatever is chosen.
+            let want = match choice {
+                _ if op == route::Op::File => "smlib",
+                "routed" => op.route().id(),
+                other => other,
+            };
+            assert_eq!(row["backend"], json!(want), "{choice}: {r}");
+        }
+    }
+}
+
+/// An unknown or mistyped choice is an error that changes nothing; no hostile value panics.
+#[test]
+fn diagnostics_kernel_refuses_unknown_choices() {
+    let _choice = KernelChoice::take();
+    let mut s = Session::default();
+    let before = s.execute("diagnostics.kernel", &json!({})).unwrap()["choice"].clone();
+    let huge = "solidcore".repeat(100_000);
+    for bad in [
+        json!("truck"),
+        json!("SMLIB"),
+        json!(""),
+        json!(huge),
+        json!("routed\0"),
+        json!(5),
+        json!(true),
+        json!(["smlib"]),
+        json!({"choice": "smlib"}),
+    ] {
+        match s.execute("diagnostics.kernel", &json!({ "choice": bad })) {
+            Err(crate::EngineError::Internal(..)) | Ok(_) => panic!("`{}` was not refused", bad.as_str().map_or(0, str::len)),
+            Err(_) => {}
+        }
+    }
+    for v in crate::tests::hostile_values() {
+        for p in [json!({ "choice": v.clone() }), v] {
+            if let Err(crate::EngineError::Internal(_, msg)) = s.execute("diagnostics.kernel", &p) {
+                panic!("diagnostics.kernel {p}: {msg}");
+            }
+        }
+    }
+    assert_eq!(s.execute("diagnostics.kernel", &json!({})).unwrap()["choice"], before);
+}
