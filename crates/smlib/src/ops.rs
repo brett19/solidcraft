@@ -336,6 +336,9 @@ impl Brep {
     /// whose walls would just meet (a hole exactly twice the wall from a side) is
     /// [`Error::WallsTouch`].
     pub fn shell(&self, open_faces: &[[f64; 3]], tolerance: f64, thickness: f64) -> Result<Brep> {
+        if route::Op::Offset.backend() == route::Backend::Solidcore {
+            return core::offset::shell(self.core()?, open_faces, tolerance, thickness).map(Brep::made_core);
+        }
         self.pick_op(ffi::ops::Pick::Shell, open_faces, tolerance, thickness, true)
     }
 
@@ -344,6 +347,9 @@ impl Brep {
     /// faces around them extended or trimmed to meet them. Faces moved in past all of the body
     /// behind them are [`Error::NoRoom`].
     pub fn offset_faces(&self, faces: &[[f64; 3]], tolerance: f64, distance: f64) -> Result<Brep> {
+        if route::Op::Offset.backend() == route::Backend::Solidcore {
+            return core::offset::offset_faces(self.core()?, faces, tolerance, distance).map(Brep::made_core);
+        }
         self.pick_op(ffi::ops::Pick::OffsetFaces, faces, tolerance, distance, false)
     }
 
@@ -351,6 +357,9 @@ impl Brep {
     /// against them), or by half each way when `symmetric`, with ruled walls along its open
     /// edges. A closed solid is [`Error::Argument`].
     pub fn thicken(&self, thickness: f64, symmetric: bool) -> Result<Brep> {
+        if route::Op::Offset.backend() == route::Backend::Solidcore {
+            return core::offset::thicken(self.core()?, thickness, symmetric).map(Brep::made_core);
+        }
         init()?;
         ffi::ops::thicken(self.cpp()?, thickness, symmetric).map(Brep::made).map_err(error)
     }
@@ -382,10 +391,13 @@ impl Brep {
         pull: [f64; 3],
         angle: f64,
     ) -> Result<Brep> {
-        init()?;
         if faces.is_empty() || faces.len() > MAX_POINTS {
             return Err(Error::Argument);
         }
+        if route::Op::Split.backend() == route::Backend::Solidcore {
+            return core::offset::draft(self.core()?, faces, tolerance, neutral_origin, neutral_normal, pull, angle).map(Brep::made_core);
+        }
+        init()?;
         ffi::ops::draft(self.cpp()?, faces, tolerance, &neutral_origin, &neutral_normal, &pull, angle).map(Brep::made).map_err(pick_error)
     }
 

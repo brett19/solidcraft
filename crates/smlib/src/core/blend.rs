@@ -59,7 +59,7 @@ const INVALID_INPUT: i32 = 1007;
 
 /// An SMLib status as the capi passes it on (`status`, smlib_shim.h): solidcore's upstream
 /// status codes as they are; its refusals of code it has not ported as not supported.
-fn status(e: SolidError) -> Error {
+pub(super) fn status(e: SolidError) -> Error {
     match e {
         SolidError::Upstream { code, .. } => Error::Status(code),
         SolidError::InvalidInput { .. } => Error::Status(INVALID_INPUT),
@@ -74,22 +74,22 @@ fn size_ok(x: f64) -> bool {
 }
 
 /// `tolerance_ok`.
-fn tolerance_ok(t: f64) -> bool {
+pub(super) fn tolerance_ok(t: f64) -> bool {
     t.is_finite() && t > 0.0 && t < 1e6
 }
 
 /// `points_ok`.
-fn points_ok(points: &[[f64; 3]], allow_none: bool) -> bool {
+pub(super) fn points_ok(points: &[[f64; 3]], allow_none: bool) -> bool {
     points.len() <= MAX_POINTS && (allow_none || !points.is_empty()) && points.iter().flatten().all(|x| x.is_finite())
 }
 
-fn p3(p: [f64; 3]) -> Point3 {
+pub(super) fn p3(p: [f64; 3]) -> Point3 {
     Vec3::new(p[0], p[1], p[2])
 }
 
 /// Why a pick failed: `SMLIB_ERR_PICK_NONE` or `SMLIB_ERR_PICK_AMBIGUOUS`, and the point.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Miss {
+pub(super) enum Miss {
     None(usize),
     Ambiguous(usize),
 }
@@ -99,7 +99,7 @@ enum Miss {
 /// when the second nearest is within `tol` too and nearer than the first by at most `model_tol`.
 /// An entity whose distance cannot be measured is skipped, as the capi skips a failed query
 /// (solidcore's refusal of unported code is not skipped: it fails the pick).
-fn pick<T: Copy + PartialEq>(
+pub(super) fn pick<T: Copy + PartialEq>(
     all: &[T],
     points: &[[f64; 3]],
     tol: f64,
@@ -138,7 +138,7 @@ fn pick<T: Copy + PartialEq>(
 }
 
 /// A query's failure the capi treats as no answer; solidcore's unported code still fails.
-fn answer<T>(r: solidcore::Result<T>) -> solidcore::Result<Option<T>> {
+pub(super) fn answer<T>(r: solidcore::Result<T>) -> solidcore::Result<Option<T>> {
     match r {
         Ok(v) => Ok(Some(v)),
         Err(e) if e.is_unported() => Err(e),
@@ -410,7 +410,7 @@ fn finish(b: Brep, solid_in: bool) -> solidcore::Result<Out<Brep>> {
 }
 
 /// Runs `f` on a copy of `body` (`copy_of`) under the kernel's lock.
-fn on_copy(call: &'static str, body: &Body, f: impl FnOnce(&mut Kernel, Brep) -> solidcore::Result<Out<Brep>>) -> Result<Body> {
+pub(super) fn on_copy(call: &'static str, body: &Body, f: impl FnOnce(&mut Kernel, Brep) -> solidcore::Result<Out<Brep>>) -> Result<Body> {
     if body.0.is_poisoned() {
         return Err(Error::Internal(format!("{call}: the body was left unfinished by an earlier panic")));
     }
