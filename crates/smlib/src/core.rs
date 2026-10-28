@@ -16,6 +16,9 @@ use solidcore::primitive::api_primitives as primitives;
 
 use crate::{Error, Result};
 
+pub(crate) mod blend;
+#[cfg(test)]
+mod blend_tests;
 pub(crate) mod boolean;
 #[cfg(test)]
 mod boolean_tests;
