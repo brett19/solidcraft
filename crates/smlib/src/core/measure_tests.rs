@@ -205,7 +205,7 @@ macro_rules! primitive {
                 bounds_match($name);
             }
             #[test]
-            #[ignore = "solidcore: no SmApiBrepMaterialCensus (bugs/material-census-unported.md)"]
+            #[ignore = "solidcore#1436: no SmApiBrepMaterialCensus"]
             fn is_one_solid() {
                 one_solid($name);
             }
@@ -218,7 +218,7 @@ macro_rules! primitive {
                 super::edges_lie_on_their_faces($name);
             }
             #[test]
-            #[ignore = "solidcore: no topology-level SmBrep::AssertValid (bugs/topology-assert-valid-unported.md)"]
+            #[ignore = "solidcore#1419: no topology-level SmBrep::AssertValid"]
             fn checks_valid() {
                 super::checks_valid($name);
             }
@@ -241,7 +241,7 @@ macro_rules! primitive {
             }
             #[cfg(feature = "native")]
             #[test]
-            #[ignore = "solidcore: no SmApiBrepMaterialCensus (bugs/material-census-unported.md)"]
+            #[ignore = "solidcore#1436: no SmApiBrepMaterialCensus"]
             fn solid_count_matches_the_cpp_kernel() {
                 solid_count_parity($name);
             }
@@ -257,7 +257,7 @@ macro_rules! primitive {
             }
             #[cfg(feature = "native")]
             #[test]
-            #[ignore = "solidcore: no topology-level SmBrep::AssertValid (bugs/topology-assert-valid-unported.md)"]
+            #[ignore = "solidcore#1419: no topology-level SmBrep::AssertValid"]
             fn check_matches_the_cpp_kernel() {
                 check_parity($name);
             }
@@ -266,15 +266,19 @@ macro_rules! primitive {
 }
 
 primitive!(box_, "box");
-primitive!(cylinder, "cylinder", area: ignore = "solidcore: face area at 1e-8 is 3.7e-8 off (bugs/face-properties-accuracy.md)");
+primitive!(cylinder, "cylinder", area: ignore = "solidcore#1435: face area at 1e-8 is 3.7e-8 off");
 primitive!(sphere, "sphere",
-    mass: ignore = "solidcore#1431: brep_volume of a sphere fails with SM_ERR at accuracy 1e-8",
-    area: ignore = "solidcore: face area at 1e-8 is 1.2e-8 off (bugs/face-properties-accuracy.md)");
-primitive!(cone, "cone", area: ignore = "solidcore: face area at 1e-8 is 4.2e-8 off (bugs/face-properties-accuracy.md)");
-primitive!(frustum, "frustum", area: ignore = "solidcore: face area at 1e-8 is 3.5e-8 off (bugs/face-properties-accuracy.md)");
+    mass: ignore = "solidcore#1435: sphere properties at 1e-8 are 3.2e-9 off",
+    area: ignore = "solidcore#1435: face area at 1e-8 is 1.2e-8 off");
+primitive!(cone, "cone",
+    mass: ignore = "solidcore#1435: cone inertia at 1e-8 is 1.7e-9 off",
+    area: ignore = "solidcore#1435: face area at 1e-8 is 4.2e-8 off");
+primitive!(frustum, "frustum",
+    mass: ignore = "solidcore#1435: frustum inertia at 1e-8 misses 1e-9",
+    area: ignore = "solidcore#1435: face area at 1e-8 is 3.5e-8 off");
 primitive!(torus, "torus",
-    mass: ignore = "solidcore: torus inertia at 1e-8 is 1.7e-9 off (bugs/face-properties-accuracy.md)",
-    area: ignore = "solidcore: face area at 1e-8 is 6.0e-9 off (bugs/face-properties-accuracy.md)");
+    mass: ignore = "solidcore#1435: torus inertia at 1e-8 is 1.7e-9 off",
+    area: ignore = "solidcore#1435: face area at 1e-8 is 6.0e-9 off");
 
 /// Until solidcore ports them, the census and the check say so instead of guessing.
 #[test]

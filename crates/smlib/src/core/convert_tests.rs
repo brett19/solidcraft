@@ -160,7 +160,7 @@ macro_rules! primitive {
 primitive!(box_, "box");
 primitive!(cylinder, "cylinder", round_trip: ignore = "solidcore#1433, #1432: no SmCylinder::IsNurbSurfaceCylinder (nor SmCircle::IsNurbCurveCircle)");
 primitive!(sphere, "sphere",
-    volume: ignore = "solidcore#1431: brep_volume of a sphere fails with SM_ERR at accuracy 1e-8",
+    volume: ignore = "solidcore: with every UpstreamFixes flag on, brep_volume of a sphere at 1e-8 is 0 (being reduced; was #1431)",
     round_trip: ignore = "solidcore#1432: no SmCircle::IsNurbCurveCircle");
 primitive!(cone, "cone", round_trip: ignore = "solidcore#1432: no SmCircle::IsNurbCurveCircle");
 primitive!(frustum, "frustum", round_trip: ignore = "solidcore#1432: no SmCircle::IsNurbCurveCircle");

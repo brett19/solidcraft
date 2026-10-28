@@ -38,10 +38,92 @@ impl Body {
     }
 }
 
-/// The fixes this backend runs with. None yet: each one is turned on with the fork commit it
-/// matches and the rig case that needs it.
+/// The fixes this backend runs with: every one of solidcore's opt-in fixes of upstream SMLib
+/// defects (`UpstreamFixes`, each naming its record and issue). They are all fixes; the C++ fork
+/// carries most of them in its own sources. A test checks none is left off, so moving the
+/// solidcore pin to a rev with a new flag fails until it is added here.
 pub(crate) fn fixes() -> UpstreamFixes {
-    UpstreamFixes::default()
+    let mut f = UpstreamFixes::default();
+    f.fillet_retry_radius_as_first = true;
+    f.fillet_rail_rim_on_face = true;
+    f.fillet_refuse_rails_leaving_faces = true;
+    f.fillet_refuse_face_consuming_blends = true;
+    f.fillet_refuse_non_manifold_result = true;
+    f.fillet_refuse_crossing_rails = true;
+    f.fillet_corner_ball_patch = true;
+    f.fillet_chamfer_cone_on_arc = true;
+    f.fillet_torus_center_on_axis = true;
+    f.offset_excess_faces_after_merge = true;
+    f.offset_clip_right_side_out = true;
+    f.revolution_offset_axis_both_sides = true;
+    f.offset_extended_edges_mated = true;
+    f.remove_slit_loops_where_solids_touch = true;
+    f.keep_operand_uv_trims = true;
+    f.geometric_g2_continuity = true;
+    f.proto_vertex_miss_is_false = true;
+    f.check_loop_vertex_tolerance = true;
+    f.check_loop_projected_seam_ends = true;
+    f.trim_boundary_seam_wrap = true;
+    f.bspline_check_min_radius = true;
+    f.oscillating_skips_failed_guesses = true;
+    f.refine_cc_range_ends = true;
+    f.flat_corners_test_bits = true;
+    f.cylinder_rebuild_mean_radius = true;
+    f.planar_path_uncapped_open_profiles = true;
+    f.revolve_analytic_profile_faces = true;
+    f.revolve_arc_centre_near_axis_is_sphere = true;
+    f.taper_pivot_nearest_corner = true;
+    f.revolve_nested_shells_as_cavities = true;
+    f.curve_sweep_caps_at_sweep_ends = true;
+    f.join_touching_loops = true;
+    f.uv_trim_reversal_on_surface = true;
+    f.offset_resolve_crossing_loops = true;
+    f.offset_collapsed_rounds_mated = true;
+    f.offset_missing_surface_fails = true;
+    f.fillet_nx1_end_rib_global_merge = true;
+    f.uv_trim_corner_end_points_only = true;
+    f.bspline_trim_preserves_uv_spans = true;
+    f.cone_parallel_line_midpoint = true;
+    f.cone_parallel_line_domains = true;
+    f.proto_edge_self_loop_on_vertex_degenerate = true;
+    f.slice_coincident_faces_sheet_side = true;
+    f.boolean_outer_shell_first = true;
+    f.edge_reversal_keeps_failed_edge = true;
+    f.topology_failed_evaluations_propagate = true;
+    f.heal_stage3_failures_propagate = true;
+    f.sweep_frame_on_planar_path_normal = true;
+    f.cover_refuses_folded_continuation = true;
+    f.boolean_vertex_by_best_crossing = true;
+    f.boolean_cleanup_removes_slits = true;
+    f.classify_edge_interval = true;
+    f.ellipse_trim_seam_lines_span_cone_height = true;
+    f.degenerate_proto_edge_in_one_vertex = true;
+    f.new_edge_vertex_tolerance_covers_gap = true;
+    f.torus_signed_gen_curve_interval = true;
+    f.sheet_sweep_joins_profile_wires = true;
+    f.point_solve_keeps_triangle_guess = true;
+    f.fillet_setback_from_start_vertex = true;
+    f.imprint_trims_edge_to_proto_vertex = true;
+    f.imprint_extends_edge_to_proto_vertex = true;
+    f.fillet_point_step_per_point = true;
+    f.analytic_copy_keeps_parameterization = true;
+    f.fillet_point_bigger_step_retry = true;
+    f.fillet_through_extended_rail_end = true;
+    f.precise_properties_body_length_scale = true;
+    f.offset_extension_from_base = true;
+    f.corner_blend_stays_inside_neighbours = true;
+    f.fillet_cleanup_keeps_target_faces = true;
+    f.fillet_nx1_tangent_side_edge = true;
+    f.offset_closed_curve_trim_arc = true;
+    f.offset_stitch_at_body_tolerance = true;
+    f.curve_contacts_at_curve_ends = true;
+    f.shell_empty_cavity_fails = true;
+    f.fillet_refuse_ball_not_fitting = true;
+    f.boolean_lists_virtual_surface_copies = true;
+    f.sphere_small_circle_not_touching = true;
+    f.ssi_tangent_contact_points = true;
+    f.ssi_trace_tangent_curves_once = true;
+    f
 }
 
 fn fresh() -> Kernel {
@@ -160,6 +242,12 @@ pub(crate) fn counts(body: &Body) -> Result<[usize; 3]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_upstream_fix_is_on() {
+        let f = format!("{:?}", fixes());
+        assert!(!f.contains(": false"), "an UpstreamFixes flag is off: {f}");
+    }
 
     #[test]
     fn a_box_measures_exactly() {
