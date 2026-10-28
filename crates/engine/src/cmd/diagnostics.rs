@@ -38,12 +38,31 @@ pub static COMMANDS: &[CommandSpec] = &[
              inside it; total counts its outermost run only. Recording also starts with SOLIDCRAFT_PROFILE=1, the CLI's \
              --profile and the app's preference; off, it costs nothing measurable. Read-only",
         ),
+    CommandSpec::new("diagnostics.kernel", "Geometry Kernel", kernel).icon("bug_report").noundo().params(
+        "choice?: routed | smlib | solidcore (sets which kernel answers: routed = each operation on the kernel the routing \
+         table gives it, smlib = the C++ SMLib kernel for all, solidcore = its Rust port for all; bodies already computed \
+         keep their results). SOLIDCRAFT_KERNEL, when set, wins over it. Returns {choice, environment, routes: [{op, \
+         route, backend}]}: route is the table's kernel for the operation, backend the one it runs on now",
+    ),
     CommandSpec::new("diagnostics.crash_test", "Crash Test", crash_test).icon("bug_report").noundo().enabled(crash_test_enabled).params(
         "mode: panic | kernel | abort. Checks that crash reports work: panic = an internal error in this command (caught; \
          the design is unchanged), kernel = one inside the geometry kernel (caught), abort = the app ends at once (reported \
          at the next start). Only when the SOLIDCRAFT_CRASH_TEST environment variable is set",
     ),
 ];
+
+fn kernel(_: &mut Session, p: &Value) -> Result<Value> {
+    use solidcraft_kernel::kernel_route as route;
+    if let Some(id) = str_(p, "choice") {
+        let c = route::Choice::from_id(id).ok_or_else(|| bad("diagnostics.kernel", "`choice` is routed, smlib or solidcore"))?;
+        route::set_choice(c);
+    }
+    let routes: Vec<Value> = route::Op::ALL
+        .iter()
+        .map(|op| json!({ "op": format!("{op:?}").to_lowercase(), "route": op.route().id(), "backend": op.backend().id() }))
+        .collect();
+    Ok(json!({ "choice": route::choice().id(), "environment": route::overridden(), "routes": routes }))
+}
 
 fn dir(cmd: &str) -> Result<std::path::PathBuf> {
     crash::default_dir().ok_or_else(|| bad(cmd, "no crash folder on this system"))
