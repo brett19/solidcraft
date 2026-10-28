@@ -175,6 +175,9 @@ impl Brep {
 
     /// The number of separate solid regions (voids not counted).
     pub fn solid_count(&self) -> Result<usize> {
+        if route::Op::Measure.backend() == route::Backend::Solidcore {
+            return crate::core::solid_count(self.core()?);
+        }
         ffi::ops::solid_count(self.cpp()?).map(|n| usize::try_from(n).unwrap_or(0)).map_err(error)
     }
 

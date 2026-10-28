@@ -176,6 +176,9 @@ impl Brep {
 
     /// Whether SMLib finds this body one closed, manifold solid.
     pub fn is_manifold_solid(&self) -> Result<bool> {
+        if crate::route::Op::Measure.backend() == crate::route::Backend::Solidcore {
+            return crate::core::is_manifold_solid(self.core()?);
+        }
         ffi::flat::is_manifold_solid(self.cpp()?).map_err(error)
     }
 }
