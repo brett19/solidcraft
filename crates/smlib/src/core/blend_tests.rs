@@ -355,8 +355,8 @@ cases!(
     fillet_one_edge,
     fillet_all_edges,
     chamfer_one_edge,
-    chamfer_two_distances: ignore = "solidcore: no per-edge second offset in SetFilletParameters (fork f653ac9)",
-    chamfer_distance_angle: ignore = "solidcore: no per-edge second offset in SetFilletParameters (fork f653ac9)",
+    chamfer_two_distances,
+    chamfer_distance_angle,
     fillet_cylinder_rim,
     setback_corner,
     fillet_variable_linear,
@@ -371,7 +371,6 @@ cases!(
 fn fork_only_blends_are_not_supported_yet() {
     let r = timed("unsupported", || {
         let b = BLOCK.core();
-        let sides = chamfer_sides(&b, &[TOP_FRONT], TOL, 2.0, ChamferSecond::Distance(3.0), [0.0, 0.0, 1.0]).err();
         let curvature = blend(&b, Blend::Curvature, &[TOP_FRONT], &[2.0], TOL, &[], &[], Corners::Filled).err();
         let corner = [[15.0, 20.0, 10.0], [30.0, 10.0, 10.0], [30.0, 20.0, 5.0]];
         let open = blend(&b, Blend::Round, &corner, &[2.0; 3], TOL, &[[30.0, 20.0, 10.0]], &[4.0], Corners::Open).err();
@@ -382,13 +381,12 @@ fn fork_only_blends_are_not_supported_yet() {
         assert_eq!(cliff, Some(Error::Unsupported));
         // A pick that fails still says so first.
         let far = chamfer_sides(&b, &[[100.0; 3]], TOL, 2.0, ChamferSecond::Distance(3.0), [0.0, 0.0, 1.0]).err();
-        (sides, curvature, open, bent, far)
+        (curvature, open, bent, far)
     });
     assert_eq!(r.0, Some(Error::Unsupported));
     assert_eq!(r.1, Some(Error::Unsupported));
     assert_eq!(r.2, Some(Error::Unsupported));
-    assert_eq!(r.3, Some(Error::Unsupported));
-    assert_eq!(r.4, Some(Error::NoMatch { point: 0 }));
+    assert_eq!(r.3, Some(Error::NoMatch { point: 0 }));
 }
 
 /// The capi's argument checks, before any kernel call.
@@ -431,4 +429,26 @@ fn the_body_stays_as_it_was() {
     });
     assert_eq!(r.0, [6, 12, 8]);
     assert!(rel(r.1, ABC) < 1e-12, "{}", r.1);
+}
+
+/// The chamfer's first distance goes on the face leaning most along `first`: 2 along the top and
+/// 3 down the front for +z, the other way round for -y. The volumes are the same; the centroid
+/// tells them apart. The removed prism's section is the triangle with legs t (back along the
+/// top, in y) and f (down the front, in z) at the edge (y = 0, z = 10), centroid
+/// (t/3, 10 - f/3), area t f / 2: the block keeps ȳ = (6000·10 - 15 t f · t/3) / (6000 - 15 t f)
+/// and z̄ = (6000·5 - 15 t f (10 - f/3)) / (6000 - 15 t f).
+#[test]
+fn the_first_distance_goes_on_the_face_along_first() {
+    for (first, top, front) in [([0.0, 0.0, 1.0], 2.0, 3.0), ([0.0, -1.0, 0.0], 3.0, 2.0)] {
+        let r = timed("sides_first", move || {
+            let b = BLOCK.core();
+            chamfer_sides(&b, &[TOP_FRONT], TOL, 2.0, ChamferSecond::Distance(3.0), first).and_then(|c| super::mass_properties(&c, 1e-8))
+        });
+        let m = r.unwrap_or_else(|e| panic!("{first:?}: {e}"));
+        let cut = 15.0 * top * front;
+        let y = (6000.0 * 10.0 - cut * top / 3.0) / (6000.0 - cut);
+        let z = (6000.0 * 5.0 - cut * (10.0 - front / 3.0)) / (6000.0 - cut);
+        assert!(rel(m.volume, 6000.0 - cut) < 1e-9, "{first:?}: volume {}", m.volume);
+        assert!((m.centroid[1] - y).abs() < 1e-7 && (m.centroid[2] - z).abs() < 1e-7, "{first:?}: centroid {:?} vs ({y}, {z})", m.centroid);
+    }
 }
