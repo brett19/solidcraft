@@ -41,12 +41,12 @@ impl Brep {
     /// failures in the report; `Err` means the check could not run.
     pub fn check(&self, level: CheckLevel) -> Result<CheckReport> {
         let mut buf = vec![0u8; 1 << 16];
-        let (len, failures) = match ffi::check::check(&self.0, level as i32, &mut buf) {
+        let (len, failures) = match ffi::check::check(self.cpp()?, level as i32, &mut buf) {
             Ok(r) => r,
             // Too long for the first buffer: once more with the length it asked for.
             Err((ffi::ERR_BUFFER, needed)) => {
                 buf = vec![0u8; needed.saturating_add(1)];
-                ffi::check::check(&self.0, level as i32, &mut buf).map_err(|(s, _)| error(s))?
+                ffi::check::check(self.cpp()?, level as i32, &mut buf).map_err(|(s, _)| error(s))?
             }
             Err((s, _)) => return Err(error(s)),
         };

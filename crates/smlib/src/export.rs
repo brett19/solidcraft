@@ -51,30 +51,39 @@ impl Brep {
     /// A cylinder about +Z: base centre, radius and height (mm, > 0).
     pub fn make_cylinder(origin: [f64; 3], radius: f64, height: f64) -> Result<Brep> {
         init()?;
-        ffi::make_cylinder(&origin, radius, height).map(Brep).map_err(error)
+        ffi::make_cylinder(&origin, radius, height).map(Brep::made).map_err(error)
     }
 
     /// A sphere: centre and radius (mm, > 0).
     pub fn make_sphere(center: [f64; 3], radius: f64) -> Result<Brep> {
         init()?;
-        ffi::make_sphere(&center, radius).map(Brep).map_err(error)
+        ffi::make_sphere(&center, radius).map(Brep::made).map_err(error)
     }
 
     /// A cone or frustum about +Z: base centre, base radius (> 0), top radius (≥ 0, not the base
     /// radius) and height (> 0), in mm.
     pub fn make_cone(origin: [f64; 3], base_radius: f64, top_radius: f64, height: f64) -> Result<Brep> {
         init()?;
-        ffi::make_cone(&origin, base_radius, top_radius, height).map(Brep).map_err(error)
+        ffi::make_cone(&origin, base_radius, top_radius, height).map(Brep::made).map_err(error)
     }
 
     /// A ring torus about +Z: centre, major radius > minor radius > 0 (mm).
     pub fn make_torus(center: [f64; 3], major_radius: f64, minor_radius: f64) -> Result<Brep> {
         init()?;
-        ffi::make_torus(&center, major_radius, minor_radius).map(Brep).map_err(error)
+        ffi::make_torus(&center, major_radius, minor_radius).map(Brep::made).map_err(error)
     }
 
-    /// The flat arrays of this body that the mapping reads ([`Brep::export`]), copied out.
+    /// The flat arrays of this body that the mapping reads, from the kernel [`route::Op::Convert`]
+    /// routes to.
     pub fn arrays(&self) -> Result<Arrays> {
+        match crate::route::Op::Convert.backend() {
+            crate::route::Backend::Smlib => self.cpp_arrays(),
+            crate::route::Backend::Solidcore => crate::core::to_arrays(self.core()?),
+        }
+    }
+
+    /// The flat arrays of the C++ kernel's body ([`Brep::export`]), copied out.
+    pub(crate) fn cpp_arrays(&self) -> Result<Arrays> {
         let f = self.export()?;
         let mut out = Arrays::default();
         for &id in I64_IDS {

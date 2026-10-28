@@ -69,13 +69,13 @@ impl Brep {
     /// result's [`Brep::history`].
     pub fn tagged(&self, operand: usize) -> Result<Brep> {
         let operand = i32::try_from(operand).map_err(|_| Error::Argument)?;
-        ffi::history::tag(&self.0, operand).map(Brep).map_err(error)
+        ffi::history::tag(self.cpp()?, operand).map(Brep::made).map_err(error)
     }
 
     /// The history of this body, made by an operation from tagged operands: each face's and
     /// edge's origins among them. Faces and edges no tag reached have none.
     pub fn history(&self) -> Result<Raw> {
-        let v = ffi::history::read(&self.0).map_err(error)?;
+        let v = ffi::history::read(self.cpp()?).map_err(error)?;
         Raw::decode(&v).ok_or(Error::Exception)
     }
 }

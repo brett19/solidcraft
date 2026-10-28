@@ -161,7 +161,7 @@ impl Brep {
     pub fn planar_faces(loops: &[Curve]) -> Result<Brep> {
         init()?;
         let l = List::of(loops)?;
-        ffi::sweeps::planar_faces(&l.raw()).map(Brep).map_err(error)
+        ffi::sweeps::planar_faces(&l.raw()).map(Brep::made).map_err(error)
     }
 
     /// The planar `profile` extruded `distance` along the unit `direction` (square to its plane).
@@ -180,7 +180,7 @@ impl Brep {
             DraftCorner::Round => ffi::sweeps::DRAFT_CORNER_ROUND,
         };
         let mut at = [f64::NAN; 3];
-        ffi::sweeps::extrude(&l.raw(), &direction, distance, draft, rule, cap, &mut at).map(Brep).map_err(|s| {
+        ffi::sweeps::extrude(&l.raw(), &direction, distance, draft, rule, cap, &mut at).map(Brep::made).map_err(|s| {
             let why = match s {
                 ffi::sweeps::ERR_CORNER_APART => Some(CornerRefusal::Apart),
                 ffi::sweeps::ERR_WALL_CLOSES => Some(CornerRefusal::WallCloses),
@@ -199,7 +199,7 @@ impl Brep {
     pub fn revolve(profile: &[Curve], origin: [f64; 3], direction: [f64; 3], angle: f64, cap: bool) -> Result<Brep> {
         init()?;
         let l = List::of(profile)?;
-        ffi::sweeps::revolve(&l.raw(), &origin, &direction, angle, cap).map(Brep).map_err(error)
+        ffi::sweeps::revolve(&l.raw(), &origin, &direction, angle, cap).map(Brep::made).map_err(error)
     }
 
     /// `profile` swept along `path` (end-to-end curves), carried with the path's start: the
@@ -212,7 +212,7 @@ impl Brep {
             SweepFrame::Follow => ffi::sweeps::SWEEP_FOLLOW,
             SweepFrame::Translate => ffi::sweeps::SWEEP_TRANSLATE,
         };
-        ffi::sweeps::sweep(&l.raw(), &p.raw(), frame, cap).map(Brep).map_err(error)
+        ffi::sweeps::sweep(&l.raw(), &p.raw(), frame, cap).map(Brep::made).map_err(error)
     }
 
     /// [`Brep::sweep`], with where the sweep placed the profile: the rigid motions carrying the
@@ -228,7 +228,7 @@ impl Brep {
             SweepFrame::Translate => ffi::sweeps::SWEEP_TRANSLATE,
         };
         let mut placed = [0.0; 36];
-        let brep = ffi::sweeps::sweep_placed(&l.raw(), &p.raw(), frame, cap, &mut placed).map(Brep).map_err(error)?;
+        let brep = ffi::sweeps::sweep_placed(&l.raw(), &p.raw(), frame, cap, &mut placed).map(Brep::made).map_err(error)?;
         let motion = |i: usize| {
             let at = |k: usize| placed.get(12 * i + k).copied().unwrap_or(0.0);
             Affine { m: [[at(0), at(1), at(2)], [at(3), at(4), at(5)], [at(6), at(7), at(8)]], t: [at(9), at(10), at(11)] }
@@ -251,7 +251,7 @@ impl Brep {
     ) -> Result<Vec<(Curve, [f64; 2])>> {
         init()?;
         let l = List::of(curves)?;
-        let out = ffi::sweeps::project_curves(&self.0, &face_point, pick_tolerance, &l.raw(), &direction, tolerance).map_err(picked)?;
+        let out = ffi::sweeps::project_curves(self.cpp()?, &face_point, pick_tolerance, &l.raw(), &direction, tolerance).map_err(picked)?;
         nurbs_list(&out)
     }
 
@@ -266,7 +266,7 @@ impl Brep {
         tolerance: f64,
     ) -> Result<Vec<(Curve, [f64; 2])>> {
         init()?;
-        let out = ffi::sweeps::face_section(&self.0, &face_point, pick_tolerance, &plane_point, &plane_normal, tolerance).map_err(picked)?;
+        let out = ffi::sweeps::face_section(self.cpp()?, &face_point, pick_tolerance, &plane_point, &plane_normal, tolerance).map_err(picked)?;
         nurbs_list(&out)
     }
 
@@ -280,7 +280,7 @@ impl Brep {
         let l = List::of(sections.iter().flatten())?;
         let sizes: Vec<i64> = sections.iter().map(|s| i64::try_from(s.len()).map_err(|_| Error::Argument)).collect::<Result<_>>()?;
         let degree = i32::try_from(degree).map_err(|_| Error::Argument)?;
-        ffi::sweeps::loft(&l.raw(), &sizes, degree, cap).map(Brep).map_err(error)
+        ffi::sweeps::loft(&l.raw(), &sizes, degree, cap).map(Brep::made).map_err(error)
     }
 
     /// The planar `profile` placed by each of `stations` in turn (2…[`MAX_STATIONS`], each
@@ -298,7 +298,7 @@ impl Brep {
             Ends::Capped => ffi::sweeps::ENDS_CAPPED,
             Ends::Joined => ffi::sweeps::ENDS_JOINED,
         };
-        ffi::sweeps::sweep_stations(&l.raw(), &maps, ends).map(Brep).map_err(error)
+        ffi::sweeps::sweep_stations(&l.raw(), &maps, ends).map(Brep::made).map_err(error)
     }
 
     /// A loft from the planar `section` (one closed loop of lines, in order) to the point `apex`
@@ -306,7 +306,7 @@ impl Brep {
     pub fn loft_to_point(section: &[Curve], apex: [f64; 3]) -> Result<Brep> {
         init()?;
         let l = List::of(section)?;
-        ffi::sweeps::loft_to_point(&l.raw(), &apex).map(Brep).map_err(error)
+        ffi::sweeps::loft_to_point(&l.raw(), &apex).map(Brep::made).map_err(error)
     }
 
     /// `profile` carried by a screw motion about the axis through `origin` along `direction`:
@@ -315,7 +315,7 @@ impl Brep {
     pub fn screw_sweep(profile: &[Curve], origin: [f64; 3], direction: [f64; 3], pitch: f64, turns: f64, tolerance: f64) -> Result<Brep> {
         init()?;
         let l = List::of(profile)?;
-        ffi::sweeps::screw_sweep(&l.raw(), &origin, &direction, pitch, turns, tolerance).map(Brep).map_err(error)
+        ffi::sweeps::screw_sweep(&l.raw(), &origin, &direction, pitch, turns, tolerance).map(Brep::made).map_err(error)
     }
 
     /// [`screw_sweep`](Self::screw_sweep) with the profile moved off the axis as it turns: at turn
@@ -336,7 +336,7 @@ impl Brep {
         init()?;
         let l = List::of(profile)?;
         let flat: Vec<f64> = law.iter().flat_map(|(t, o)| [*t, *o]).collect();
-        ffi::sweeps::screw_sweep_radial(&l.raw(), &origin, &direction, pitch, turns, &flat, tolerance).map(Brep).map_err(error)
+        ffi::sweeps::screw_sweep_radial(&l.raw(), &origin, &direction, pitch, turns, &flat, tolerance).map(Brep::made).map_err(error)
     }
 }
 

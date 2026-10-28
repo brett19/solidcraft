@@ -37,7 +37,7 @@ impl Brep {
     /// touching along edges or at points, measure too. A body with no material (a sheet, an open
     /// shell) has volume 0 and no inertia, its faces' area and the centroid of that area.
     pub fn mass_properties(&self, relative_accuracy: f64) -> Result<MassProperties> {
-        let m = ffi::measure::mass_properties(&self.0, relative_accuracy).map_err(error)?;
+        let m = ffi::measure::mass_properties(self.cpp()?, relative_accuracy).map_err(error)?;
         let [area, volume, cx, cy, cz, ixx, iyy, izz, iyz, izx, ixy] = m;
         Ok(MassProperties { area, volume, centroid: [cx, cy, cz], moments: [ixx, iyy, izz], products: [iyz, izx, ixy] })
     }
@@ -45,7 +45,7 @@ impl Brep {
     /// The exact axis-aligned box, least corner then greatest: the extrema of every vertex, edge
     /// and face on its exact curve or surface, not grown by tolerances or control hulls.
     pub fn bounds(&self) -> Result<([f64; 3], [f64; 3])> {
-        ffi::measure::bounds(&self.0).map_err(error)
+        ffi::measure::bounds(self.cpp()?).map_err(error)
     }
 
     /// How far edge `edge` (its curve over its interval) lies from the surface of face `face`,
@@ -56,12 +56,12 @@ impl Brep {
     /// (half the flat arrays' `EDGE_TOLERANCE`) covers this.
     pub fn edge_face_distance(&self, edge: usize, face: usize) -> Result<f64> {
         let (Ok(e), Ok(f)) = (i64::try_from(edge), i64::try_from(face)) else { return Err(error(ffi::ERR_ARG)) };
-        ffi::measure::edge_face_distance(&self.0, e, f).map_err(error)
+        ffi::measure::edge_face_distance(self.cpp()?, e, f).map_err(error)
     }
 
     /// Total area of every face, each counted once, so sheets and open shells too.
     pub fn area(&self, relative_accuracy: f64) -> Result<f64> {
-        ffi::measure::area(&self.0, relative_accuracy).map_err(error)
+        ffi::measure::area(self.cpp()?, relative_accuracy).map_err(error)
     }
 }
 

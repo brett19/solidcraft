@@ -11,13 +11,13 @@ impl Brep {
     /// with whether the result is a closed solid.
     pub fn stitch(&self, tolerance: f64) -> Result<(Brep, bool)> {
         init()?;
-        ffi::sheets::stitch(&self.0, tolerance).map(|(h, closed)| (Brep(h), closed)).map_err(error)
+        ffi::sheets::stitch(self.cpp()?, tolerance).map(|(h, closed)| (Brep::made(h), closed)).map_err(error)
     }
 
     /// This sheet with every face moved onto its surface's offset by `distance` along its normal
     /// (negative: against it). A closed solid is [`crate::Error::Argument`].
     pub fn offset_sheet(&self, distance: f64) -> Result<Brep> {
         init()?;
-        ffi::sheets::offset_sheet(&self.0, distance).map(Brep).map_err(error)
+        ffi::sheets::offset_sheet(self.cpp()?, distance).map(Brep::made).map_err(error)
     }
 }

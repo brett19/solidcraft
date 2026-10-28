@@ -17,8 +17,8 @@ impl Brep {
         }
         let faces: Vec<i64> = faces.iter().map(|f| i64::try_from(*f).map_err(|_| Error::Argument)).collect::<Result<_>>()?;
         let handles: Vec<&ffi::ssi::SurfaceHandle> = tools.iter().map(|t| t.handle()).collect();
-        match ffi::split::split_faces(&self.0, &faces, &handles) {
-            Ok((h, made)) => Ok(Some((Brep(h), made.into_iter().map(|m| usize::try_from(m).unwrap_or(0)).collect()))),
+        match ffi::split::split_faces(self.cpp()?, &faces, &handles) {
+            Ok((h, made)) => Ok(Some((Brep::made(h), made.into_iter().map(|m| usize::try_from(m).unwrap_or(0)).collect()))),
             Err(ffi::ops::ERR_NO_CUT) => Ok(None),
             Err(s) => Err(error(s)),
         }
@@ -31,8 +31,8 @@ impl Brep {
     /// when a side is left empty.
     pub fn split_body(&self, tool: &Surface) -> Result<Option<(Brep, Brep)>> {
         init()?;
-        match ffi::split::split_body(&self.0, tool.handle()) {
-            Ok((b, f)) => Ok(Some((Brep(b), Brep(f)))),
+        match ffi::split::split_body(self.cpp()?, tool.handle()) {
+            Ok((b, f)) => Ok(Some((Brep::made(b), Brep::made(f)))),
             Err(ffi::ops::ERR_NO_CUT) => Ok(None),
             Err(s) => Err(error(s)),
         }

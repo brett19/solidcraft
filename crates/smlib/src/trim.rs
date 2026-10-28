@@ -34,7 +34,7 @@ impl Brep {
             Holes::All => None,
             Holes::At(at) => Some(at),
         };
-        ffi::trim::untrim_face(&self.0, &point, tolerance, holes, outer, in_place).map(Brep).map_err(|s| match s {
+        ffi::trim::untrim_face(self.cpp()?, &point, tolerance, holes, outer, in_place).map(Brep::made).map_err(|s| match s {
             ffi::ops::ERR_PICK_NONE => crate::Error::NoMatch { point: 0 },
             s => error(s),
         })
@@ -51,7 +51,7 @@ impl Brep {
             Continuation::Tangent => ffi::trim::EXTEND_TANGENT,
             Continuation::Curvature => ffi::trim::EXTEND_CURVATURE,
         };
-        ffi::trim::extend_sheet(&self.0, &point, tolerance, distance, mode).map(Brep).map_err(|s| match s {
+        ffi::trim::extend_sheet(self.cpp()?, &point, tolerance, distance, mode).map(Brep::made).map_err(|s| match s {
             ffi::ops::ERR_PICK_NONE => crate::Error::NoMatch { point: 0 },
             s => error(s),
         })
@@ -62,6 +62,6 @@ impl Brep {
     pub fn face_points(&self) -> Result<Vec<[f64; 3]>> {
         init()?;
         let [faces, _, _] = self.counts()?;
-        ffi::trim::face_points(&self.0, faces).map_err(error)
+        ffi::trim::face_points(self.cpp()?, faces).map_err(error)
     }
 }

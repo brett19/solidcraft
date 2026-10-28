@@ -12,10 +12,11 @@
 
 use std::ffi::CString;
 use std::path::Path;
-use std::sync::Once;
 use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::{Once, OnceLock};
 
 mod check;
+mod core;
 pub mod export;
 mod ffi;
 pub mod flat;
@@ -24,6 +25,7 @@ pub mod import;
 mod measure;
 mod ops;
 pub mod pcurves;
+pub mod route;
 mod sheets;
 mod split;
 pub mod ssi;
@@ -77,6 +79,10 @@ pub enum Error {
     NotBuilt,
     /// A B-rep record SMLib cannot take (see [`import::Unsupported`]).
     Record(import::Unsupported),
+    /// solidcore reported an error (the call, then its message).
+    Solidcore(String),
+    /// solidcore panicked; the guard caught it (the call, then the panic's message).
+    Internal(String),
 }
 
 impl std::fmt::Display for Error {
@@ -113,6 +119,8 @@ impl std::fmt::Display for Error {
             Error::Version(v) => write!(f, "SMLib C API version {v}, expected {}", ffi::ABI_VERSION),
             Error::NotBuilt => write!(f, "not supported yet: this build has no SMLib"),
             Error::Record(u) => write!(f, "{u}"),
+            Error::Solidcore(e) => write!(f, "solidcore: {e}"),
+            Error::Internal(e) => write!(f, "solidcore failed internally in {e}"),
         }
     }
 }
@@ -213,8 +221,13 @@ pub fn current_call() -> Option<String> {
     (!s.is_empty()).then_some(s)
 }
 
-/// An SMLib B-rep. Immutable: operations return new bodies.
-pub struct Brep(ffi::Handle);
+/// A B-rep in either kernel ([`route`]). Immutable: operations return new bodies. A body made
+/// by one kernel is converted for the other the first time an operation routed there needs it,
+/// through the flat arrays both understand, and keeps both.
+pub struct Brep {
+    cpp: OnceLock<Result<ffi::Handle>>,
+    core: OnceLock<Result<core::Body>>,
+}
 
 impl std::fmt::Debug for Brep {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -223,26 +236,58 @@ impl std::fmt::Debug for Brep {
 }
 
 impl Brep {
+    /// A body the C++ kernel made.
+    fn made(h: ffi::Handle) -> Brep {
+        Brep { cpp: OnceLock::from(Ok(h)), core: OnceLock::new() }
+    }
+
+    /// A body solidcore made.
+    fn made_core(b: core::Body) -> Brep {
+        Brep { cpp: OnceLock::new(), core: OnceLock::from(Ok(b)) }
+    }
+
+    /// The C++ kernel's body: converted from solidcore's the first time it is asked for.
+    fn cpp(&self) -> Result<&ffi::Handle> {
+        let made = self.cpp.get_or_init(|| {
+            let core = self.core.get().ok_or(Error::Empty)?.as_ref().map_err(Clone::clone)?;
+            let a = core::to_arrays(core)?;
+            flat::Flat::from_arrays(&a)?.import()?.cpp.into_inner().unwrap_or(Err(Error::Empty))
+        });
+        made.as_ref().map_err(Clone::clone)
+    }
+
+    /// solidcore's body: converted from the C++ kernel's the first time it is asked for.
+    fn core(&self) -> Result<&core::Body> {
+        let made = self.core.get_or_init(|| {
+            self.cpp.get().ok_or(Error::Empty)?.as_ref().map_err(Clone::clone)?;
+            core::from_arrays(&self.cpp_arrays()?)
+        });
+        made.as_ref().map_err(Clone::clone)
+    }
+
     /// An axis-aligned box from its lower corner, with positive edge lengths (mm).
     pub fn make_box(origin: [f64; 3], size: [f64; 3]) -> Result<Brep> {
+        if route::Op::Primitive.backend() == route::Backend::Solidcore {
+            return core::make_box(origin, size).map(Brep::made_core);
+        }
         init()?;
-        ffi::make_box(&origin, &size).map(Brep).map_err(error)
+        ffi::make_box(&origin, &size).map(Brep::made).map_err(error)
     }
 
     /// Reads a native SMLib `.smb` file.
     pub fn read(path: &Path, ascii: bool) -> Result<Brep> {
         init()?;
-        ffi::read(&c_path(path)?, ascii).map(Brep).map_err(error)
+        ffi::read(&c_path(path)?, ascii).map(Brep::made).map_err(error)
     }
 
     /// Writes this body to a native SMLib `.smb` file.
     pub fn write(&self, path: &Path, ascii: bool) -> Result<()> {
-        check(ffi::write(&self.0, &c_path(path)?, ascii))
+        check(ffi::write(self.cpp()?, &c_path(path)?, ascii))
     }
 
     /// A deep copy.
     pub fn try_clone(&self) -> Result<Brep> {
-        ffi::copy(&self.0).map(Brep).map_err(error)
+        ffi::copy(self.cpp()?).map(Brep::made).map_err(error)
     }
 
     /// This body moved by the affine `matrix` (column-major: columns 0–2 the images of x, y and
@@ -250,17 +295,23 @@ impl Brep {
     /// mirror it, a non-uniform scale or a shear turns its geometry into NURBS, tolerances scale
     /// with it.
     pub fn transformed(&self, matrix: &[[f64; 4]; 4]) -> Result<Brep> {
-        ffi::transform(&self.0, matrix).map(Brep).map_err(error)
+        ffi::transform(self.cpp()?, matrix).map(Brep::made).map_err(error)
     }
 
     /// The enclosed volume (mm³) at `relative_accuracy` (SMLib clamps it to [1e-8, 1e-1]).
     pub fn volume(&self, relative_accuracy: f64) -> Result<f64> {
-        ffi::volume(&self.0, relative_accuracy).map_err(error)
+        if route::Op::Measure.backend() == route::Backend::Solidcore {
+            return core::volume(self.core()?, relative_accuracy);
+        }
+        ffi::volume(self.cpp()?, relative_accuracy).map_err(error)
     }
 
     /// Face, edge and vertex counts.
     pub fn counts(&self) -> Result<[usize; 3]> {
-        let c = ffi::counts(&self.0).map_err(error)?;
+        if route::Op::Measure.backend() == route::Backend::Solidcore {
+            return core::counts(self.core()?);
+        }
+        let c = ffi::counts(self.cpp()?).map_err(error)?;
         Ok(c.map(|n| usize::try_from(n).unwrap_or(0)))
     }
 }
