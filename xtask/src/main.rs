@@ -47,12 +47,16 @@ commands:
                   replay the reference tests (tests/oracle/*/recipe.json), compare with each
                   case's expected.json and write docs/oracle.md (--cli: a solidcraft-cli
                   already built, instead of cargo run --release)
-  kernel-cases [--area AREA] [--cli BIN] [--timeout S] [--jobs N] [--out DIR]
+  kernel-cases [--area AREA] [--cli BIN] [--timeout S] [--jobs N] [--out DIR] [--kernel K]
                   the kernel regression rig: run every case in tests/kernel-cases/<area>/<id>/ on
                   SMLib (one process each, killed after --timeout, default 180 s), grade it against
                   the case's own answer and write docs/kernel-cases.md; DIR (default
                   target/kernel-cases) gets results.json and dumps/<area>-<case>/, the inputs of
-                  each failing SMLib call (--cli: a solidcraft-cli built with --features smlib)
+                  each failing SMLib call (--cli: a solidcraft-cli built with --features smlib);
+                  --kernel smlib|solidcore|both (default smlib) sets SOLIDCRAFT_KERNEL per case:
+                  solidcore keeps results.json, dumps/ and report.md in DIR/solidcore/ (not
+                  docs/kernel-cases.md); both runs each case on each, and also writes the side by
+                  side to docs/kernel-cases-backends.md and DIR/backends.json
                   --ladder [--record REASON]: the complexity ladder instead
                   (tests/kernel-cases/ladder/ladder.json, tiers in order), graded and compared
                   with its timing golden (one case at a time unless --jobs), into
