@@ -6,7 +6,7 @@
 //! edge (face) nearest to it, which must lie within `tolerance` of it and be nearer than any other
 //! by more than the body's modelling tolerance ([`Error::NoMatch`], [`Error::Ambiguous`]).
 
-use crate::{Brep, Error, Result, error, ffi, init};
+use crate::{Brep, Error, Result, error, ffi, init, route};
 
 /// How [`Brep::boolean`] combines two bodies.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -159,6 +159,9 @@ impl Brep {
 
     /// The number of separate solid regions (voids not counted).
     pub fn solid_count(&self) -> Result<usize> {
+        if route::Op::Measure.backend() == route::Backend::Solidcore {
+            return crate::core::solid_count(self.core()?);
+        }
         ffi::ops::solid_count(self.cpp()?).map(|n| usize::try_from(n).unwrap_or(0)).map_err(error)
     }
 
