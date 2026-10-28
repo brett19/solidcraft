@@ -14,12 +14,12 @@
 //! What the capi asks of fork-only SMLib code that solidcore does not have is
 //! [`Error::Unsupported`], refused where the capi would first reach it, so every error before
 //! it is the C++ path's:
-//! - a curvature-continuous blend (`SetBlendCurveAtThirds`, fork fd3b6a7);
-//! - a corner left open (`SetMarkCornerPatches`, fork 60af574);
-//! - a variable radius whose law has a corner (`SplitFilletFacesAtRadiusCorners`, fork 6eecf04).
+//! - a curvature-continuous blend (`SetBlendCurveAtThirds`, fork fd3b6a7; solidcore#1438);
+//! - a corner left open (`SetMarkCornerPatches`, fork 60af574; solidcore#1439);
+//! - a variable radius whose law has a corner (`SplitFilletFacesAtRadiusCorners`, fork 6eecf04; solidcore#430, PR #1403).
 //!
 //! - a blend whose rail leaves its face, which the fork may build over the cliff
-//!   (`SmFilletCliffOverflow.cpp`, fork 8ba4667) and solidcore always refuses ([`blend_failure`]).
+//!   (`SmFilletCliffOverflow.cpp`, fork 8ba4667; solidcore#960) and solidcore always refuses ([`blend_failure`]).
 //!
 //! solidcore's own refusals of code it has not ported (`SolidError::Unported`) are
 //! [`Error::Unsupported`] too.
