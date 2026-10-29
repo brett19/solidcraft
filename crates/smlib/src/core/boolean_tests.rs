@@ -367,7 +367,7 @@ mod history {
     }
 
     #[test]
-    #[ignore = "solidcore has no way to carry attributes through a boolean: scratchpad/bugs/boolean-operand-attributes-lost.md"]
+    #[ignore = "solidcore has no way to carry attributes through a boolean: tangency-labs/solidcore#1462"]
     fn tags_cross_a_solidcore_boolean() {
         let (a, b) = (tagged_box([0.0; 3], 0), tagged_box([5.0; 3], 1));
         let r = super::boolean(a.core().unwrap(), b.core().unwrap(), BooleanOp::Union).unwrap().unwrap();
