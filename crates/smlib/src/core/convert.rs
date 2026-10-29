@@ -735,7 +735,7 @@ fn shells_in_order(b: &Brep) -> Result<Vec<ShellId>> {
 
 /// The topology identity [`BrepData::from_brep`] and [`make_topology_from_data`] name entities
 /// by (upstream: their addresses): the type code and the entity's index.
-fn key_of(e: EntityRef) -> ObjectRef {
+pub(crate) fn key_of(e: EntityRef) -> ObjectRef {
     let (type_code, kind, i) = match e {
         EntityRef::Brep(x) => (16011, 0u64, x.index()),
         EntityRef::Region(x) => (16012, 1, x.index()),

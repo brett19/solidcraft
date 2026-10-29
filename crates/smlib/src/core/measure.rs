@@ -3,16 +3,19 @@
 //! (`smlib_flat_api.cpp`) and `smlib_brep_check` (`smlib_check.cpp`) do on the C++ kernel, here
 //! composed from solidcore's ports of the same SMLib routines.
 //!
-//! One has no solidcore port yet and fails with "not supported yet": the topology-level
-//! `SmBrep::AssertValid` ([`check`]).
+//! [`check`] fails with "not supported yet" while a test it reaches is unported in solidcore.
 
+use solidcore::error::EntityRef;
+use solidcore::geom::assert_array::{AssertArray, AssertReport, obj_type_string};
 use solidcore::geom::attribute::{AttributeStore, ObjectKey};
 use solidcore::geom::tol::{SmallTopoType, context_xsect_tol_3d};
 use solidcore::heal::gap::GapFunction;
 use solidcore::mass::integrator::properties::{MassPropertyBehavior, PropertyAttributes, brep_properties, face_properties};
 use solidcore::nurbs::b_spline_surface_n_lib::p2::OrientType;
 use solidcore::query::api_queries::{brep_bounding_box, brep_is_manifold_solid, brep_material_census, face_bounding_box};
+use solidcore::topology::NamingScheme;
 use solidcore::topology::brep::p1 as bl;
+use solidcore::topology::brep::validation::{CheckLevel as SolidcoreCheckLevel, check_brep, check_brep_with_keys};
 use solidcore::topology::face::p2::{PPF_AREA, PPF_AREA_FIRST_MOMENTS};
 use solidcore::{Kernel, Point3, SolidError, Vec3};
 
@@ -181,10 +184,132 @@ pub(crate) fn solid_count(body: &Body) -> Result<usize> {
     with_body("solid_count", body, |_, b| brep_material_census(b).map(|(solids, _voids)| solids))
 }
 
-/// `smlib_brep_check` runs `SmBrep::ValidatePointers`, then `SmBrep::AssertValid` over the whole
-/// topology graph. solidcore ports the first but not the second (nor the brep, face, loop, edge
-/// and vertex `AssertValid` it walks), so the check cannot run.
+/// SMLib's `SM_SUCCESS`, the status `SmBrep::ValidatePointers` returns when it finds nothing.
+const SM_SUCCESS: i32 = 1000;
+
+/// The capi's `text()`: an empty string reads as `?`.
+fn text(s: &str) -> &str {
+    if s.is_empty() { "?" } else { s }
+}
+
+/// The capi's `line()`: `<reporting type>::Test #<n> <name>: <message> [owner <type>]`, the owner
+/// tag only when the report names the owner's type.
+fn report_line(r: &AssertReport) -> String {
+    let msg = r.format_log_message();
+    let mut s = format!("{}::Test #{} {}: {}", text(obj_type_string(r.reporting_type)), r.test_index, text(r.name), text(&msg));
+    if let Some(owner) = r.owner_type_string.filter(|o| !o.is_empty()) {
+        s.push_str(" [owner ");
+        s.push_str(owner);
+        s.push(']');
+    }
+    s
+}
+
+/// The capi's `collect()`: appends the failed reports of `list`, one line each, and counts them.
+fn collect(list: &AssertArray, out: &mut String, failures: &mut usize) {
+    for r in list.reports().iter().filter(|r| !r.ok) {
+        *failures += 1;
+        out.push_str(&report_line(r));
+        out.push('\n');
+    }
+}
+
+/// Whose identities name `b`'s geometry owners, as the check must be told them.
+enum Keys {
+    /// The B-rep's own naming scheme ([`NamingScheme::Notify`] or [`NamingScheme::Arena`]):
+    /// [`check_brep`] knows it.
+    Scheme,
+    /// A body SolidCraft made from arrays: [`NamingScheme::Caller`] under
+    /// [`super::convert::key_of`].
+    Convert,
+}
+
+/// The identities `b`'s geometry owners are named by, or `None` when the check cannot know them.
+/// A body under [`NamingScheme::Caller`] or [`NamingScheme::Unknown`] is named by its maker's
+/// own keys, and `check_brep` falls back to the arena identities, which no maker uses: every
+/// edge would fail `SmBrep` test 61 on the owner of its curve. The bodies SolidCraft imports
+/// from arrays are the one such kind whose keys are known here: every edge curve is owned by
+/// [`super::convert::key_of`] of its edge.
+fn keys(b: &solidcore::Brep) -> solidcore::Result<Option<Keys>> {
+    Ok(match b.naming() {
+        NamingScheme::Notify | NamingScheme::Arena => Some(Keys::Scheme),
+        NamingScheme::Caller => {
+            let mut convert = true;
+            for &e in b.edge_list().iter() {
+                if let Some(c) = b.edge(e)?.curve.as_ref() {
+                    convert &= c.owner() == Some(super::convert::key_of(EntityRef::Edge(e)));
+                }
+            }
+            convert.then_some(Keys::Convert)
+        }
+        NamingScheme::Unknown => None,
+    })
+}
+
+/// Why [`check`] could not run.
+enum Refusal {
+    /// A test solidcore has not ported (its [`SolidError::Unported`]).
+    Unported(&'static str, &'static str),
+    /// A body whose geometry owners' identities the check cannot know ([`keys`]).
+    Naming(NamingScheme),
+}
+
+/// `smlib_brep_check` (`smlib_check.cpp`): `SmBrep::ValidatePointers` at `level`, then, when it
+/// failed nothing, `SmBrep::AssertValid` at `level` over the whole topology graph, with every
+/// failed test as one line of the report and the capi's own lines for a failed status without a
+/// report. solidcore's [`check_brep`] runs the same two calls.
+///
+/// A test solidcore has not ported yet (its [`SolidError::Unported`]), or a body whose geometry
+/// owners' identities the check cannot know ([`keys`]), fails the check with "not supported yet":
+/// the check never reports a body valid on fewer tests than the C++ kernel runs.
 pub(crate) fn check(body: &Body, level: CheckLevel) -> Result<CheckReport> {
-    let _ = (body, level);
-    Err(Error::Solidcore("SmBrep::AssertValid: not supported yet: solidcore has no topology-level AssertValid".into()))
+    let lv = match level {
+        CheckLevel::Basic => SolidcoreCheckLevel::Level0,
+        CheckLevel::Geometry => SolidcoreCheckLevel::Level1,
+        CheckLevel::All => SolidcoreCheckLevel::Level2,
+    };
+    let c = match with_body("check", body, |k, b| {
+        let r = match keys(b)? {
+            Some(Keys::Scheme) => check_brep(k, b, lv),
+            Some(Keys::Convert) => check_brep_with_keys(k, b, lv, &super::convert::key_of),
+            None => return Ok(Err(Refusal::Naming(b.naming()))),
+        };
+        match r {
+            Err(SolidError::Unported { upstream, unit }) => Ok(Err(Refusal::Unported(upstream, unit))),
+            r => r.map(Ok),
+        }
+    })? {
+        Ok(c) => c,
+        Err(Refusal::Unported(upstream, unit)) => {
+            return Err(Error::Solidcore(format!("smlib_brep_check: {upstream}: not supported yet: solidcore has not ported it (unit {unit})")));
+        }
+        Err(Refusal::Naming(n)) => {
+            return Err(Error::Solidcore(format!(
+                "smlib_brep_check: not supported yet: the body names its geometry owners by its maker's keys (NamingScheme::{n:?}), which the check cannot know"
+            )));
+        }
+    };
+    let mut text = String::new();
+    let mut failures = 0usize;
+    collect(&c.pointer_reports, &mut text, &mut failures);
+    if c.pointers_status != SM_SUCCESS && failures == 0 {
+        failures += 1;
+        text.push_str(&format!("SmBrep::ValidatePointers failed with status {}\n", c.pointers_status));
+    }
+    if failures > 0 {
+        // The capi does not run AssertValid after a failed pointer check. check_brep runs it when
+        // the status failed without a report; that result is dropped here, as the capi never
+        // computes it.
+        text.push_str("AssertValid skipped: ValidatePointers failed\n");
+    } else {
+        let Some(ok) = c.assert_valid else {
+            return Err(Error::Solidcore("smlib_brep_check: AssertValid did not run after a clean pointer check".into()));
+        };
+        collect(&c.reports, &mut text, &mut failures);
+        if !ok && failures == 0 {
+            failures += 1;
+            text.push_str("SmBrep::AssertValid failed without a report\n");
+        }
+    }
+    Ok(CheckReport { failures, text })
 }

@@ -221,7 +221,6 @@ macro_rules! primitive {
                 super::edges_lie_on_their_faces($name);
             }
             #[test]
-            #[ignore = "solidcore#1419: no topology-level SmBrep::AssertValid"]
             fn checks_valid() {
                 super::checks_valid($name);
             }
@@ -259,7 +258,6 @@ macro_rules! primitive {
             }
             #[cfg(feature = "native")]
             #[test]
-            #[ignore = "solidcore#1419: no topology-level SmBrep::AssertValid"]
             fn check_matches_the_cpp_kernel() {
                 check_parity($name);
             }
@@ -274,12 +272,45 @@ primitive!(cone, "cone");
 primitive!(frustum, "frustum");
 primitive!(torus, "torus");
 
-/// Until solidcore ports it (solidcore#1419), the check says so instead of guessing.
+/// The head of each report line, `<reporting type>::Test #<n>`, or the whole line for the capi's
+/// own lines (a failed status without a report, a skipped AssertValid).
+fn tests_of(text: &str) -> Vec<&str> {
+    text.lines().map(|l| l.find(" #").and_then(|i| l[i + 2..].find(' ').map(|j| &l[..i + 2 + j])).unwrap_or(l)).collect()
+}
+
+/// A valid box passes every test at level 2 (SolidCraft's level), with an empty report, on
+/// solidcore and on the C++ kernel.
 #[test]
-fn unported_calls_say_not_supported_yet() {
+fn a_valid_box_passes_level_2() {
     let (b, _) = case("box");
-    let e = check(&b, CheckLevel::Basic).unwrap_err();
-    assert!(e.to_string().contains("not supported yet"), "{e}");
+    let r = check(&b, CheckLevel::All).unwrap();
+    assert_eq!((r.failures, r.text.as_str()), (0, ""), "{r}");
+    #[cfg(feature = "native")]
+    {
+        let r = cpp("box").check(CheckLevel::All).unwrap();
+        assert_eq!((r.failures, r.text.as_str()), (0, ""), "{r}");
+    }
+}
+
+/// A box with one corner moved 1 mm off its edges, through the arrays: the check finds it broken,
+/// and the C++ kernel fails the same tests on the same arrays.
+#[test]
+fn a_vertex_off_its_edges_fails_the_check() {
+    use crate::flat::VERTEX_POSITION;
+    let (b, _) = case("box");
+    let mut a = super::to_arrays(&b).unwrap();
+    a.reals.get_mut(&VERTEX_POSITION).unwrap()[0] += 1.0;
+    let broken = super::from_arrays(&a).unwrap();
+    let r = check(&broken, CheckLevel::All).unwrap();
+    assert!(!r.is_valid(), "{r}");
+    assert_eq!(r.failures, r.text.lines().filter(|l| l.contains("::Test #")).count(), "{r}");
+    #[cfg(feature = "native")]
+    {
+        let cpp = crate::flat::Flat::from_arrays(&a).unwrap().import().unwrap();
+        let c = cpp.check(CheckLevel::All).unwrap();
+        assert_eq!(tests_of(&r.text), tests_of(&c.text), "solidcore:\n{}\nC++:\n{}", r.text, c.text);
+        assert_eq!(r, c);
+    }
 }
 
 #[test]
