@@ -158,13 +158,14 @@ macro_rules! primitive {
 }
 
 primitive!(box_, "box");
-primitive!(cylinder, "cylinder", round_trip: ignore = "solidcore#1433, #1432: no SmCylinder::IsNurbSurfaceCylinder (nor SmCircle::IsNurbCurveCircle)");
+primitive!(cylinder, "cylinder");
 primitive!(sphere, "sphere",
     volume: ignore = "solidcore#1437: trim_boundary_seam_wrap zeroes a sphere's volume",
-    round_trip: ignore = "solidcore#1432: no SmCircle::IsNurbCurveCircle");
-primitive!(cone, "cone", round_trip: ignore = "solidcore#1432: no SmCircle::IsNurbCurveCircle");
-primitive!(frustum, "frustum", round_trip: ignore = "solidcore#1432: no SmCircle::IsNurbCurveCircle");
-primitive!(torus, "torus", round_trip: ignore = "solidcore#1433, #1432: no SmTorus::IsNurbSurfaceTorus (nor SmCircle::IsNurbCurveCircle)");
+    round_trip: ignore = "solidcore#1437: the record comes back the same, but trim_boundary_seam_wrap zeroes its volume");
+primitive!(cone, "cone",
+    round_trip: ignore = "solidcore#1435: the record comes back the same, but its volume at 1e-8 is 1.4e-9 off (the C++ kernel 1.1e-11 on the same arrays); the side face's precise properties do not split at the surface's knots, fork 08d9a14 (solidcore PR #1456)");
+primitive!(frustum, "frustum");
+primitive!(torus, "torus");
 
 #[test]
 fn hostile_arrays_are_refused() {

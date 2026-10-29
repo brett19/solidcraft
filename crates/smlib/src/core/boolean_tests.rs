@@ -3,8 +3,7 @@
 //! gives the same volume, counts, faces by surface kind and solids (parity only: the expected
 //! values are the analytic ones).
 //!
-//! Curved operands are built on solidcore itself: a record's circles, cylinders and tori do not
-//! come into solidcore yet (solidcore#1432, #1433).
+//! Curved operands are built on solidcore itself.
 
 use std::collections::BTreeMap;
 use std::f64::consts::PI;

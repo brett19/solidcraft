@@ -3,8 +3,7 @@
 //! faces by surface kind, or the same error (parity only: the expected values are the analytic
 //! ones).
 //!
-//! The bodies are solidcore's own boxes and cylinders: a record's curved surfaces do not come
-//! into solidcore yet (solidcore#1432, #1433).
+//! The bodies are solidcore's own boxes and cylinders.
 
 use std::collections::BTreeMap;
 use std::f64::consts::PI;

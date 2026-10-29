@@ -3,8 +3,7 @@
 //! kernel gives the same volume (or, for a sheet, area), counts and faces by surface kind, or the
 //! same error (parity only: the expected values are the analytic ones).
 //!
-//! The profiles are built straight into solidcore curves from the curve lists (a record's curved
-//! surfaces do not come into solidcore yet, solidcore#1432, #1433).
+//! The profiles are built straight into solidcore curves from the curve lists.
 
 use std::collections::BTreeMap;
 use std::f64::consts::{FRAC_PI_2, PI, TAU};

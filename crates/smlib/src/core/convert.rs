@@ -7,9 +7,7 @@
 //!   `SmBrep::MakeTopologyFromData`, healing unless the arrays say SMLib wrote them).
 //!
 //! Where solidcore has no port of an SMLib call the C++ makes, the conversion fails with
-//! "not supported yet" naming the call: `SmCylinder::IsNurbSurfaceCylinder`,
-//! `SmTorus::IsNurbSurfaceTorus` and `SmCircle::IsNurbCurveCircle` (an analytic face or circle
-//! edge given with its NURBS form), `SmSurface::ApproximateSurface` (a face whose surface is
+//! "not supported yet" naming the call: `SmSurface::ApproximateSurface` (a face whose surface is
 //! not a B-spline kind) and `SmShell::IsInnerShellOf` (`PutEnclosingShellsFirst`, a region of
 //! several shells).
 
@@ -1937,9 +1935,9 @@ fn analytic_of_nurbs(k: &Kernel, nurbs: &BSplineSurface, ty: i64, tol: f64) -> R
     } else if ty == SURFACE_SPHERE_I {
         answer(Sphere::is_nurb_surface_sphere(k, nurbs, 1.0)).map_err(sc("SmSphere::IsNurbSurfaceSphere"))?.flatten().map(Surface::from)
     } else if ty == SURFACE_CYLINDER_I {
-        return Err(unported("SmCylinder::IsNurbSurfaceCylinder"));
+        answer(Cone::is_nurb_surface_cylinder(k, nurbs, 1.0)).map_err(sc("SmCylinder::IsNurbSurfaceCylinder"))?.flatten().map(Surface::from)
     } else if ty == SURFACE_TORUS_I {
-        return Err(unported("SmTorus::IsNurbSurfaceTorus"));
+        answer(Torus::is_nurb_surface_torus(k, nurbs, 1.0)).map_err(sc("SmTorus::IsNurbSurfaceTorus"))?.flatten().map(Surface::from)
     } else {
         None
     };
@@ -1955,22 +1953,63 @@ fn placement(origin: Point3, z: Vec3, x: Vec3) -> Result<Axis2Placement> {
     Ok(p)
 }
 
-/// `MakeEdgeCurve`: one edge's 3D curve, as its kind says; `d_min`/`d_max` its range in SMLib
-/// units. A circle or ellipse with its NURBS form (`form`) is that NURBS as the conic of its
-/// canonical entry, which SMLib's own circle test must accept.
+/// `SameNurbsCurve`: equal counts and orders, knots and weights within rounding, control points
+/// within rounding of the curve's size (`smu_AddSmBSplineCurve3d` of each).
+fn same_nurbs_curve(a: &NurbCurve, b: &NurbCurve) -> bool {
+    let arrays = |n: &NurbCurve| {
+        let (mut count, mut order, mut cvs, mut knots, mut weights) = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        let o = NurbsOut { count: &mut count, order: &mut order, cvs: &mut cvs, knots: &mut knots, weights: &mut weights };
+        add_bspline_curve_3d(n, o).ok().map(|()| (count, order, cvs, knots, weights))
+    };
+    let (Some((ac, ao, ap, ak, aw)), Some((bc, bo, bp, bk, bw))) = (arrays(a), arrays(b)) else { return false };
+    if ac != bc || ao != bo || ap.len() != bp.len() || ak.len() != bk.len() || aw.len() != bw.len() {
+        return false;
+    }
+    let size = ap.iter().fold(1.0_f64, |m, x| m.max(x.abs()));
+    let near = |x: &[f64], y: &[f64]| x.iter().zip(y).all(|(a, b)| (a - b).abs() <= 1e-12 * a.abs().max(1.0));
+    ap.iter().zip(&bp).all(|(a, b)| (a - b).abs() <= 1e-12 * size) && near(&ak, &bk) && near(&aw, &bw)
+}
+
+/// `MakeEdgeCurve` (capi/src/smlib_flat.cpp): one edge's 3D curve, as its kind says;
+/// `d_min`/`d_max` its range in SMLib units. A circle or ellipse with its NURBS form (`form`) is that NURBS as the conic of its
+/// canonical entry (frame and radii; the domain from `ConicDomainOfNurbs`), keeping that NURBS.
+/// A circle's NURBS must pass SMLib's own test (`SmCircle::IsNurbCurveCircle`), whose circle is
+/// not the one kept (its frame has its x axis towards the NURBS's start), and the kept circle
+/// must hold the same NURBS (`SameNurbsCurve`); either failing is `SM_ERR_INVALID_INPUT`.
 fn make_edge_curve(k: &Kernel, ty: i64, d_min: f64, d_max: f64, e: &EdgeIn<'_>, c: &mut Cursor, form: bool) -> Result<Curve> {
     if form {
-        if ty == CURVE_CIRCLE_I {
-            return Err(unported("SmCircle::IsNurbCurveCircle"));
-        }
-        let i = c.ellipse;
-        c.ellipse += 1;
+        let circle = ty == CURVE_CIRCLE_I;
+        let i = if circle {
+            c.circle += 1;
+            c.circle - 1
+        } else {
+            c.ellipse += 1;
+            c.ellipse - 1
+        };
         let nurbs = bspline_curve_3d(e, c)?;
-        let o = get3(e.ellipse_center, i)?;
-        let (mut z, mut x) = (get3(e.ellipse_axis, i)?, get3(e.ellipse_ref, i)?);
-        let (rx, ry) = (get(e.ellipse_x, i)?, get(e.ellipse_y, i)?);
-        let domain = conic_domain_of_nurbs(&nurbs, o, &mut z, &mut x, rx, ry).ok_or_else(|| bad("an ellipse NURBS off its ellipse"))?;
+        let (o, mut z, mut x, rx, ry) = if circle {
+            let r = get(e.circle_radius, i)?;
+            (get3(e.circle_center, i)?, get3(e.circle_axis, i)?, get3(e.circle_ref, i)?, r, r)
+        } else {
+            (get3(e.ellipse_center, i)?, get3(e.ellipse_axis, i)?, get3(e.ellipse_ref, i)?, get(e.ellipse_x, i)?, get(e.ellipse_y, i)?)
+        };
+        if circle {
+            let test = Curve::from(nurbs.clone_exact());
+            let is_circle = answer(Ellipse::is_nurb_curve_circle(k, &test, None)).map_err(sc("SmCircle::IsNurbCurveCircle"))?.flatten();
+            if is_circle.is_none() {
+                return Err(bad("a circle NURBS SMLib's circle test rejects"));
+            }
+        }
+        let domain = conic_domain_of_nurbs(&nurbs, o, &mut z, &mut x, rx, ry).ok_or_else(|| bad("a conic NURBS off its conic"))?;
         let opts = EllipseOptions { dim: 3, nurb: Some(&nurbs), inside_out: false };
+        if circle {
+            let cir = Ellipse::new_circle(k, o, x, z.cross(x), domain, rx, &opts).map_err(sc("SmCircle::SmCircle"))?;
+            let kept = nurb_of(cir.base())?;
+            if !nurbs.gw_nurb().is_some_and(|want| same_nurbs_curve(want, kept)) {
+                return Err(bad("a circle that does not keep its NURBS"));
+            }
+            return Ok(Curve::from(cir));
+        }
         let el = Ellipse::new(k, o, x, z.cross(x), domain, rx, ry, &opts).map_err(sc("SmEllipse::SmEllipse"))?;
         return Ok(Curve::from(el));
     }
