@@ -385,14 +385,14 @@ cases!(
     extrude_rectangle,
     extrude_circle,
     extrude_square_drafted_round,
-    extrude_square_drafted_curvature: ignore = "solidcore: no curvature-keeping draft corners, fork 54148db",
+    extrude_square_drafted_curvature: ignore = "solidcore#1449: no curvature-keeping draft corners, fork 54148db",
     extrude_circle_drafted,
-    extrude_draft_wall_closes: ignore = "solidcore: no curvature-keeping draft corners nor SmTaperCornerRefusal, fork 54148db",
+    extrude_draft_wall_closes: ignore = "solidcore#1449: no curvature-keeping draft corners nor SmTaperCornerRefusal, fork 54148db",
     revolve_rectangle_full,
     revolve_rectangle_quarter,
     sweep_circle_straight,
     sweep_circle_along_an_arc: ignore = "solidcore#1435: a torus's volume at 1e-8 is 2.2e-9 off; precise properties do not split at the surface's knots, fork 08d9a14 (solidcore#1435)",
-    sweep_along_a_bent_path: ignore = "solidcore: no curve sweep keeping the profile at the path's start, fork 2dd71a0 / 5d3939e",
+    sweep_along_a_bent_path: ignore = "solidcore#1450: no curve sweep keeping the profile at the path's start, fork 2dd71a0 / 5d3939e",
     loft_two_squares,
     loft_two_circles,
     loft_to_point_pyramid,
@@ -482,7 +482,7 @@ fn project_a_line_onto_a_face() {
 /// A face's planar section needs `SmBrep::CreatePlanarSectionCurves`: not supported, after the
 /// face pick.
 #[test]
-#[ignore = "solidcore#1440: the topology point solve misses faces, so the face pick fails first (solidcore#1440)"]
+#[ignore = "solidcore#1440: the topology point solve misses faces, so the face pick fails first (solidcore#1440); then no CreatePlanarSectionCurves (solidcore#1451)"]
 fn a_face_section_is_not_supported_yet() {
     let got = timed("section", || {
         let b = make_box([0.0; 3], [10.0; 3]).unwrap();
