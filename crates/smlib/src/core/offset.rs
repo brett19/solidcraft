@@ -9,14 +9,18 @@
 //! convex edges extended and the results merged.
 //!
 //! What the capi asks of SMLib code that solidcore does not have is [`Error::Unsupported`],
-//! refused where the capi would first reach it, so every error before it is the C++ path's:
-//! - a face move (`SmOffsetFacesExecutive`, fork a96ce9f);
-//! - a draft's `SmBrep::LocalOperation` (open solidcore PR #1427).
+//! refused where the capi would first reach it, so every error before it is the C++ path's: a
+//! face move (`SmOffsetFacesExecutive`, fork a96ce9f, solidcore#1060).
+//!
+//! A draft's tilted faces go in through solidcore's `SmBrep::LocalOperation`
+//! ([`local_operation`]); the capi's check that it moved some face (`moved_faces`) needs face
+//! history solidcore does not report (solidcore#1462) and is not made.
 
 use solidcore::EntityRef;
 use solidcore::SolidError;
 use solidcore::curve::curve::Curve;
 use solidcore::geom::attribute::{AttributeStore, ObjectKey};
+use solidcore::geom::axis2_placement::Axis2Placement;
 use solidcore::geom::object::{ObjectRef, Shape};
 use solidcore::geom::vector3d::{Point3, Vec3};
 use solidcore::intersect::point_class::PointClassType;
@@ -31,6 +35,7 @@ use solidcore::query::api_queries::{BrepRef, face_bounding_box, face_classify_uv
 use solidcore::query::brep::{BrepIdentity, BrepQuery, LiveBrepObjects};
 use solidcore::surface::surface::SurfaceKind;
 use solidcore::sweep::topology_sweep::store::SweepIdentities;
+use solidcore::topology::brep::local_operation::local_operation;
 use solidcore::topology::brep::{p1 as brep_p1, p2 as brep_p2, p3 as brep_p3};
 use solidcore::topology::face::p2 as face_p2;
 use solidcore::topology::topology::{NotifyRecords, Topology};
@@ -528,10 +533,10 @@ fn unit(v: [f64; 3]) -> Option<Vec3> {
     (len > 1e-12 && len.is_finite()).then(|| u * (1.0 / len))
 }
 
-/// `smlib_draft`: its checks, the solid check, the pick and `draft_faces`' checks of each face
-/// (a plane, parallel to the pull, its hinge on the neutral plane), then not supported: the
-/// tilted faces are put in by `SmBrep::LocalOperation`, which solidcore does not have yet (open
-/// solidcore PR #1427).
+/// `smlib_draft`: its checks, the solid check, the pick, then `draft_faces`: each picked face (a
+/// plane parallel to the pull) gets a copy of its plane turned by `angle` about its line on the
+/// neutral plane, and `SmBrep::LocalOperation` extends or trims the faces around them to meet
+/// the tilted planes.
 pub(crate) fn draft(
     body: &Body,
     points: &[[f64; 3]],
@@ -559,7 +564,8 @@ pub(crate) fn draft(
             Ok(p) => p,
             Err(m) => return Ok(Err(face_miss(m))),
         };
-        // `draft_faces`, up to the local operation.
+        // `draft_faces`.
+        let mut surfaces = Vec::with_capacity(picked.len());
         for &f in &picked {
             let fu = outer_faceuse(&w, f)?;
             let face = w.face(f)?;
@@ -577,18 +583,43 @@ pub(crate) fn draft(
             if n.dot(along).abs() > 1e-6 {
                 return Ok(Err(Error::Unsupported));
             }
-            if answer(face_internal_point(k, &mut w, f))?.is_none() {
+            let Some(inside) = answer(face_internal_point(k, &mut w, f))? else {
                 return Ok(Err(Error::Status(INVALID_INPUT)));
-            }
-            if along.dot(normal).abs() < 1e-12 {
+            };
+            let toward = along.dot(normal);
+            if toward.abs() < 1e-12 {
                 return Ok(Err(Error::Argument));
             }
-            // The hinge axis, n x pull, must be a direction: the face is square to the pull.
-            if !(n.cross(along).length() > 0.5) {
+            let hinge = inside + along * ((p3(neutral_origin) - inside).dot(normal) / toward);
+            // Turning n about n x pull by `angle` gives n cos(angle) + pull sin(angle).
+            let axis = n.cross(along);
+            let len = axis.length();
+            if !(len > 0.5) {
                 return Ok(Err(Error::Unsupported));
             }
+            let axis = axis * (1.0 / len);
+            let Some(surf) = w.face(f)?.surface.as_ref() else {
+                return Ok(Err(Error::Status(INVALID_INPUT)));
+            };
+            let Some(mut tilted) = answer(surf.copy(k))? else {
+                return Ok(Err(Error::Status(INVALID_INPUT)));
+            };
+            let mut turn = Axis2Placement::IDENTITY;
+            turn.rotate_about_axis_at_point(angle, hinge, axis);
+            if answer(tilted.transform(k, &turn, None))?.is_none() {
+                return Ok(Err(Error::Status(INVALID_INPUT)));
+            }
+            surfaces.push(tilted);
         }
-        // `b->LocalOperation(faces, surfaces)`: solidcore PR #1427 (not merged).
-        Ok(Err(Error::Unsupported))
+        // `moved_faces(b, status(b->LocalOperation(faces, surfaces)))`. The capi marks the
+        // tilted surfaces first and, when SMLib reports success, answers SMLIB_ERR_NO_EFFECT if
+        // no face of the result lies on a marked one. solidcore surfaces carry no attributes and
+        // the local operation reports no face history (solidcore#1462), so that check is not
+        // made here: a success is the capi's answer whenever SMLib's marks survive.
+        let mut notes = Notifications::new(&mut w);
+        if let Err(e) = called(local_operation(k, &mut w, &picked, surfaces, &mut notes.context()))? {
+            return Ok(Err(e));
+        }
+        finish(w, true)
     })
 }
