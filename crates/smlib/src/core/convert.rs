@@ -13,8 +13,11 @@
 //!
 //! Where solidcore has no port of an SMLib call the C++ makes, the conversion fails with
 //! "not supported yet" naming the call: `SmSurface::ApproximateSurface` (a face whose surface is
-//! not a B-spline kind) and `SmShell::IsInnerShellOf` (`PutEnclosingShellsFirst`, a region of
-//! several shells).
+//! not a B-spline kind).
+//!
+//! [`from_arrays`] also runs the capi's `PutEnclosingShellsFirst` ([`put_enclosing_shells_first`],
+//! an addition to SmuConvert): a bounded region of several shells starts its list at the shell
+//! `SmShell::IsInnerShellOf` shows enclosing the others, whatever order the arrays gave.
 
 // The SmBrepData records are filled field by field, as FlatToBrepData fills them after ReSet.
 #![allow(clippy::field_reassign_with_default)]
@@ -2501,18 +2504,77 @@ fn brep_from_flat(k: &mut Kernel, f: &In<'_>, s: &Shape) -> Result<Brep> {
         healer_enabled: true,
     };
     make_topology_from_data(k, &mut b, &mut data, &mut env, options).map_err(sc("SmBrep::MakeTopologyFromData"))?;
-    put_enclosing_shells_first(&b)?;
+    put_enclosing_shells_first(k, &mut b)?;
     Ok(b)
 }
 
-/// `PutEnclosingShellsFirst`: SMLib takes a bounded region's first shell as the one enclosing
-/// the others. Deciding which does takes `SmShell::IsInnerShellOf`, which solidcore has no port
-/// of: a bounded region of several shells is refused.
-fn put_enclosing_shells_first(b: &Brep) -> Result<()> {
+/// The most `SmShell::IsInnerShellOf` calls one conversion makes; a body that would need more
+/// is refused instead of ray casting without end.
+const MAX_CONTAINMENT_TESTS: usize = 1 << 16;
+
+/// `PutEnclosingShellsFirst` (capi `smlib_flat.cpp`): SMLib takes the first shell of every region
+/// but the infinite one as the shell that encloses the region, the others lying inside it
+/// (`SmBrep::AssertValid` test 12). The arrays may list a region's shells in any order, so the one
+/// that encloses all the others is put first, decided by `SmShell::IsInnerShellOf`
+/// ([`shell::is_inner_shell_of`]). Candidates are the closed face-use shells whose bounding box
+/// can be computed, largest box first (a stable sort: equal boxes keep the arrays' order). Only
+/// `SM_TRUE` counts as inside: `SM_FALSE` and `SM_UNSURE` rule the candidate out, as the capi's
+/// `== TRUE`, and a region where no candidate is shown to enclose the others keeps its order.
+/// solidcore errors the C++ has no counterpart for (a call without a port, a dangling id) refuse
+/// the conversion, as does a body needing more than [`MAX_CONTAINMENT_TESTS`] containment tests.
+fn put_enclosing_shells_first(k: &mut Kernel, b: &mut Brep) -> Result<()> {
+    use solidcore::query::face::p1::calculate_shell_bounding_box;
     let infinite = b.infinite_region();
+    let mut tests = 0usize;
     for r in bl::regions(b, None).map_err(sc("GetRegions"))? {
-        if Some(r) != infinite && b.region(r).map_err(sc("GetShells"))?.shells.len() > 1 {
-            return Err(unported("SmShell::IsInnerShellOf (a region of several shells)"));
+        if Some(r) == infinite {
+            continue;
+        }
+        let shells = b.region(r).map_err(sc("GetShells"))?.shells.clone();
+        if shells.len() < 2 {
+            continue;
+        }
+        let mut candidates: Vec<(f64, ShellId)> = Vec::new();
+        for &s in &shells {
+            let rec = b.shell(s).map_err(sc("GetShells"))?;
+            if !rec.is_faceuse_shell() || !rec.is_closed(b, s).map_err(sc("SmShell::IsClosed"))? {
+                continue;
+            }
+            match calculate_shell_bounding_box(k, b, s, false) {
+                Ok(bx) => {
+                    let size = bx.size();
+                    candidates.push((size.x * size.y * size.z, s));
+                }
+                Err(e) if e.is_unported() => return Err(sc("SmShell::CalculateBoundingBox")(e)),
+                // != SM_SUCCESS: not a candidate
+                Err(_) => {}
+            }
+        }
+        // stable: equal boxes keep the arrays' order
+        candidates.sort_by(|a, c| c.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        for &(_, candidate) in &candidates {
+            let mut encloses = true;
+            for &s in &shells {
+                if s == candidate {
+                    continue;
+                }
+                tests += 1;
+                if tests > MAX_CONTAINMENT_TESTS {
+                    return Err(bad("too many shells to order (SmShell::IsInnerShellOf)"));
+                }
+                if shell::is_inner_shell_of(k, b, s, Some(candidate)).map_err(sc("SmShell::IsInnerShellOf"))? != shell::SM_TRUE {
+                    encloses = false;
+                    break;
+                }
+            }
+            if encloses {
+                // SmRegion::SetList(candidate): the circular list now starts at it
+                let list = &mut b.region_mut(r).map_err(sc("SmRegion::SetList"))?.shells;
+                if let Some(at) = list.iter().position(|&s| s == candidate) {
+                    list.rotate_left(at);
+                }
+                break;
+            }
         }
     }
     Ok(())

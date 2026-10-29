@@ -1,12 +1,15 @@
 //! solidcore's primitives through the flat arrays: each exports to a valid record of the right
 //! volume, the record comes back to an equal body, and (with SMLib built) the arrays are the C++
-//! kernel's own.
+//! kernel's own. A body with a sealed void crosses with each region's enclosing shell first,
+//! whatever order its arrays list the shells in (the capi's `PutEnclosingShellsFirst`).
 
 use std::f64::consts::PI;
 
 use solidcraft_geom::brep as b;
 
+use super::boolean::boolean;
 use super::{Body, from_arrays, make_box, make_cone, make_cylinder, make_sphere, make_torus, to_arrays, volume};
+use crate::BooleanOp;
 use crate::export::native;
 use crate::import::{self, Arrays};
 
@@ -233,5 +236,133 @@ fn tolerances_cross_the_arrays_per_entity() {
             assert_eq!((&cpp.reals[&EDGE_TOLERANCE], &cpp.reals[&VERTEX_TOLERANCE]), (edges, &a.reals[&VERTEX_TOLERANCE]), "round {round}");
             a = cpp;
         }
+    }
+}
+
+/// A 20 mm box minus a centred 10 mm box: a sealed void, so its solid region has two shells.
+fn sealed_void() -> Body {
+    boolean(&make_box([-10.0; 3], [20.0; 3]).unwrap(), &make_box([-5.0; 3], [10.0; 3]).unwrap(), BooleanOp::Subtract).unwrap().unwrap()
+}
+
+/// 20³ − 10³.
+const SEALED_VOID_VOLUME: f64 = 8000.0 - 1000.0;
+
+/// Each bounded region's shells, as each shell's reach: the largest |coordinate| of its vertices
+/// (10 for the 20 mm box, 5 for the 10 mm one).
+fn reaches(rec: &b::Brep) -> Vec<Vec<f64>> {
+    let reach = |s: u32| {
+        let Some(b::Shell::Faces { faces, .. }) = rec.shells.get(s as usize) else { panic!("shell {s}") };
+        let mut r = 0.0f64;
+        for f in faces {
+            for l in &rec.faces[f.face as usize].loops {
+                let b::Loop::Edges { edges } = l else { continue };
+                for e in edges {
+                    for &v in &rec.edges[e.edge as usize].vertices {
+                        r = rec.vertices[v as usize].point.iter().fold(r, |r, c| r.max(c.abs()));
+                    }
+                }
+            }
+        }
+        r
+    };
+    rec.regions.iter().skip(1).map(|r| r.shells.iter().map(|&s| reach(s)).collect()).collect()
+}
+
+/// The sealed void's record: the solid region lists the outer box first, then the void's box;
+/// the void region its box alone.
+fn outer_first(a: &Arrays, at: &str) {
+    let mut got = reaches(&record(a));
+    got.sort_by_key(|x| std::cmp::Reverse(x.len()));
+    assert_eq!(got, [vec![10.0, 5.0], vec![5.0]], "{at}");
+}
+
+/// The arrays with every region's shells listed in reverse: each shell's block (its counts and
+/// its face uses) moved, nothing else touched.
+fn shells_reversed(a: &Arrays) -> Arrays {
+    use crate::flat::{FACEUSE_FACE, FACEUSE_ORIENTATION, REGION_SHELL_COUNT, SHELL_FACEUSE_COUNT, SHELL_POINT_TYPE, SHELL_WIRE_EDGE_COUNT};
+    let mut p = a.clone();
+    let blocks = [SHELL_FACEUSE_COUNT, SHELL_WIRE_EDGE_COUNT, SHELL_POINT_TYPE, FACEUSE_FACE, FACEUSE_ORIENTATION];
+    for id in blocks {
+        p.ints.get_mut(&id).unwrap().clear();
+    }
+    let (mut shell, mut fu) = (0usize, 0usize);
+    for &n in &a.ints[&REGION_SHELL_COUNT] {
+        let mut region = Vec::new();
+        for _ in 0..n {
+            let uses = usize::try_from(a.ints[&SHELL_FACEUSE_COUNT][shell]).unwrap();
+            region.push((shell, fu..fu + uses));
+            shell += 1;
+            fu += uses;
+        }
+        for (s, uses) in region.into_iter().rev() {
+            for id in [SHELL_FACEUSE_COUNT, SHELL_WIRE_EDGE_COUNT, SHELL_POINT_TYPE] {
+                let v = a.ints[&id][s];
+                p.ints.get_mut(&id).unwrap().push(v);
+            }
+            for id in [FACEUSE_FACE, FACEUSE_ORIENTATION] {
+                p.ints.get_mut(&id).unwrap().extend_from_slice(&a.ints[&id][uses.clone()]);
+            }
+        }
+    }
+    assert_ne!(p.ints, a.ints, "nothing to reverse");
+    p
+}
+
+/// solidcore's sealed void exports with its outer shell first, comes back through the arrays
+/// with it first, and keeps its volume.
+#[test]
+fn a_sealed_void_crosses_the_arrays_outer_shell_first() {
+    let body = sealed_void();
+    let v = volume(&body, 1e-9).unwrap();
+    assert!(rel(v, SEALED_VOID_VOLUME) < 1e-9, "{v}");
+    let a = to_arrays(&body).unwrap();
+    outer_first(&a, "export");
+    let back = from_arrays(&import::arrays(&record(&a), true).unwrap()).unwrap();
+    outer_first(&to_arrays(&back).unwrap(), "round trip");
+    let v = volume(&back, 1e-9).unwrap();
+    assert!(rel(v, SEALED_VOID_VOLUME) < 1e-9, "round trip: {v}");
+}
+
+/// Arrays listing the solid region's void shell before the box around it import with the box
+/// first (SMLib takes a region's first shell as its enclosing one), the volume unchanged.
+#[test]
+fn shells_listed_inner_first_import_outer_first() {
+    let a = shells_reversed(&to_arrays(&sealed_void()).unwrap());
+    let back = from_arrays(&a).unwrap();
+    outer_first(&to_arrays(&back).unwrap(), "inner first");
+    let v = volume(&back, 1e-9).unwrap();
+    assert!(rel(v, SEALED_VOID_VOLUME) < 1e-9, "inner first: {v}");
+}
+
+/// The C++ kernel's sealed void: solidcore imports its arrays with the outer shell first, in
+/// either shell order, at the C++ kernel's volume, and the C++ kernel reads solidcore's arrays
+/// (either order) back as a body that passes its checks at that volume.
+#[cfg(feature = "native")]
+#[test]
+fn a_sealed_void_matches_the_cpp_kernel() {
+    use crate::{Brep, ffi};
+    crate::init().unwrap();
+    let make = |o: f64, s: f64| ffi::make_box(&[o; 3], &[s; 3]).map(Brep::made).unwrap();
+    let (outer, inner) = (make(-10.0, 20.0), make(-5.0, 10.0));
+    let cpp = Brep::made(ffi::ops::boolean(outer.cpp().unwrap(), inner.cpp().unwrap(), ffi::ops::BOOLEAN_SUBTRACT).unwrap());
+    let theirs = ffi::volume(cpp.cpp().unwrap(), 1e-9).unwrap();
+    assert!(rel(theirs, SEALED_VOID_VOLUME) < 1e-9, "C++ {theirs}");
+    let arrays = cpp.cpp_arrays().unwrap();
+    outer_first(&arrays, "C++ export");
+    for (at, a) in [("C++ arrays", arrays.clone()), ("C++ arrays, inner first", shells_reversed(&arrays))] {
+        let body = from_arrays(&a).unwrap();
+        outer_first(&to_arrays(&body).unwrap(), at);
+        let v = volume(&body, 1e-9).unwrap();
+        assert!(rel(v, theirs) < 1e-9, "{at}: solidcore {v} vs C++ {theirs}");
+    }
+    let ours = to_arrays(&sealed_void()).unwrap();
+    for (at, a) in [("solidcore arrays", ours.clone()), ("solidcore arrays, inner first", shells_reversed(&ours))] {
+        let h = crate::flat::Flat::from_arrays(&a).unwrap().import().unwrap();
+        let v = ffi::volume(h.cpp().unwrap(), 1e-9).unwrap();
+        assert!(rel(v, theirs) < 1e-9, "{at}: C++ {v} vs {theirs}");
+        let mut buf = vec![0u8; 1 << 16];
+        let (len, failures) = ffi::check::check(h.cpp().unwrap(), 2, &mut buf).unwrap();
+        assert_eq!(failures, 0, "{at}: {}", String::from_utf8_lossy(&buf[..len]));
+        outer_first(&h.cpp_arrays().unwrap(), &format!("{at}, C++ export"));
     }
 }
