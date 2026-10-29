@@ -129,8 +129,11 @@ impl Op {
             // At parity on the rig, routed alone: 469 of 469 cases agree (solidcore 3546c9bc); as
             // the default, 449 of 479 pass against SMLib-only 445, none worse.
             Op::Primitive => Backend::Solidcore,
-            Op::Convert
-            | Op::Transform
+            // On the rig, routed alone: 450 of 479 pass against SMLib's 449; 478 agree, and the
+            // other (fillets/1557) fails on SMLib and passes on solidcore. As the default with
+            // primitives (solidcore 3c17ddb1): 450 of 479 against SMLib-only 449, none worse.
+            Op::Convert => Backend::Solidcore,
+            Op::Transform
             | Op::Measure
             | Op::Check
             | Op::Boolean
