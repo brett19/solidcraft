@@ -132,6 +132,7 @@ pub(crate) fn fixes() -> UpstreamFixes {
     f.sphere_small_circle_not_touching = true;
     f.ssi_tangent_contact_points = true;
     f.ssi_trace_tangent_curves_once = true;
+    f.found_torus_sphere_keep_tested_nurb = true;
     f
 }
 
