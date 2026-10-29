@@ -381,7 +381,7 @@ cases!(
     shell_box_outward,
     shell_cylinder_open_top: ignore = "solidcore#1453: MateEdges marches the offset edges on the walls' B-spline extensions, not their exact conics (solidcore#1453, port of fork fddc366 + 98ab1b0; defect #1130): the inner floor circle is a spline and the inner rim split at a vertex 1.2e-6 inside it (7 edges, 5 vertices; C++ 6, 4), the volume 3.5e-7 over; solidcore's own difftest wiring gives the same",
     shell_too_thick,
-    shell_walls_touch: ignore = "walls that meet are 1027, not WALLS_TOUCH until fork a759622 is ported (solidcore#1442)",
+    shell_walls_touch,
     shell_pick_near_nothing,
     shell_pick_ambiguous,
     thicken_plate,
