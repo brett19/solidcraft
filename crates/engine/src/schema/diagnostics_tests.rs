@@ -81,6 +81,10 @@ impl Drop for KernelChoice {
 
 /// diagnostics.kernel lists every operation family with the table's kernel and the one it runs
 /// on now, and its `choice` moves them (unless SOLIDCRAFT_KERNEL overrides it).
+///
+/// The choice is process-wide and the other tests in this binary build bodies meanwhile, so only
+/// choices that route every family as the table does are set through the command; what the
+/// others would route to is read from `Op::backend_under`, which the command's own answer follows.
 #[test]
 fn diagnostics_kernel_reports_and_sets_the_choice() {
     use solidcraft_kernel::kernel_route as route;
@@ -97,25 +101,30 @@ fn diagnostics_kernel_reports_and_sets_the_choice() {
     let environment = route::overridden();
     assert_eq!(r["environment"], json!(environment), "{r}");
     for choice in ["solidcore", "smlib", "routed"] {
-        let r = s.execute("diagnostics.kernel", &json!({ "choice": choice })).unwrap();
-        // Back to the table straight away: other tests in this process build bodies meanwhile.
-        if choice != "routed" {
-            route::set_choice(route::Choice::Routed);
-        }
-        if environment {
-            continue; // SOLIDCRAFT_KERNEL wins: the choice and the backends stay its own
-        }
-        assert_eq!(r["choice"], json!(choice), "{r}");
-        for (row, op) in r["routes"].as_array().unwrap().iter().zip(route::Op::ALL) {
-            // `.smb` files stay on SMLib whatever is chosen.
+        let c = route::Choice::from_id(choice).unwrap();
+        // `.smb` files stay on SMLib whatever is chosen.
+        for op in route::Op::ALL {
             let want = match choice {
                 _ if op == route::Op::File => "smlib",
                 "routed" => op.route().id(),
                 other => other,
             };
-            assert_eq!(row["backend"], json!(want), "{choice}: {r}");
+            assert_eq!(op.backend_under(c).id(), want, "{choice}: {op:?}");
+        }
+        if !route::Op::ALL.iter().all(|op| op.backend_under(c) == op.route()) {
+            continue; // it would move other tests' bodies to another kernel
+        }
+        let r = s.execute("diagnostics.kernel", &json!({ "choice": choice })).unwrap();
+        if environment {
+            continue; // SOLIDCRAFT_KERNEL wins: the choice and the backends stay its own
+        }
+        assert_eq!(r["choice"], json!(choice), "{r}");
+        for (row, op) in r["routes"].as_array().unwrap().iter().zip(route::Op::ALL) {
+            assert_eq!(row["backend"], json!(op.backend_under(c).id()), "{choice}: {r}");
         }
     }
+    let r = s.execute("diagnostics.kernel", &json!({ "choice": "routed" })).unwrap();
+    assert!(environment || r["choice"] == json!("routed"), "{r}");
 }
 
 /// An unknown or mistyped choice is an error that changes nothing; no hostile value panics.

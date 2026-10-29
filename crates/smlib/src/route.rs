@@ -112,10 +112,16 @@ impl Op {
     /// The kernel this family runs on now: `SOLIDCRAFT_KERNEL`, else the preference, else
     /// [`Op::route`]. `.smb` files stay on SMLib whatever is chosen.
     pub fn backend(self) -> Backend {
+        self.backend_under(choice())
+    }
+
+    /// The kernel this family runs on under `c`, whatever is in force now: what [`Op::backend`]
+    /// answers once `c` is the choice. `.smb` files stay on SMLib whatever is chosen.
+    pub fn backend_under(self, c: Choice) -> Backend {
         if self == Op::File {
             return Backend::Smlib;
         }
-        match choice() {
+        match c {
             Choice::Routed => self.route(),
             Choice::Only(b) => b,
         }
@@ -203,14 +209,36 @@ mod tests {
         assert_eq!(Op::File.backend(), Backend::Smlib);
     }
 
+    /// Each choice sends the families where it says, read without setting the process-wide
+    /// preference: the other tests in this binary build bodies meanwhile, and one flipped to
+    /// solidcore for an instant would build theirs there.
+    #[test]
+    fn each_choice_routes_every_family_without_touching_the_preference() {
+        for op in Op::ALL {
+            let want = |b: Backend| if op == Op::File { Backend::Smlib } else { b };
+            assert_eq!(op.backend_under(Choice::Routed), op.route(), "{op:?}");
+            assert_eq!(op.backend_under(Choice::Only(Backend::Smlib)), want(Backend::Smlib), "{op:?}");
+            assert_eq!(op.backend_under(Choice::Only(Backend::Solidcore)), want(Backend::Solidcore), "{op:?}");
+        }
+    }
+
+    /// The preference is what `backend` follows. Only a choice that routes every family as the
+    /// table does is set here, so no other test's body changes kernel.
     #[test]
     fn the_preference_routes_unless_the_environment_overrides() {
         if overridden() {
             return;
         }
-        set_choice(Choice::Only(Backend::Solidcore));
-        assert_eq!(Op::Boolean.backend(), Backend::Solidcore);
+        let harmless = [Choice::Only(Backend::Smlib), Choice::Only(Backend::Solidcore)]
+            .into_iter()
+            .find(|c| Op::ALL.iter().all(|op| op.backend_under(*c) == op.route()));
+        if let Some(c) = harmless {
+            set_choice(c);
+            assert_eq!(choice(), c);
+            assert!(Op::ALL.iter().all(|op| op.backend() == op.backend_under(c)));
+        }
         set_choice(Choice::Routed);
+        assert_eq!(choice(), Choice::Routed);
         assert!(Op::ALL.iter().all(|op| op.backend() == op.route()));
     }
 }
