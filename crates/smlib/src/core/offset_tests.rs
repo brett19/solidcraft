@@ -376,26 +376,26 @@ macro_rules! cases {
 }
 
 cases!(
-    shell_box_open_top: ignore = "solidcore#1440: the topology point solve misses faces, so SmApiFaceClosestPoint picks no face (solidcore#1440)",
-    shell_box_closed: ignore = "solidcore#1440: the topology point solve misses faces, so leaves_cavity finds no cavity (solidcore#1440)",
+    shell_box_open_top,
+    shell_box_closed,
     shell_box_closed_outward,
-    shell_box_outward: ignore = "solidcore#1440: the topology point solve misses faces, so SmApiFaceClosestPoint picks no face (solidcore#1440)",
-    shell_cylinder_open_top: ignore = "solidcore#1440: the topology point solve misses faces, so SmApiFaceClosestPoint picks no face (solidcore#1440)",
-    shell_too_thick: ignore = "solidcore#1440: the topology point solve misses faces, so SmApiFaceClosestPoint picks no face (solidcore#1440)",
-    shell_walls_touch: ignore = "solidcore#1440: no face pick (solidcore#1440); walls that meet are 1027, not WALLS_TOUCH until fork a759622 is ported (solidcore#1442)",
-    shell_pick_near_nothing: ignore = "solidcore#1440: the topology point solve misses faces, so SmApiFaceClosestPoint picks no face (solidcore#1440)",
-    shell_pick_ambiguous: ignore = "solidcore#1440: the topology point solve misses faces, so SmApiFaceClosestPoint picks no face (solidcore#1440)",
+    shell_box_outward,
+    shell_cylinder_open_top: ignore = "the shell leaves the inner rim circle split at a vertex 1e-5 off it and the inner floor circle a spline (7 edges, 5 vertices; C++ 6, 4): the volume is 3.5e-7 off; cause not yet found",
+    shell_too_thick,
+    shell_walls_touch: ignore = "walls that meet are 1027, not WALLS_TOUCH until fork a759622 is ported (solidcore#1442)",
+    shell_pick_near_nothing,
+    shell_pick_ambiguous,
     thicken_plate,
     thicken_plate_symmetric,
     thicken_a_solid,
     offset_sheet_plate,
     offset_sheet_quarter_cylinder: ignore = "solidcore#1441: an offset surface does not export, no SmSurface::ApproximateSurface (solidcore#1441)",
     offset_sheet_a_solid,
-    offset_faces_top_out: ignore = "solidcore#1440: no face pick (solidcore#1440); no SmOffsetFacesExecutive, fork a96ce9f (solidcore#1060)",
-    offset_faces_through: ignore = "solidcore#1440: the topology point solve misses faces, so SmApiFaceClosestPoint picks no face (solidcore#1440)",
-    draft_box_sides: ignore = "solidcore#1440: no face pick (solidcore#1440); no SmBrep::LocalOperation (solidcore PR #1427)",
-    draft_a_curved_face: ignore = "solidcore#1440: the topology point solve misses faces, so SmApiFaceClosestPoint picks no face (solidcore#1440)",
-    draft_a_face_across_the_pull: ignore = "solidcore#1440: the topology point solve misses faces, so SmApiFaceClosestPoint picks no face (solidcore#1440)",
+    offset_faces_top_out: ignore = "no SmOffsetFacesExecutive, fork a96ce9f (solidcore#1060)",
+    offset_faces_through,
+    draft_box_sides: ignore = "no SmBrep::LocalOperation (solidcore PR #1427)",
+    draft_a_curved_face,
+    draft_a_face_across_the_pull,
 );
 
 /// The capi's argument checks, before any kernel call.
@@ -428,4 +428,95 @@ fn the_body_stays_as_it_was() {
     });
     assert_eq!(r.0, [6, 12, 8]);
     assert!(rel(r.1, ABC) < 1e-12, "{}", r.1);
+}
+
+/// The distance from `p` to each face of `b` (`SmApiFaceClosestPoint`), under `identity`.
+fn face_distances(
+    k: &mut solidcore::kernel::Kernel,
+    b: &mut solidcore::topology::Brep,
+    identity: &solidcore::query::brep::BrepIdentity<'_>,
+    p: Vec3,
+) -> solidcore::Result<Vec<(f64, Vec3)>> {
+    use solidcore::geom::object::Shape as Sh;
+    use solidcore::query::api_queries::face_closest_point_in_shape;
+    use solidcore::query::brep::LiveBrepObjects;
+    use solidcore::topology::BrepId;
+    let one = BrepId::from_index(0);
+    let mut out = Vec::new();
+    for f in solidcore::topology::brep::p1::faces(b, None)? {
+        let shape = Sh::new(k, &(one, &*b), &[], &[(one, f)], &[], &[])?;
+        let objects = LiveBrepObjects::new(b, identity, None)?;
+        let c = face_closest_point_in_shape(k, &shape, &objects, (one, f), p)?;
+        out.push((c.distance, c.point));
+    }
+    Ok(out)
+}
+
+/// The closed form for (15, 10, 20) above the 30 x 20 x 10 box at the origin, face by face of
+/// `create_box`: bottom 20, top 10, the x sides sqrt(15^2 + 10^2), the y sides sqrt(10^2 + 10^2).
+fn box_face_distances_are_exact(what: &str, d: &[(f64, Vec3)]) {
+    let want = [20.0, 10.0, 325f64.sqrt(), 325f64.sqrt(), 200f64.sqrt(), 200f64.sqrt()];
+    assert_eq!(d.len(), want.len(), "{what}: faces");
+    for (i, (&(got, _), want)) in d.iter().zip(want).enumerate() {
+        assert!((got - want).abs() < 1e-9, "{what}: face {i} at {got}, want {want}");
+    }
+    let top = d[1].1;
+    assert!((top.x - 15.0).abs() < 1e-9 && (top.y - 10.0).abs() < 1e-9 && (top.z - 10.0).abs() < 1e-9, "{what}: top {top:?}");
+}
+
+/// Picking faces on a solidcore box: on the body itself, on the working copy every operation
+/// makes (`copy_of`), and by solidcore's recommended usage, each face's distance is the closed
+/// form and the top face is picked. The copy names its geometry owners in its own key domain
+/// with no naming scheme of its own, so the body's identities (`BrepIdentity::of_brep`: the
+/// arena's) name none of them; the copy's proven owners (`BrepQuery::effective_identity`) do
+/// (solidcore#1440 was this). Under the arena's identities the solve fails, and the failure is
+/// an error, not a skipped face.
+#[test]
+fn faces_are_picked_on_the_box_and_on_its_working_copy() {
+    use solidcore::SolidError;
+    use solidcore::query::brep::{BrepIdentity, BrepQuery};
+    let p = Vec3::new(15.0, 10.0, 20.0);
+    let on_top = [[15.0, 10.0, 10.0]];
+    run("pick", |k| {
+        let mut b = solidcore::primitive::api_primitives::create_box(k, Vec3::new(0.0, 0.0, 0.0), 30.0, 20.0, 10.0)?;
+        let mut w = super::boolean::copy_of(k, &b, 1)?;
+        let mut faces = Vec::new();
+        for (what, x) in [("the body", &mut b), ("its copy", &mut w)] {
+            let query = BrepQuery::of_brep(x);
+            let identity = query.effective_identity();
+            box_face_distances_are_exact(what, &face_distances(k, x, &identity, p)?);
+            let picked = super::offset::pick_faces(k, x, &on_top, TOL)?;
+            faces.push(picked.ok());
+        }
+        assert!(faces[0].as_ref().is_some_and(|f| f.len() == 1), "the body: {faces:?}");
+        assert_eq!(faces[0], faces[1], "the body and its copy pick the same face");
+        // The maintainers' usage: the body itself, keyed by its naming scheme.
+        let body = BrepIdentity::of_brep(&b);
+        box_face_distances_are_exact("of_brep on the body", &face_distances(k, &mut b, &body, p)?);
+        // The copy under the arena's identities: no face's geometry owner resolves.
+        let arena = BrepIdentity::of_brep(&w);
+        match face_distances(k, &mut w, &arena, p) {
+            Err(SolidError::InvalidInput { .. }) => {}
+            other => panic!("the copy under the arena's identities: {other:?}"),
+        }
+        Ok(())
+    })
+    .unwrap();
+}
+
+/// A pick skips an entity whose query returns an SMLib status, as the capi skips any status
+/// other than `SM_SUCCESS`; any other solidcore error fails the pick.
+#[test]
+fn a_solidcore_error_in_a_pick_is_an_error() {
+    use super::answer;
+    use super::blend::pick;
+    use solidcore::SolidError;
+    let all = [0usize, 1];
+    let points = [[0.0; 3]];
+    let status = pick(&all, &points, 1.0, 1e-6, |i, _| answer(if i == 0 { Err(SolidError::sm_err("q")) } else { Ok(0.5) }));
+    assert_eq!(status.unwrap().unwrap().0, vec![1], "a status skips the entity");
+    let other = pick(&all, &points, 1.0, 1e-6, |i, _| answer(if i == 0 { Err(SolidError::invalid_input("q", "owner")) } else { Ok(0.5) }));
+    assert!(matches!(other, Err(SolidError::InvalidInput { .. })), "{other:?}");
+    let unported = pick(&all, &points, 1.0, 1e-6, |i, _| answer(if i == 0 { Err(SolidError::unported("Sm::X", "u")) } else { Ok(0.5) }));
+    assert!(matches!(unported, Err(SolidError::Unported { .. })), "{unported:?}");
 }
