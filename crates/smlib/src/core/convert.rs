@@ -6,6 +6,11 @@
 //! - [`from_arrays`]: `BrepFromFlat` (`Validate`, `FlatToBrepData`, then
 //!   `SmBrep::MakeTopologyFromData`, healing unless the arrays say SMLib wrote them).
 //!
+//! Tolerances differ from the C++ on purpose: `to_arrays` writes the B-rep's own tolerance as
+//! TOLERANCE, not the largest of its entities', and `from_arrays` takes the B-rep's and the faces'
+//! from the edges' and vertices' own ([`own_tolerances`]). Each entity keeps its tolerance across
+//! the kernels instead of every one taking the largest at each crossing.
+//!
 //! Where solidcore has no port of an SMLib call the C++ makes, the conversion fails with
 //! "not supported yet" naming the call: `SmSurface::ApproximateSurface` (a face whose surface is
 //! not a B-spline kind) and `SmShell::IsInnerShellOf` (`PutEnclosingShellsFirst`, a region of
@@ -785,12 +790,15 @@ fn flat_from_brep(k: &mut Kernel, b: &mut Brep) -> Result<Arrays> {
         return Err(bad("SmBrepData::FromBrep's lists differ from the B-rep's"));
     }
 
-    // The arrays store the tolerance needed to preserve the source topology: the largest
-    // effective face, edge or vertex tolerance.
+    // TOLERANCE is the B-rep's own tolerance, and each edge and vertex carries its own
+    // (EDGE_TOLERANCE, VERTEX_TOLERANCE). Writing the largest one there instead, as SMLib's
+    // `FlatFromBrep` does, makes it every entity's on import (MakeTopologyFromData raises each
+    // entity to the B-rep's), so every crossing between the kernels spread the largest tolerance
+    // over the body. Curves are still approximated to the largest.
     let zone = max_zone_tol(b)?;
     let brep_tol = b.tolerance();
-    let xsect = 2.0 * zone;
-    let approx_tol = xsect / 4.0;
+    let xsect = 2.0 * if brep_tol.is_finite() && brep_tol > 0.0 && brep_tol < zone { brep_tol } else { zone };
+    let approx_tol = zone / 2.0;
     let bbox = calculate_bounding_box(k, b, BoundingBoxOptions { approx: false, tight: false, expand_by_zone_tol_3d: false })
         .map_err(sc("CalculateBoundingBox"))?;
 
@@ -2298,6 +2306,8 @@ fn flat_to_brep_data(k: &Kernel, f: &In<'_>, s: &Shape) -> Result<BrepData> {
     // Loops; each edgeuse's loop and face follow from the loop counts
     let mut eu_loop = vec![0u64; s.edgeuses];
     let mut eu_face = vec![0usize; s.edgeuses];
+    // (face, vertex) of each vertex loop
+    let mut loop_vertices = Vec::new();
     {
         let mut next_eu = n_wire;
         let (mut eu, mut face) = (0usize, 0usize);
@@ -2323,6 +2333,7 @@ fn flat_to_brep_data(k: &Kernel, f: &In<'_>, s: &Shape) -> Result<BrepData> {
             } else {
                 // no SmEUData for a loop vertex
                 ld.vertex = n_point + get(f.i(LOOP_VERTEX), l)? as u64;
+                loop_vertices.push((face, ld.vertex));
             }
             d.loops.push(ld);
         }
@@ -2412,7 +2423,45 @@ fn flat_to_brep_data(k: &Kernel, f: &In<'_>, s: &Shape) -> Result<BrepData> {
         vd.point = get3(f.r(VERTEX_POSITION), v)?;
         d.vertices.push(vd);
     }
+    own_tolerances(&mut d, f, &eu_face, &loop_vertices, n_point)?;
     Ok(d)
+}
+
+/// The B-rep's and each face's tolerance from the edges' and vertices' own, when the arrays carry
+/// them. TOLERANCE is the largest tolerance in arrays SMLib writes, and MakeTopologyFromData
+/// raises every entity to the B-rep's: taken as the B-rep's, it would become every entity's, and
+/// each crossing between the kernels spread the largest over the whole body. Each written edge or
+/// vertex tolerance is at least the B-rep's and its faces' (`ZoneTolWithFaces`), so the B-rep's is
+/// at most the least of them and a face's at most the least of its edges' and loop vertices'.
+fn own_tolerances(d: &mut BrepData, f: &In<'_>, eu_face: &[usize], loop_vertices: &[(usize, u64)], n_point: u64) -> Result<()> {
+    if f.r(EDGE_TOLERANCE).is_empty() || f.r(VERTEX_TOLERANCE).is_empty() {
+        return Ok(());
+    }
+    let zone = d.zone_tol_3d;
+    let mut faces = vec![f64::INFINITY; d.faces.len()];
+    let mut lower = |face: usize, t: f64| -> Result<()> {
+        let slot = faces.get_mut(face).ok_or_else(|| bad("edgeuse face"))?;
+        *slot = slot.min(t);
+        Ok(())
+    };
+    for (kk, &face) in eu_face.iter().enumerate() {
+        let edge = index_u64(get(f.i(EDGEUSE_EDGE), kk)? as u64)?;
+        lower(face, d.edges.get(edge).ok_or_else(|| bad("edgeuse edge"))?.zone_tol_3d)?;
+    }
+    for &(face, vertex) in loop_vertices {
+        lower(face, d.vertices.get(index_u64(vertex)?).ok_or_else(|| bad("loop vertex"))?.zone_tol_3d)?;
+    }
+    let face_edges = d.edges.len().min(f.r(EDGE_TOLERANCE).len());
+    let own_vertices = d.vertices.iter().skip(index_u64(n_point)?).map(|v| v.zone_tol_3d);
+    let least = d.edges.iter().take(face_edges).map(|e| e.zone_tol_3d).chain(own_vertices).fold(zone, f64::min);
+    if !(least.is_finite() && least > 0.0) {
+        return Ok(());
+    }
+    d.zone_tol_3d = least;
+    for (fd, t) in d.faces.iter_mut().zip(faces) {
+        fd.zone_tol_3d = if t.is_finite() { t.min(zone) } else { zone };
+    }
+    Ok(())
 }
 
 /// An `SmExtent2d` with its ends in order (`Set`, `SetMinMax`).
@@ -2424,7 +2473,7 @@ fn extent2d(u0: f64, v0: f64, u1: f64, v1: f64) -> Result<Extent2d> {
 }
 
 /// A body from the flat arrays the C API imports (`BrepFromFlat`): `Validate`,
-/// `FlatToBrepData`, then `MakeTopologyFromData` with the arrays' tolerance as it is and no UV
+/// `FlatToBrepData`, then `MakeTopologyFromData` with the B-rep's tolerance as it is ([`own_tolerances`]) and no UV
 /// trims or analytic conversion made; it heals unless `SOURCE` says SMLib wrote the arrays.
 pub(crate) fn from_arrays(a: &Arrays) -> Result<Body> {
     let f = In(a);
