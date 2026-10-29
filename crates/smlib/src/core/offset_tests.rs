@@ -113,6 +113,10 @@ const BLOCK: Shape = Shape::Box([0.0; 3], [30.0, 20.0, 10.0]);
 const ABC: f64 = 6000.0;
 /// A point on its top face.
 const TOP: [f64; 3] = [15.0, 10.0, 10.0];
+/// A point on its front face (y = 0).
+const FRONT: [f64; 3] = [15.0, 0.0, 5.0];
+/// The z axis: a neutral plane's normal and a pull.
+const Z: [f64; 3] = [0.0, 0.0, 1.0];
 /// A 30 x 20 sheet in z = 0: the x axis from 0 to 30 swept 20 along y.
 const PLATE: Shape = Shape::LineSheet([0.0; 3], [30.0, 0.0, 0.0], [0.0, 1.0, 0.0], 20.0);
 /// A quarter of a cylinder of radius 5 about the z axis, 10 high.
@@ -166,6 +170,23 @@ fn case(name: &str) -> Case {
                 Op::Draft(BLOCK, sides, [0.0; 3], [0.0, 0.0, 1.0], [0.0, 0.0, 1.0], 5f64.to_radians()),
                 Expect::Volume(a * b * h - (a + b) * h * h * s + 4.0 / 3.0 * h * h * h * s * s),
             )
+        }
+        // The front (y = 0) alone drafted θ = 5° about the bottom: a wedge of a h² tanθ / 2
+        // comes off along its length.
+        "draft_one_side" => {
+            let s = (5.0f64).to_radians().tan();
+            c(Op::Draft(BLOCK, vec![FRONT], [0.0; 3], Z, Z, 5f64.to_radians()), Expect::Volume(ABC - 30.0 * 100.0 * s / 2.0))
+        }
+        // A negative angle leans it out: the same wedge goes on.
+        "draft_one_side_out" => {
+            let s = (5.0f64).to_radians().tan();
+            c(Op::Draft(BLOCK, vec![FRONT], [0.0; 3], Z, Z, -5f64.to_radians()), Expect::Volume(ABC + 30.0 * 100.0 * s / 2.0))
+        }
+        // Hinged at the top (z = 10) and leaning in going up, the face leans out below the
+        // hinge: the wedge goes on.
+        "draft_one_side_hinged_at_the_top" => {
+            let s = (5.0f64).to_radians().tan();
+            c(Op::Draft(BLOCK, vec![FRONT], [0.0, 0.0, 10.0], Z, Z, 5f64.to_radians()), Expect::Volume(ABC + 30.0 * 100.0 * s / 2.0))
         }
         // A cylinder's side is not flat.
         "draft_a_curved_face" => c(
@@ -392,7 +413,10 @@ cases!(
     offset_sheet_a_solid,
     offset_faces_top_out: ignore = "no SmOffsetFacesExecutive, fork a96ce9f (solidcore#1060)",
     offset_faces_through,
-    draft_box_sides: ignore = "no SmBrep::LocalOperation (solidcore PR #1427)",
+    draft_box_sides,
+    draft_one_side,
+    draft_one_side_out,
+    draft_one_side_hinged_at_the_top,
     draft_a_curved_face,
     draft_a_face_across_the_pull,
 );
