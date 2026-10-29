@@ -71,8 +71,8 @@ pub(crate) struct Draft {
 }
 
 pub(crate) use imp::{
-    body_from_record, curve, extrude, face_section, loft, loft_rails, loft_to_point, path_curve, project_onto_face, revolve, screw, screw_radial,
-    sphere, sweep, sweep_controlled,
+    body_from_record, curve, extrude, extrude_drafted_with_holes, face_section, loft, loft_rails, loft_to_point, path_curve, project_onto_face,
+    revolve, screw, screw_radial, sphere, sweep, sweep_controlled,
 };
 
 /// Refuses what no SMLib sweep does, before any work.
@@ -272,7 +272,17 @@ mod imp {
         let m = body.mesh(&crate::MeshTolerance::chord(mesh_tol))?;
         let faces = face_tris(&m);
         let n = body.face_count();
-        let flat_tol = size * 1e-5 + 1e-9;
+        // A cap's points lie on its plane to the evaluation's precision. Sized to the body, the
+        // flatness tolerance can exceed the gap between parallel start and end planes (a box
+        // 0.1 µm thick in a 14 mm body), which would put each cap in both: it stays under a
+        // quarter of that gap. Planes that coincide (the ends of a half turn) are told apart by
+        // the profile's edges instead.
+        let gap = end
+            .filter(|e| e.normal().cross(start.normal()).len() < 1e-9)
+            .map(|e| start.height(e.origin).abs())
+            .filter(|g| *g > size * 1e-9)
+            .unwrap_or(f64::INFINITY);
+        let flat_tol = (size * 1e-5 + 1e-9).min(0.25 * gap);
         let near = 3.0 * mesh_tol + flat_tol;
         let flat = |f: usize, pl: &Plane| {
             faces.get(f).is_some_and(|ft| !ft.tris.is_empty() && ft.tris.iter().all(|(t, _)| t.iter().all(|q| pl.height(*q).abs() <= flat_tol)))
@@ -289,12 +299,22 @@ mod imp {
         let end_cap: Vec<bool> = (0..n).map(|f| end.is_some_and(|e| flat(f, e))).collect();
         let cap = |f: usize| start_cap.get(f).copied().unwrap_or(false) || end_cap.get(f).copied().unwrap_or(false);
         let mut swept: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); n];
-        for (poly, fs) in m.edges.iter().zip(&m.edge_faces) {
-            if poly.len() < 2 || !poly.iter().all(|q| start.height(*q).abs() <= flat_tol) {
-                continue;
-            }
-            for s in edges {
-                if poly.windows(2).any(|w| s.at.dist_to_segment(w[0], w[1]) <= near) {
+        // Each seed lies on its own piece's edge (within the mesh's sag on a curve); `near` is
+        // sized to the body, so on a side shorter than it (a 0.3 mm wall of a 1 m label) the
+        // neighbours' edges are near too. The seed marks only the edges nearest it: the one it
+        // lies on, or both pieces of an edge split at its middle.
+        let start_edges: Vec<(&Vec<Vec3>, &Vec<u32>)> = m
+            .edges
+            .iter()
+            .zip(&m.edge_faces)
+            .filter(|(poly, _)| poly.len() >= 2 && poly.iter().all(|q| start.height(*q).abs() <= flat_tol))
+            .collect();
+        for s in edges {
+            let dist = |poly: &[Vec3]| poly.windows(2).map(|w| s.at.dist_to_segment(w[0], w[1])).fold(f64::INFINITY, f64::min);
+            let ds: Vec<f64> = start_edges.iter().map(|(poly, _)| dist(poly)).collect();
+            let nearest = ds.iter().copied().fold(f64::INFINITY, f64::min);
+            for ((_, fs), d) in start_edges.iter().zip(&ds) {
+                if *d <= near && *d <= nearest + flat_tol {
                     for f in fs.iter().map(|f| *f as usize).filter(|f| !cap(*f)) {
                         if let Some(set) = swept.get_mut(f) {
                             set.insert(s.piece);
@@ -427,6 +447,79 @@ mod imp {
         with_history(body, &roles, pieces)
     }
 
+    /// The solid `pieces` (one closed loop) on `plane` sweep, moved `from` along its normal and
+    /// drafted `d` over `distance` along `sign` × the normal, as [`extrude`] builds it, without
+    /// its roles.
+    fn drafted_loop(plane: &Plane, pieces: &[Piece], from: f64, distance: f64, sign: f64, d: Draft) -> Result<Brep> {
+        let base = plane.offset(from);
+        let n = plane.x.cross(plane.y).normalized().ok_or_else(|| KernelError::Invalid("profile plane".into()))?;
+        let dir = n * sign.signum();
+        if d.foot > 0.0 {
+            if !(d.foot < distance) {
+                return Err(KernelError::Invalid(format!("taper foot = {}", d.foot)));
+            }
+            let knee = plane.offset(from + sign.signum() * d.foot);
+            let lean = -(distance * d.taper.tan() / (distance - d.foot)).atan();
+            let prism =
+                Brep::extrude(&curves(&base, pieces)?, p(dir), d.foot, 0.0, DraftCorner::default(), true).map_err(|e| failed("extrude", e))?;
+            let slope =
+                Brep::extrude(&curves(&knee, pieces)?, p(dir), distance - d.foot, lean, corner(d.corner), true).map_err(|e| failed("extrude", e))?;
+            let brep = prism.boolean(&slope, solidcraft_smlib::BooleanOp::Union).map_err(|e| failed("extrude", e))?;
+            return brep.ok_or_else(|| failed("extrude", "nothing is left"));
+        }
+        Brep::extrude(&curves(&base, pieces)?, p(dir), distance, -d.taper, corner(d.corner), true).map_err(|e| failed("extrude", e))
+    }
+
+    /// A drafted extrusion of a region with holes: SMLib's draft extrusion takes one loop, so the
+    /// outer loop is drafted and each hole, turned counter-clockwise, is drafted the other way
+    /// and cut from it. Every wall leans by the taper on the material's side, as a single
+    /// drafted sweep would: a taper that narrows the outer boundary widens the holes. `outer` and
+    /// `holes` are the loops' pieces at `from` as [`extrude`] takes them, `all` the region's
+    /// pieces in their numbering (outer, then the holes as they bound the material), which the
+    /// walls' roles name.
+    pub(crate) fn extrude_drafted_with_holes(
+        plane: &Plane,
+        outer: &[Piece],
+        holes: &[Vec<Piece>],
+        all: &[Piece],
+        from: f64,
+        distance: f64,
+        sign: f64,
+        draft: Draft,
+    ) -> Result<Body> {
+        let mut brep = drafted_loop(plane, outer, from, distance, sign, draft)?;
+        for h in holes {
+            let cutter = drafted_loop(plane, h, from, distance, sign, Draft { taper: -draft.taper, ..draft })?;
+            brep = brep
+                .boolean(&cutter, solidcraft_smlib::BooleanOp::Subtract)
+                .map_err(|e| failed("extrude", e))?
+                .ok_or_else(|| KernelError::Invalid("the draft leaves nothing of the profile".into()))?;
+        }
+        let body = body_of(&brep, "extrude")?;
+        let base = plane.offset(from);
+        let top = plane.offset(from + sign.signum() * distance);
+        let low = roles(&body, &base, Some(&top), &seeds(&base, all, |q| q), &[], false)?;
+        let roles: Vec<Role> = if draft.foot > 0.0 {
+            // The sloping walls stand on their edges at the knee, as in [`extrude`].
+            let knee = plane.offset(from + sign.signum() * draft.foot);
+            let high = roles(&body, &knee, Some(&top), &seeds(&knee, all, |q| q), &[], false)?;
+            low.into_iter()
+                .zip(high)
+                .map(|(a, b)| match (a, b) {
+                    (Role::Wall(mut x), Role::Wall(y)) => {
+                        x.extend(y);
+                        Role::Wall(x)
+                    }
+                    (Role::Unknown, w @ Role::Wall(_)) => w,
+                    (a, _) => a,
+                })
+                .collect()
+        } else {
+            low
+        };
+        with_history(body, &roles, all)
+    }
+
     /// The construction sources of a straight extrusion's faces along the normal of `sketch`, as
     /// [`crate::extrude`] gives them: each cap the region at its end (both caps found once
     /// each), each wall swept from one piece that piece as drawn, a line's with the wall's plane.
@@ -531,13 +624,32 @@ mod imp {
     /// it when `translate`. SMLib's sweep follows a smooth path; at a corner (the direction
     /// jumping) the path is swept piece by piece ([`cornered`]).
     pub(crate) fn sweep(plane: &Plane, pieces: &[Piece], path: &[crate::PathSeg], translate: bool) -> Result<Body> {
+        if translate {
+            // Every segment's direction of travel, at its ends and between them.
+            let bad = || KernelError::Invalid("a path segment has no direction".into());
+            let tangents = path
+                .iter()
+                .flat_map(|s| (0..=CROSSING_SAMPLES).map(move |i| seg_at(s, i as f64 / CROSSING_SAMPLES as f64).map(|(_, t)| t)))
+                .collect::<Option<Vec<Vec3>>>()
+                .ok_or_else(bad)?;
+            crate::sweep_path::crossing_check(plane, &tangents)?;
+        }
         let runs = smooth_runs(path)?;
         if runs.len() > 1 {
             return cornered(plane, pieces, path, &runs, translate);
         }
-        let (brep, _) = swept(plane, pieces, path, translate)?;
+        let (brep, [_, middle, last]) = swept(plane, pieces, path, translate)?;
         let body = body_of(&brep, "sweep")?;
-        let roles = roles(&body, plane, None, &seeds(plane, pieces, |q| q), &[], true)?;
+        // The walls known by the profile carried half way (past the start's edges: a wall the
+        // start touches by no edge, as round a closed path, and walls along later path segments).
+        let inside = seeds(plane, pieces, |q| apply(&middle, q));
+        let start = path.first().map(crate::PathSeg::start);
+        let end = path.last().map(seg_ends).transpose()?.map(|(_, b)| b);
+        let roles = match (start, end) {
+            // Round a closed path there are no caps, and the start holds seams only.
+            (Some(a), Some(b)) if a.dist(b) <= 1e-6 => roles(&body, &plane.offset(body.size().max(1e-9) * 10.0), None, &[], &inside, false)?,
+            _ => roles(&body, plane, Some(&placed(plane, &last)), &seeds(plane, pieces, |q| q), &inside, false)?,
+        };
         with_history(body, &roles, pieces)
     }
 
@@ -823,6 +935,8 @@ mod imp {
 
     /// Fewest and most stations of a sweep that twists, scales or follows rails.
     const MIN_STATIONS: usize = 16;
+    /// Directions of travel read along each path segment for the parallel sweep's crossing check.
+    const CROSSING_SAMPLES: usize = 32;
     const MAX_STATIONS: usize = 2048;
 
     /// The profile `region` on `plane` swept along the smooth `path` the way `ctl` asks: twisted,

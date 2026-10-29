@@ -11,6 +11,7 @@
 
 mod aabb2;
 mod arcfit;
+mod ball;
 pub mod blend;
 pub mod brep;
 pub mod bspline;
@@ -24,6 +25,7 @@ pub mod fill_general;
 pub mod fill_iso;
 pub mod fill_matched;
 mod grid;
+pub mod linkage;
 mod mesh;
 pub mod mesh_distance;
 pub mod network;
@@ -39,6 +41,7 @@ mod vec;
 
 pub use aabb2::Aabb2;
 pub use arcfit::MAX_FIT_PIECES;
+pub use ball::Ball;
 pub use blend::hermite_bezier;
 pub use bvh::{Bvh, MeshIndex};
 pub use chain::{Chain, Closed, Ends, Open, Path, Planar, Ring};

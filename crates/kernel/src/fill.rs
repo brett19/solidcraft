@@ -5,11 +5,14 @@
 //! parameters are plane coordinates, so each edge's pcurve is its exact projection onto the
 //! plane.
 //!
-//! The general fill, which also meets the faces beside the loop with G1 or G2, passes through
+//! The general fill, which also meets the faces beside the loop with G1 … G4, passes through
 //! given points, and fills loops that bound no height field, is a patch whose boundary rows are
 //! the loop's own edges (`solidcraft_geom::fill_iso`): each edge's pcurve is a straight line in
-//! (u, v). It takes loops of three or four line or spline edges; the frames across each edge are
-//! read off the neighbouring face's record surface (exact second derivatives for G2).
+//! (u, v), affine in the edge's own parameter. It takes loops of three to sixteen line, spline or
+//! rational edges (a circle's arc on the NURBS form SMLib holds it as); the frames across each
+//! edge are read off the neighbouring face's record surface, with its exact derivatives to the
+//! order asked: the neighbour as a height over its tangent plane to that order
+//! (`solidcraft_geom::linkage`).
 
 use solidcraft_geom::Vec3;
 use solidcraft_geom::brep::eval::SurfaceEval;
@@ -25,7 +28,7 @@ use crate::history::{Change, EdgeOrigin, EdgeProv, FaceProv, History};
 use crate::sew::{PartEdge, PartFace, PartUse, Parts, assemble};
 use crate::{KernelError, Result};
 
-/// How far (degrees) a G1 or G2 patch's normal may turn from its neighbour's along the loop.
+/// How far (degrees) a G1 … G4 patch's normal may turn from its neighbour's along the loop.
 pub const PATCH_ANGLE_TOL_DEG: f64 = 0.05;
 
 /// A spline error as the patch reports it.
@@ -39,7 +42,7 @@ fn spline_error(e: SplineError) -> KernelError {
 /// What a patch on a loop of edges must do besides filling it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PatchSpec {
-    /// How every edge's neighbour is met (G0, G1 or G2).
+    /// How every edge's neighbour is met (G0 … G4).
     pub continuity: Continuity,
     /// Edges met otherwise: a point on the edge and its continuity.
     pub edges: Vec<(Vec3, Continuity)>,
@@ -77,9 +80,14 @@ pub struct PatchReport {
     /// corners where the neighbours themselves disagree, and anywhere.
     pub normal_deviation_deg: f64,
     pub normal_deviation_all_deg: f64,
-    /// The largest difference (1/mm) between the patch's normal curvature across a G2 edge and
-    /// the neighbour's.
-    pub curvature_mismatch: f64,
+    /// The largest angle (degrees) by which the patch's normal misses a neighbour's beyond the
+    /// loop edge's own lean out of that neighbour's tangent plane (what the tolerance holds).
+    pub normal_excess_deg: f64,
+    /// `jumps[k]`, k = 2 … 4: the largest jump across the edges asked for order k or more, clear
+    /// of the loop's corners, of the k-th derivative of the linkage curves' height above the
+    /// neighbour (1/mmᵏ⁻¹): the normal curvature (k = 2), its rate of change
+    /// (3) and that rate's (4) (`solidcraft_geom::fill_iso::Achieved::jumps`).
+    pub jumps: [f64; solidcraft_geom::linkage::MAX_CONTINUITY + 1],
     /// The farthest point from the surface.
     pub point_gap: f64,
 }
@@ -99,10 +107,6 @@ pub fn patch_edges_report(body: &Body, at: &[Vec3], spec: &PatchSpec) -> Result<
     // A range test also throws out NaN.
     if !(solidcraft_geom::fill::MIN_CROWN..=solidcraft_geom::fill::MAX_CROWN).contains(&spec.crown) {
         return Err(KernelError::Invalid("a patch's crown must be between -0.9 and 3".into()));
-    }
-    let g3 = |g: Continuity| g == Continuity::G3;
-    if g3(spec.continuity) || spec.edges.iter().any(|(_, g)| g3(*g)) {
-        return Err(KernelError::Invalid("not supported yet: a patch meets its neighbours with g0, g1 or g2".into()));
     }
     if spec.edges.len() > 10_000 || spec.edges.iter().any(|(p, _)| !p.is_finite()) {
         return Err(KernelError::Invalid("pick at most 10000 edges, each by a finite point, for their continuity".into()));
@@ -125,7 +129,7 @@ pub fn patch_edges_report(body: &Body, at: &[Vec3], spec: &PatchSpec) -> Result<
         }
     }
     if spec.crown != 0.0 && orders.iter().all(|g| *g == Continuity::G0) {
-        return Err(KernelError::Invalid("not supported yet: a crown on a patch through points with no g1 or g2 edge".into()));
+        return Err(KernelError::Invalid("not supported yet: a crown on a patch through points with no g1 or higher edge".into()));
     }
     general_fill(body, &record, &chain, &orders, &spec.points, spec.crown)
 }
@@ -140,30 +144,20 @@ fn general_fill(
     points: &[Vec3],
     crown: f64,
 ) -> Result<(Body, PatchReport)> {
-    if !(3..=solidcraft_geom::fill_iso::MAX_ISO_EDGES).contains(&chain.len()) {
+    if !(1..=solidcraft_geom::fill_iso::MAX_ISO_EDGES).contains(&chain.len()) {
         return Err(KernelError::Invalid(format!(
-            "not supported yet: a general patch on a loop of {} edges (three to {})",
+            "not supported yet: a general patch on a loop of {} edges (one to {})",
             chain.len(),
             solidcraft_geom::fill_iso::MAX_ISO_EDGES
         )));
     }
-    let edges: Vec<IsoEdge> = chain.iter().map(|&(e, forward)| iso_edge(record, e, forward)).collect::<Result<_>>()?;
+    let pieces = loop_pieces(record, chain)?;
+    let edges: Vec<IsoEdge> = pieces.iter().map(|p| iso_edge(record, p)).collect::<Result<_>>()?;
     let size = body.size().max(solidcraft_geom::LINEAR_TOL);
-    let mut beside: Vec<Option<Beside>> = Vec::with_capacity(chain.len());
-    for (&(e, forward), order) in chain.iter().zip(orders) {
-        beside.push(if *order == Continuity::G0 { None } else { Some(Beside::new(record, e, forward, *order == Continuity::G2, size)?) });
-    }
-    // Where a G1/G2 edge's neighbour and the one before disagree at their corner.
-    let n = chain.len();
-    let mut clash = vec![false; n];
-    for (k, slot) in clash.iter_mut().enumerate() {
-        let prev = (k + n - 1) % n;
-        let (Some(Some(a)), Some(Some(b))) = (beside.get(prev), beside.get(k)) else { continue };
-        let (Some(ea), Some(eb)) = (edges.get(prev), edges.get(k)) else { continue };
-        let (end, start) = (ea.knots.last().copied().unwrap_or(0.0), eb.knots.first().copied().unwrap_or(0.0));
-        if let (Some(x), Some(y)) = (a.across(record, end)?, b.across(record, start)?) {
-            *slot = x.normal.dot(y.normal).abs() < (2.0 * PATCH_ANGLE_TOL_DEG).to_radians().cos();
-        }
+    let mut beside: Vec<Option<Beside>> = Vec::with_capacity(pieces.len());
+    for p in &pieces {
+        let order = chain.iter().position(|&(e, _)| e == p.edge).and_then(|k| orders.get(k)).copied().unwrap_or(Continuity::G0);
+        beside.push(if order == Continuity::G0 { None } else { Some(Beside::new(record, p.edge, p.forward, order, size)?) });
     }
     let mut across = |k: usize, ts: &[f64]| -> std::result::Result<Vec<Option<Across>>, String> {
         match beside.get(k) {
@@ -173,15 +167,16 @@ fn general_fill(
         }
     };
     let spec = IsoSpec { tol: face_tolerance(body), angle_tol: PATCH_ANGLE_TOL_DEG.to_radians(), crown, points };
-    let fill = solidcraft_geom::fill_iso::iso_fill(&edges, &mut across, &clash, &spec).map_err(spline_error)?;
-    let made = quilt_body(body, record, chain, &fill, face_tolerance(body))?;
+    let fill = solidcraft_geom::fill_iso::iso_fill(&edges, &mut across, &spec).map_err(spline_error)?;
+    let made = quilt_body(body, record, &pieces, &fill, face_tolerance(body))?;
     let a = fill.achieved;
     let report = PatchReport {
         general: true,
         gap: 0.0,
         normal_deviation_deg: a.normal_deviation.to_degrees(),
         normal_deviation_all_deg: a.normal_deviation_all.to_degrees(),
-        curvature_mismatch: a.curvature_mismatch,
+        normal_excess_deg: a.normal_excess.to_degrees(),
+        jumps: a.jumps,
         point_gap: a.point_deviation,
     };
     Ok((made, report))
@@ -208,7 +203,7 @@ pub(crate) fn matched_patch(body: &Body, chain: &[(usize, bool)], curvature_tol:
     let mut beside = Vec::with_capacity(chain.len());
     for &(e, forward) in chain {
         sides.push(Side::new(&record, e, forward)?);
-        beside.push(Beside::new(&record, e, forward, true, size)?);
+        beside.push(Beside::new(&record, e, forward, Continuity::G2, size)?);
     }
     // A vertex of the loop is a corner where the loop turns there: the edge arriving and the one
     // leaving go different ways.
@@ -241,84 +236,157 @@ pub(crate) fn matched_patch(body: &Body, chain: &[(usize, bool)], curvature_tol:
     Ok((made, fill))
 }
 
-/// A loop edge as the patch takes it: a non-rational B-spline on the edge's interval, running
-/// the loop's way, its ends on the edge's vertices. Conics and traced curves have no such form
-/// in their own parameter (an arc's angle is no rational function of a NURBS parameter), and a
-/// rational edge none the Coons sum can blend: refused by name.
-fn iso_edge(record: &b::Brep, e: usize, forward: bool) -> Result<IsoEdge> {
+/// A piece of a loop edge as the general fill takes it: record edge `edge` over `interval` (in
+/// its own parameter, min < max), run the loop's way along it (`forward`) or back.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Piece {
+    edge: usize,
+    forward: bool,
+    interval: [f64; 2],
+}
+
+/// The loop `chain` as the general fill's sides: each edge whole, but for a loop of one or two
+/// edges (a tube's end: one closed circle) each edge in equal pieces of its parameter, four sides
+/// in all, so the fill is one four-sided patch on pieces of the edges' own curves.
+fn loop_pieces(record: &b::Brep, chain: &[(usize, bool)]) -> Result<Vec<Piece>> {
+    let split = match chain.len() {
+        1 => 4,
+        2 => 2,
+        _ => 1,
+    };
+    let mut out = Vec::with_capacity(chain.len() * split);
+    for &(e, forward) in chain {
+        let edge = record.edges.get(e).ok_or_else(|| KernelError::Failed("patch: edge reference".into()))?;
+        let [a, z] = edge.interval;
+        // A break that falls on one of the curve's own knots (a conic's quarter points) is that
+        // knot exactly: a piece must not start a rounding error off one.
+        let own: Vec<f64> = match edge.parameters() {
+            b::Curve::Spline { knots, .. } | b::Curve::RationalSpline { knots, .. } => knots.clone(),
+            _ => Vec::new(),
+        };
+        let at = |i: usize| {
+            if i == 0 {
+                a
+            } else if i == split {
+                z
+            } else {
+                let t = a + (z - a) * i as f64 / split as f64;
+                own.iter().copied().find(|k| (k - t).abs() <= 1e-9 * (z - a).abs()).unwrap_or(t)
+            }
+        };
+        let mut pieces: Vec<Piece> = (0..split).map(|i| Piece { edge: e, forward, interval: [at(i), at(i + 1)] }).collect();
+        if !forward {
+            pieces.reverse();
+        }
+        out.extend(pieces);
+    }
+    Ok(out)
+}
+
+/// `t` on an edge's interval `[a, z]` reflected about its middle: the loop's parameter along an
+/// edge it runs against.
+fn reflected(a: f64, z: f64, t: f64) -> f64 {
+    if t == a {
+        z
+    } else if t == z {
+        a
+    } else {
+        a + z - t
+    }
+}
+
+/// A loop edge as the patch takes it: a B-spline on the edge's interval, rational when the edge
+/// is (a circle or ellipse on the NURBS form SMLib holds it as, whose parameter the edge's interval
+/// and pcurves are in), running the loop's way, its ends on the edge's vertices. A traced curve
+/// has no such form in its own parameter and is refused by name.
+fn iso_edge(record: &b::Brep, piece: &Piece) -> Result<IsoEdge> {
+    let Piece { edge: e, forward, interval: [lo, hi] } = *piece;
     let edge = record.edges.get(e).ok_or_else(|| KernelError::Failed("patch: edge reference".into()))?;
     let v3 = |p: &[f64; 3]| Vec3::new(p[0], p[1], p[2]);
     let [a, z] = edge.interval;
-    let (degree, knots, points): (usize, Vec<f64>, Vec<Vec3>) = match &edge.curve {
+    let (degree, knots, h): (usize, Vec<f64>, Vec<HPoint>) = match edge.parameters() {
         b::Curve::Line { start, end } => {
             let (s, t) = (v3(start), v3(end));
-            (1, vec![a, a, z, z], vec![s + (t - s) * a, s + (t - s) * z])
+            (1, vec![a, a, z, z], vec![HPoint::weighted(s + (t - s) * a, 1.0), HPoint::weighted(s + (t - s) * z, 1.0)])
         }
         b::Curve::Polyline { points } => {
             let mut knots = vec![0.0];
             knots.extend((0..points.len()).map(|i| i as f64));
             knots.push(points.len().saturating_sub(1) as f64);
-            (1, knots, points.iter().map(v3).collect())
+            (1, knots, points.iter().map(|p| HPoint::weighted(v3(p), 1.0)).collect())
         }
-        b::Curve::Spline { knots, points } => (knots.len().saturating_sub(points.len() + 1), knots.clone(), points.iter().map(v3).collect()),
-        b::Curve::RationalSpline { knots, homogeneous } if homogeneous.windows(2).all(|w| w[0][3] == w[1][3]) => (
+        b::Curve::Spline { knots, points } => {
+            (knots.len().saturating_sub(points.len() + 1), knots.clone(), points.iter().map(|p| HPoint::weighted(v3(p), 1.0)).collect())
+        }
+        b::Curve::RationalSpline { knots, homogeneous } => (
             knots.len().saturating_sub(homogeneous.len() + 1),
             knots.clone(),
-            homogeneous.iter().map(|h| Vec3::new(h[0] / h[3], h[1] / h[3], h[2] / h[3])).collect(),
+            homogeneous.iter().map(|h| HPoint { x: h[0], y: h[1], z: h[2], w: h[3] }).collect(),
         ),
         _ => {
             return Err(KernelError::Invalid(format!(
-                "not supported yet: a general patch on edge {e}, a circle, ellipse, rational or traced curve (its pcurve on the patch has no exact form in its own parameter)"
+                "not supported yet: a general patch on edge {e}, a circle or ellipse with no NURBS form, or a traced curve (its pcurve on the patch has no exact form in its own parameter)"
             )));
         }
     };
-    // The piece on the edge's interval, then run the loop's way.
-    let h: Vec<HPoint> = points.iter().map(|p| HPoint::weighted(*p, 1.0)).collect();
-    let (mut knots, h) = solidcraft_geom::bspline::segment(degree, &knots, &h, a, z).map_err(spline_error)?;
-    let mut points: Vec<Vec3> = h.iter().map(|p| p.xyz()).collect();
+    // The piece of the edge, then run the loop's way (the edge's parameter reflected about its
+    // interval's middle).
+    let (mut knots, mut h) = solidcraft_geom::bspline::segment(degree, &knots, &h, lo, hi).map_err(spline_error)?;
     if !forward {
         knots = knots.iter().rev().map(|k| a + z - k).collect();
-        points.reverse();
-        // The interval's ends exactly (the reflection's rounding), so a piece's ends name them.
+        h.reverse();
+        // The ends exactly (the reflection's rounding), so a piece's ends name them.
+        let (rlo, rhi) = (reflected(a, z, hi), reflected(a, z, lo));
         let n = knots.len();
         for (i, k) in knots.iter_mut().enumerate() {
             if i <= degree {
-                *k = a;
+                *k = rlo;
             } else if i + degree + 1 >= n {
-                *k = z;
+                *k = rhi;
             }
         }
     }
-    // Its ends exactly on the loop's vertices.
-    let vertex = |end: usize| record.vertices.get(edge.vertices[end] as usize).map(|v| v3(&v.point));
-    let (first, last) = if forward { (vertex(0), vertex(1)) } else { (vertex(1), vertex(0)) };
-    if let (Some(p), Some(q), Some(f)) = (first, last, points.first_mut()) {
+    let rational = h.iter().any(|q| q.w != 1.0);
+    let mut points = h
+        .iter()
+        .map(|q| q.project().filter(|_| q.w > 0.0))
+        .collect::<Option<Vec<Vec3>>>()
+        .ok_or_else(|| KernelError::Invalid(format!("not supported yet: a general patch on edge {e}, whose weights are not all positive")))?;
+    // Its ends exactly on the loop's vertices, where they are the edge's ends.
+    let vertex = |at: f64| match (at == a, at == z) {
+        (true, _) => record.vertices.get(edge.vertices[0] as usize).map(|v| v3(&v.point)),
+        (_, true) => record.vertices.get(edge.vertices[1] as usize).map(|v| v3(&v.point)),
+        _ => None,
+    };
+    let (first, last) = if forward { (vertex(lo), vertex(hi)) } else { (vertex(hi), vertex(lo)) };
+    if let (Some(p), Some(f)) = (first, points.first_mut()) {
         *f = p;
-        if let Some(l) = points.last_mut() {
-            *l = q;
-        }
     }
-    Ok(IsoEdge { degree, knots, points })
+    if let (Some(q), Some(l)) = (last, points.last_mut()) {
+        *l = q;
+    }
+    let weights = rational.then(|| h.iter().map(|q| q.w).collect());
+    Ok(IsoEdge { degree, knots, points, weights })
 }
 
-/// The face beside a G1/G2 edge, read at points of the edge: its record surface, which side of
-/// it is outward, whether its boundary runs the edge the loop's way, and whether its curvature
-/// is read (G2).
+/// The face beside a G1 … G4 edge, read at points of the edge: its record surface, which side of
+/// it is outward, whether its boundary runs the edge the loop's way, and how much of it is read
+/// (`order`: its tangent plane for G1, and its jet to that order above).
 struct Beside {
     surface: SurfaceEval,
     side: f64,
     along: bool,
     edge: usize,
     forward: bool,
-    curvature: bool,
+    order: Continuity,
     reach: f64,
 }
 
 impl Beside {
-    fn new(record: &b::Brep, e: usize, forward: bool, curvature: bool, size: f64) -> Result<Beside> {
+    fn new(record: &b::Brep, e: usize, forward: bool, order: Continuity, size: f64) -> Result<Beside> {
         let edge = record.edges.get(e).ok_or_else(|| KernelError::Failed("patch: edge reference".into()))?;
         let [u] = edge.uses.as_slice() else {
-            return Err(KernelError::Invalid("an edge of the loop lies between two faces: g1 and g2 need the one face beside it".into()));
+            return Err(KernelError::Invalid("an edge of the loop lies between two faces: g1 and up need the one face beside it".into()));
         };
         let face = record.faces.get(u.face as usize).ok_or_else(|| KernelError::Failed("patch: face reference".into()))?;
         let surface = SurfaceEval::new(face.parameters())
@@ -345,15 +413,17 @@ impl Beside {
             along: runs_forward == forward,
             edge: e,
             forward,
-            curvature,
+            order,
             reach: (size * 1e-4).max(1e-6),
         })
     }
 
     /// The neighbour's conditions at parameter `t` of the loop's edge (its `IsoEdge`, run the
     /// loop's way, whose parameter is the edge's reversed where the loop runs against it):
-    /// its normal, the direction it leaves the edge in, away from it, and for G2 its curvature
-    /// vector along that direction. `None` where the edge has no tangent there.
+    /// its normal, the direction it leaves the edge in, away from it, and for G2 and up its
+    /// curvature vector along that direction and its jet to the order asked
+    /// (`solidcraft_geom::linkage::surface_jet`, on the frame of the boundary and the leave
+    /// direction). `None` where the edge has no tangent there.
     fn across(&self, record: &b::Brep, t: f64) -> Result<Option<Across>> {
         let edge = record.edges.get(self.edge).ok_or_else(|| KernelError::Failed("patch: edge reference".into()))?;
         let [a, z] = edge.interval;
@@ -370,9 +440,21 @@ impl Beside {
         // Away from the face: its boundary's direction × its outward normal.
         let boundary = if self.along { tangent } else { tangent * -1.0 };
         let leave = boundary.cross(normal).normalized().ok_or_else(|| KernelError::Invalid("the boundary runs along the face's normal".into()))?;
-        let bend = if self.curvature { Some(normal * normal_curvature(&self.surface, uv, normal, leave)?) } else { None };
-        Ok(Some(Across { leave, normal, bend }))
+        let order = continuity_order(self.order);
+        if order < 2 {
+            return Ok(Some(Across { leave, normal, bend: None, jet: None }));
+        }
+        let bend = Some(normal * normal_curvature(&self.surface, uv, normal, leave)?);
+        let jet = solidcraft_geom::linkage::surface_jet(&self.surface, uv, normal, leave, order).ok_or_else(|| {
+            KernelError::Invalid(format!("not supported yet: g{order} to a face whose surface has no derivatives of order {order} there"))
+        })?;
+        Ok(Some(Across { leave, normal, bend, jet: Some(jet) }))
     }
+}
+
+/// The continuity order a [`Continuity`] asks: 0 (G0) … n, the one place it is read as a number.
+fn continuity_order(g: Continuity) -> usize {
+    g.conditions().saturating_sub(1)
 }
 
 /// The normal curvature of a surface at `uv` along the unit tangent `w`: `n·r''` of the unit-speed
@@ -695,13 +777,14 @@ fn patch_body(body: &Body, record: &b::Brep, chain: &[(usize, bool)], surface: b
             })?),
             Pcurves::Computed => None,
         };
-        edges.push(PartEdge { curve: edge.parameters().clone(), interval: edge.interval, vertices: ends });
+        edges.push(PartEdge { curve: edge.curve.clone(), nurbs: edge.nurbs.clone(), interval: edge.interval, vertices: ends });
         uses.push(PartUse { edge: k as u32, forward, given });
     }
     if !ccw {
         uses = uses.into_iter().rev().map(|u| PartUse { forward: !u.forward, ..u }).collect();
     }
-    let made = assemble(Parts { vertices, edges, faces: vec![PartFace { surface, forward: true, loops: vec![uses] }], tolerance: tol }, false)?;
+    let mut made = assemble(Parts { vertices, edges, faces: vec![PartFace { surface, forward: true, loops: vec![uses] }], tolerance: tol }, false)?;
+    hold_gap(&mut made.brep, tol);
     let smlib = solidcraft_smlib::Brep::from_record(&made.brep, true).map_err(|e| KernelError::Failed(format!("patch: SMLib: {e}")))?;
     let (patch, order) = crate::native::body_from_smlib_ordered(&smlib)?;
     // The patch's edges in its own order, each from the loop edge it is.
@@ -726,13 +809,13 @@ fn patch_body(body: &Body, record: &b::Brep, chain: &[(usize, bool)], surface: b
 /// exact curve record; the spokes from the halves' common vertex to the centre; every pcurve the
 /// straight line in (u, v) the patch gives its side. Its history is over `[body]`: every face is
 /// new, each loop edge (or half) a piece of the body's own, each spoke new.
-fn quilt_body(body: &Body, record: &b::Brep, chain: &[(usize, bool)], fill: &IsoFill, tol: f64) -> Result<Body> {
+fn quilt_body(body: &Body, record: &b::Brep, chain: &[Piece], fill: &IsoFill, tol: f64) -> Result<Body> {
     use solidcraft_geom::fill_iso::IsoSide;
     let fail = |m: &str| KernelError::Failed(format!("patch: {m}"));
     let index = |n: usize| u32::try_from(n).map_err(|_| fail("budget"));
     let mut vertices: Vec<[f64; 3]> = Vec::new();
     let mut vertex_of: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
-    let mut middle_of: std::collections::HashMap<usize, u32> = std::collections::HashMap::new();
+    let mut middle_of: std::collections::HashMap<(usize, u64), u32> = std::collections::HashMap::new();
     let mut edges: Vec<PartEdge> = Vec::new();
     // Each part edge's origin: the record edge it is a piece of (`None` for a spoke).
     let mut origin: Vec<Option<usize>> = Vec::new();
@@ -755,12 +838,14 @@ fn quilt_body(body: &Body, record: &b::Brep, chain: &[(usize, bool)], fill: &Iso
             };
             match *side {
                 IsoSide::Edge { edge: k, from, to, uv } => {
-                    let &(e, forward) = chain.get(k).ok_or_else(|| fail("side"))?;
+                    let &Piece { edge: e, forward, interval: [plo, phi] } = chain.get(k).ok_or_else(|| fail("side"))?;
                     let edge = record.edges.get(e).ok_or_else(|| fail("edge reference"))?;
                     let [a, z] = edge.interval;
-                    // The patch's parameter runs the loop's way: the edge's own, reversed where the
-                    // loop runs against it.
-                    let tau = |t: f64| if forward { t } else { a + z - t };
+                    // The patch's parameter runs the loop's way: the edge's own, reflected where the
+                    // loop runs against it; a side's ends are its piece's ends or middle, exactly.
+                    let near = 1e-9 * (1.0 + (z - a).abs() + a.abs().max(z.abs()));
+                    let snap = |t: f64| [plo, phi, 0.5 * (plo + phi)].into_iter().find(|s| (s - t).abs() <= near).unwrap_or(t);
+                    let tau = |t: f64| snap(if forward { t } else { reflected(a, z, t) });
                     let (tf, tt) = (tau(from), tau(to));
                     let (lo, hi, along) = if tf < tt { (tf, tt, true) } else { (tt, tf, false) };
                     let key = (e, lo.to_bits(), hi.to_bits());
@@ -779,11 +864,13 @@ fn quilt_body(body: &Body, record: &b::Brep, chain: &[(usize, bool)], fill: &Iso
                                     }
                                     id
                                 } else {
-                                    middle(&mut vertices, &mut middle_of, k, edge, t)?
+                                    middle(&mut vertices, &mut middle_of, e, edge, t)?
                                 };
                             }
                             let id = index(edges.len())?;
-                            edges.push(PartEdge { curve: edge.curve.clone(), interval: [lo, hi], vertices: ends });
+                            // The edge itself: the interval and the pcurve's parameter are on its
+                            // NURBS form (a conic's), which it keeps.
+                            edges.push(PartEdge { curve: edge.curve.clone(), nurbs: edge.nurbs.clone(), interval: [lo, hi], vertices: ends });
                             origin.push(Some(e));
                             piece_of.insert(key, id);
                             id
@@ -797,17 +884,21 @@ fn quilt_body(body: &Body, record: &b::Brep, chain: &[(usize, bool)], fill: &Iso
                         Some(id) => *id,
                         None => {
                             let curve = fill.spokes.get(spoke).ok_or_else(|| fail("spoke"))?;
-                            let &(e, _) = chain.get(spoke).ok_or_else(|| fail("spoke"))?;
+                            let &Piece { edge: e, interval: [plo, phi], .. } = chain.get(spoke).ok_or_else(|| fail("spoke"))?;
                             let edge = record.edges.get(e).ok_or_else(|| fail("edge reference"))?;
-                            let start = middle(&mut vertices, &mut middle_of, spoke, edge, 0.5 * (edge.interval[0] + edge.interval[1]))?;
+                            let start = middle(&mut vertices, &mut middle_of, e, edge, 0.5 * (plo + phi))?;
                             let end = centre.ok_or_else(|| fail("centre"))?;
                             let id = index(edges.len())?;
-                            let points = curve.points.iter().map(|p| [p.x, p.y, p.z]).collect();
-                            edges.push(PartEdge {
-                                curve: b::Curve::Spline { knots: curve.knots.clone(), points },
-                                interval: [0.0, 1.0],
-                                vertices: [start, end],
-                            });
+                            let spline = match &curve.weights {
+                                Some(w) => b::Curve::RationalSpline {
+                                    knots: curve.knots.clone(),
+                                    homogeneous: curve.points.iter().zip(w).map(|(p, w)| [p.x * w, p.y * w, p.z * w, *w]).collect(),
+                                },
+                                None => {
+                                    b::Curve::Spline { knots: curve.knots.clone(), points: curve.points.iter().map(|p| [p.x, p.y, p.z]).collect() }
+                                }
+                            };
+                            edges.push(PartEdge { curve: spline, nurbs: None, interval: [0.0, 1.0], vertices: [start, end] });
                             origin.push(None);
                             spoke_of.insert(spoke, id);
                             id
@@ -820,7 +911,8 @@ fn quilt_body(body: &Body, record: &b::Brep, chain: &[(usize, bool)], fill: &Iso
         }
         faces.push(PartFace { surface: crate::surfaces::spline_surface(&patch.surface), forward: true, loops: vec![uses] });
     }
-    let made = assemble(Parts { vertices, edges, faces, tolerance: tol }, false)?;
+    let mut made = assemble(Parts { vertices, edges, faces, tolerance: tol }, false)?;
+    hold_gap(&mut made.brep, tol);
     let smlib = solidcraft_smlib::Brep::from_record(&made.brep, true).map_err(|e| KernelError::Failed(format!("patch: SMLib: {e}")))?;
     let (sheet, order) = crate::native::body_from_smlib_ordered(&smlib)?;
     let Some(order) = order else { return Ok(sheet) };
@@ -843,8 +935,23 @@ fn quilt_body(body: &Body, record: &b::Brep, chain: &[(usize, bool)], fill: &Iso
     sheet.with_history(history, &[body])
 }
 
-/// The vertex at parameter `t` inside loop edge `k` (record edge `edge`), made once.
-fn middle(vertices: &mut Vec<[f64; 3]>, made: &mut std::collections::HashMap<usize, u32>, k: usize, edge: &b::Edge, t: f64) -> Result<u32> {
+/// A patch record's edges and vertices given the tolerances that hold a surface `gap` from them.
+/// A record's tolerance is SMLib's intersection tolerance, twice the zone tolerance SMLib holds an
+/// edge's gap to its faces to, and a vertex holds gaps up to half its zone tolerance (SMLib's
+/// `SM_XSECT_TO_ZONETOL3D`, `SmBrep::ValidateAndUpdateTolerances`): an edge takes `2·gap`, a
+/// vertex `4·gap`.
+fn hold_gap(brep: &mut b::Brep, gap: f64) {
+    for e in &mut brep.edges {
+        e.tolerance = e.tolerance.max(2.0 * gap);
+    }
+    for v in &mut brep.vertices {
+        v.tolerance = v.tolerance.max(4.0 * gap);
+    }
+}
+
+/// The vertex at parameter `t` inside record edge `e` (`edge`), made once.
+fn middle(vertices: &mut Vec<[f64; 3]>, made: &mut std::collections::HashMap<(usize, u64), u32>, e: usize, edge: &b::Edge, t: f64) -> Result<u32> {
+    let k = (e, t.to_bits());
     if let Some(v) = made.get(&k) {
         return Ok(*v);
     }
@@ -861,18 +968,31 @@ fn middle(vertices: &mut Vec<[f64; 3]>, made: &mut std::collections::HashMap<usi
 /// tolerance, since a planar face is exact and other operations treat it as containing its
 /// edges to that tolerance. A fitted face gets [`face_tolerance`], ten times looser.
 pub(crate) fn planarity_tolerance(body: &Body) -> f64 {
-    (body.size() * 1e-7).max(solidcraft_geom::LINEAR_TOL)
+    (placed_size(body) * 1e-7).max(solidcraft_geom::LINEAR_TOL)
 }
 
-/// How far the fill's surface may be from the loop's edges: `10⁻⁶` of the body's size, at least
+/// The body's size as the fill tolerances take it, the same wherever the body is and however it
+/// is turned (the bounding box's diagonal is not: a cup turned 0.7 rad about (1, 2, 3) grows from
+/// 54.7 to 61.6, and its fill was sampled to another tolerance): the diameter of the smallest ball
+/// holding its vertices. (Twice the farthest vertex's distance from their centroid is not the
+/// body's size where the vertices crowd one end: up to twice its diameter, and a rounded box's G2
+/// corner patch, its vertices crowding that corner, then fitted past the box.) A body with no
+/// vertices takes its box's diagonal.
+fn placed_size(body: &Body) -> f64 {
+    let vertices: Vec<Vec3> = body.record().vertices.iter().map(|v| Vec3::new(v.point[0], v.point[1], v.point[2])).collect();
+    solidcraft_geom::Ball::enclosing(&vertices).map_or_else(|| body.size(), |ball| ball.diameter())
+}
+
+/// How far the fill's surface may be from the loop's edges: `10⁻⁶` of the body's size
+/// ([`placed_size`]), at least
 /// `10⁻⁵` mm — ten times [`planarity_tolerance`]. Ten times the linear tolerance because a
 /// fitted surface approaches curved edges like a cubic spline, so each further factor of ten
 /// costs about twice the spans each way, and imported edges may already lie `10⁻⁵` mm or more off
 /// their vertices. Later operations must take the face to contain its edges within this
 /// tolerance, not the linear one: the face's edges are the body's exact edges, the surface
-/// between them is the fit (the patch record gives its edges this tolerance).
+/// between them is the fit (the patch record's edges and vertices hold this gap: [`hold_gap`]).
 pub(crate) fn face_tolerance(body: &Body) -> f64 {
-    (body.size() * 1e-6).max(1e-5)
+    (placed_size(body) * 1e-6).max(1e-5)
 }
 
 #[cfg(test)]
@@ -956,11 +1076,24 @@ mod tests {
         worst
     }
 
-    /// Whether every edge of `made` is one of `of`'s own (the same curve record on the same
-    /// interval).
+    /// Whether every edge of `made` is one of `of`'s own: the same kind of curve, on the same
+    /// interval, on the curve it is parameterised on (its NURBS form where it has one) to
+    /// rounding: the same knots and control points within 10⁻¹² of their size. (SMLib makes a
+    /// conic's frame and NURBS form again on a round trip, the last bit of a coordinate apart.)
     fn own_edges(made: &Body, of: &Body) -> bool {
         let own = record(of).edges;
-        record(made).edges.iter().all(|e| own.iter().any(|o| o.curve == e.curve && o.interval == e.interval))
+        let kind = |e: &b::Edge| std::mem::discriminant(&e.curve);
+        let close = |p: &[f64], q: &[f64]| p.len() == q.len() && p.iter().zip(q).all(|(x, y)| (x - y).abs() <= 1e-12 * (1.0 + x.abs().max(y.abs())));
+        let same = |c: &b::Curve, d: &b::Curve| match (c, d) {
+            (b::Curve::Spline { knots: k, points: p }, b::Curve::Spline { knots: l, points: q }) => {
+                k == l && p.len() == q.len() && p.iter().zip(q).all(|(x, y)| close(x, y))
+            }
+            (b::Curve::RationalSpline { knots: k, homogeneous: p }, b::Curve::RationalSpline { knots: l, homogeneous: q }) => {
+                k == l && p.len() == q.len() && p.iter().zip(q).all(|(x, y)| close(x, y))
+            }
+            _ => c == d,
+        };
+        record(made).edges.iter().all(|e| own.iter().any(|o| kind(o) == kind(e) && same(o.parameters(), e.parameters()) && o.interval == e.interval))
     }
 
     /// The fill's mesh: every normal finite, and no triangle folded over (all face the same way
@@ -1089,9 +1222,10 @@ mod tests {
         let mut edges = Vec::new();
         for k in 0..n {
             let c = &top[k];
-            edges.push(PartEdge { curve: c.clone(), interval: interval(c), vertices: [k as u32, ((k + 1) % n) as u32] });
-            edges.push(PartEdge { curve: moved(c), interval: interval(c), vertices: [(n + k) as u32, (n + (k + 1) % n) as u32] });
+            edges.push(PartEdge { nurbs: None, curve: c.clone(), interval: interval(c), vertices: [k as u32, ((k + 1) % n) as u32] });
+            edges.push(PartEdge { nurbs: None, curve: moved(c), interval: interval(c), vertices: [(n + k) as u32, (n + (k + 1) % n) as u32] });
             edges.push(PartEdge {
+                nurbs: None,
                 curve: b::Curve::Line { start: arr(corners[k]), end: arr(corners[k] + drop) },
                 interval: [0.0, 1.0],
                 vertices: [k as u32, (n + k) as u32],

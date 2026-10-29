@@ -313,8 +313,9 @@ fn surfaces(flat: View, n_faces: usize) -> Res<Vec<(b::Surface, Option<b::Surfac
                     v3(flat.f(FACE_CONE_REF_DIRECTION), i, "cone")?,
                 );
                 let (radius, half) = (at(flat.f(FACE_CONE_RADIUS), i, "cone")?, at(flat.f(FACE_CONE_SEMI_ANGLE), i, "cone")?);
-                // SMLib's cone of semi-angle 0 is its cylinder.
-                if half == 0.0 {
+                // SMLib's cone of semi-angle 0 is its cylinder, and one within rounding of it (a thread's
+                // cone of 1e-13 comes out of the trims) is too: the portable record refuses it as a cone.
+                if half.abs() < 1e-12 {
                     b::Surface::Cylinder { frame: f, radius }
                 } else {
                     b::Surface::Cone { frame: f, radius_at_origin: radius, half_angle: half }
@@ -469,11 +470,14 @@ fn curves(flat: View, n_edges: usize) -> Res<(Vec<(b::Curve, Option<b::Curve>, [
                 }
             }
             CURVE_NURBS => {
-                let c = next_nurbs()?;
+                let c = next_nurbs()?.record();
                 // A NURBS edge stays the NURBS SMLib holds, its trims on its own parameter: SMLib
                 // gives lines, circles and ellipses as their own kinds, and nothing is recognised here.
+                // SMLib's interval may start or end a rounding past its knots (a variable round's
+                // end trimmed by a cylinder, ladder 07-fillets/012: 7e-15 before the first knot).
                 kept += 1;
-                (c.record(), None, r, Some([1.0, 0.0]))
+                let r = onto(r, c.natural());
+                (c, None, r, Some([1.0, 0.0]))
             }
             other => return Err(unsupported(format!("SMLib curve kind {other}"))),
         });
@@ -564,8 +568,8 @@ fn mapped(trim: &b::Curve2, same: bool, [scale, offset]: [f64; 2], [t0, t1]: [f6
     })
 }
 
-/// A domain side moved onto the natural range where it overshoots it by rounding (a sphere's
-/// latitudes, a cone's apex).
+/// A domain side or an edge's interval moved onto the natural range where it overshoots it by
+/// rounding (a sphere's latitudes, a cone's apex, a NURBS edge's end knots).
 fn onto(r: [f64; 2], natural: b::Natural) -> [f64; 2] {
     match natural {
         b::Natural::Range(lo, hi) => {

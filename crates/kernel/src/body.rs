@@ -344,9 +344,25 @@ fn coarse_tolerance(span: f64) -> f64 {
     (span * 0.01).clamp(1e-3, 1.0)
 }
 
-/// Box diagonal of a record's vertices (0 when it has none or no finite extent).
+/// Box diagonal of a record's vertices and points along its edges (0 when it has none or no
+/// finite extent). The edges count: SMLib closes a sphere, a cylinder or a torus along seams, so
+/// its vertices alone can be two poles or a single point (a torus came out 1 mm across, and its
+/// display mesh at a hundredth of that took 214 720 triangles). Points on the edges, not their
+/// control hulls: a rational edge's control points can lie far off it.
 fn span_of(record: &Brep) -> f64 {
-    let bounds: Aabb3 = record.vertices.iter().map(|v| v3(v.point)).collect();
+    let mut bounds: Aabb3 = record.vertices.iter().map(|v| v3(v.point)).collect();
+    for e in &record.edges {
+        if let Ok(c) = brep::eval::CurveEval::new(e.parameters()) {
+            let [t0, t1] = e.interval;
+            for i in 1..4 {
+                if let Some(p) = c.point(t0 + (t1 - t0) * f64::from(i) / 4.0)
+                    && p.is_finite()
+                {
+                    bounds.add(p);
+                }
+            }
+        }
+    }
     let d = if bounds.is_empty() { 0.0 } else { bounds.diagonal() };
     if d.is_finite() && d > 0.0 { d } else { 0.0 }
 }
@@ -426,7 +442,7 @@ impl Refusal {
 }
 
 impl SurfaceKind {
-    fn of(surface: &solidcraft_geom::brep::Surface) -> SurfaceKind {
+    pub(crate) fn of(surface: &solidcraft_geom::brep::Surface) -> SurfaceKind {
         use solidcraft_geom::brep::Surface as S;
         match surface {
             S::Plane { .. } | S::PlaneThrough { .. } => SurfaceKind::Plane,
@@ -1182,6 +1198,13 @@ impl Body {
             .collect())
     }
 
+    /// How far [`Body::planar_edges`] lets a piece it reads as a line or an arc lie from the
+    /// edge's curve (a NURBS within this of a circle is that arc), so how far a piece's ends may
+    /// lie from the edge's vertices.
+    pub fn planar_edges_tolerance(&self) -> f64 {
+        (self.size() * 1e-7).max(1e-9) * 10.0
+    }
+
     /// Edges `indices` (record edge indices) in `plane`'s coordinates, exactly: lines, circular
     /// arcs, and free-form curves as the Bézier spans they are, for a sketch to project them.
     /// `None` for an edge that doesn't lie in a plane parallel to `plane`, isn't read exactly or
@@ -1190,7 +1213,7 @@ impl Body {
         if self.is_mesh() {
             return vec![None; indices.len()];
         }
-        let tol = (self.size() * 1e-7).max(1e-9) * 10.0;
+        let tol = self.planar_edges_tolerance();
         indices
             .iter()
             .map(|i| {

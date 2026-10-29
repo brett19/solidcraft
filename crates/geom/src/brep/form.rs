@@ -91,6 +91,61 @@ fn params([a0, a1]: [f64; 2], (q0, n): (f64, usize)) -> [f64; 2] {
     [param(a0).clamp(q0, end), param(a1).clamp(q0, end)]
 }
 
+/// Equal arcs from angle `a0` to `a1` (less than a turn), as few as keep each within a quarter:
+/// their knot vector (0 at `a0`, one more at each arc's end) and control points (as
+/// [`arcs`]). A form on them is not on the quarter grid: for a face whose angle range needs the
+/// four quarters of a turn (or five) without being a turn, which on the grid would be a form that
+/// closes on itself (or overlaps itself) around a face that does not.
+fn arcs_between(a0: f64, a1: f64) -> Option<(Vec<f64>, Vec<([f64; 2], f64)>)> {
+    let span = a1 - a0;
+    if !(a0.is_finite() && span > 0.0 && span < TAU) {
+        return None;
+    }
+    let n = ((span / FRAC_PI_2) - 1e-9).ceil().max(1.0) as usize;
+    let phi = span / n as f64;
+    let w = (0.5 * phi).cos();
+    let at = |a: f64| [a.cos(), a.sin()];
+    let mut pts = Vec::with_capacity(2 * n + 1);
+    let mut knots = vec![0.0; 3];
+    for k in 0..n {
+        let start = a0 + phi * k as f64;
+        if k == 0 {
+            pts.push((at(start), 1.0));
+        }
+        let mid = at(start + 0.5 * phi);
+        pts.push(([mid[0] / w, mid[1] / w], w));
+        pts.push((at(start + phi), 1.0));
+        let end = (k + 1) as f64;
+        knots.extend(if k + 1 < n { vec![end; 2] } else { vec![end; 3] });
+    }
+    Some((knots, pts))
+}
+
+/// The arcs of a face's angle range `a` and its domain on them: the quarter grid's
+/// ([`face_quarters`]), or with `own` and a range short of a turn, arcs of its own from its start
+/// ([`arcs_between`], the domain all of them).
+fn face_arcs(a: [f64; 2], reach: f64, own: bool) -> Option<((Vec<f64>, Vec<([f64; 2], f64)>), [f64; 2])> {
+    if own && a[1] - a[0] < TAU * (1.0 - 1e-9) {
+        // Past each end by `reach` (while that stays short of a turn): the face's boundary, which
+        // lies off the surface by as much, then stays on the form.
+        let pad = reach.max(0.0).min(0.25 * (TAU * (1.0 - 1e-9) - (a[1] - a[0])));
+        let (a0, a1) = (a[0] - pad, a[1] + pad);
+        let made = arcs_between(a0, a1)?;
+        let n = made.0.last().copied()?;
+        let phi = (a1 - a0) / n;
+        // The form parameter at angle `t`: its arc, plus the arc's own parameter there (as
+        // `quarter_u`, for an arc of `phi`).
+        let at = |t: f64| {
+            let k = ((t - a0) / phi).floor().clamp(0.0, n - 1.0);
+            let psi = (t - a0 - k * phi).clamp(0.0, phi);
+            k + 0.5 * (1.0 + (0.5 * psi - 0.25 * phi).tan() / (0.25 * phi).tan())
+        };
+        return Some((made, [at(a[0]), at(a[1])]));
+    }
+    let (grid, d) = face_quarters(a, reach)?;
+    Some((arcs(grid.0, grid.1), d))
+}
+
 /// Quarter arcs from quarter `q0`, `n` of them: their knot vector (in form parameter) and their
 /// control points (as `(cos, sin)` factors on the unit circle's plane) with weights.
 fn arcs(q0: f64, n: usize) -> (Vec<f64>, Vec<([f64; 2], f64)>) {
@@ -238,10 +293,29 @@ pub fn tube_turned(s: &Surface, angle: f64) -> Option<Surface> {
 /// boundary's points ([`extent`]), which may run past a quarter's end by as much as its edges lie
 /// off the surface; the form then covers no quarter for that alone (a torus face of half a tube
 /// would otherwise go round the whole tube).
-pub fn surface_within(s: &Surface, [u, v]: [[f64; 2]; 2], tolerance: f64) -> Option<(Surface, [[f64; 2]; 2])> {
+pub fn surface_within(s: &Surface, domain: [[f64; 2]; 2], tolerance: f64) -> Option<(Surface, [[f64; 2]; 2])> {
+    surface_on(s, domain, tolerance, false)
+}
+
+/// The NURBS form of a cylinder, cone, sphere or torus face over `domain` (as [`surface`]) whose
+/// angles run on arcs of the face's own from where it starts, not on its frame's quarter grid,
+/// wherever its range is short of a turn: the same surface, exactly, but a form that never
+/// closes on itself around a face that does not (a torus face round 250° of its tube needs all
+/// four quarters of the grid, a form SMLib does not take for a torus); each angle runs past the
+/// face's ends by the angle `tolerance` (mm) makes, so a boundary that far off stays on the
+/// form. Its circles' forms then no
+/// longer share its parameter, so its pcurves are not lines: Repair Part rebuilds a refused face
+/// on it and has SMLib make them.
+pub fn surface_on_own_arcs(s: &Surface, domain: [[f64; 2]; 2], tolerance: f64) -> Option<(Surface, [[f64; 2]; 2])> {
+    match s {
+        Surface::Cylinder { .. } | Surface::Cone { .. } | Surface::Sphere { .. } | Surface::Torus { .. } => surface_on(s, domain, tolerance, true),
+        _ => None,
+    }
+}
+
+fn surface_on(s: &Surface, [u, v]: [[f64; 2]; 2], tolerance: f64, own: bool) -> Option<(Surface, [[f64; 2]; 2])> {
     let (reach_u, reach_v) = reaches(s, v, tolerance);
-    let (grid, fu) = face_quarters(u, reach_u)?;
-    let (u_knots, ring) = arcs(grid.0, grid.1);
+    let ((u_knots, ring), fu) = face_arcs(u, reach_u, own)?;
     // The ring of arcs times a profile `(control, weight)` mapped to (radial, axial) about the
     // frame: a rational tensor product, its weights the products.
     let net = |f: &Frame, profile: &[([f64; 2], f64)], at: &dyn Fn([f64; 2]) -> (f64, f64)| -> Option<Vec<Vec<[f64; 4]>>> {
@@ -279,8 +353,7 @@ pub fn surface_within(s: &Surface, [u, v]: [[f64; 2]; 2], tolerance: f64) -> Opt
             Some((Surface::RationalSpline { u_knots, v_knots, homogeneous }, [fu, params(v, vgrid)]))
         }
         Surface::Torus { frame, major_radius, minor_radius, tube_start } => {
-            let (vgrid, fv) = face_quarters(v, reach_v)?;
-            let (v_knots, tube) = arcs(vgrid.0, vgrid.1);
+            let ((v_knots, tube), fv) = face_arcs(v, reach_v, own)?;
             // The tube's arcs turned on by its start (a rotation of the control points, exact).
             let (ts, tc) = tube_start.sin_cos();
             let homogeneous = net(frame, &tube, &|[c, s]| (major_radius + minor_radius * (c * tc - s * ts), minor_radius * (s * tc + c * ts)))?;
@@ -517,6 +590,11 @@ pub fn extent(label: &Surface, loops: &[Vec<(&Curve, [f64; 2], bool)>]) -> Optio
         // and a box over both is more than a turn wide.
         let (mut l_lo, mut l_hi) = ([f64::INFINITY; 2], [f64::NEG_INFINITY; 2]);
         let mut prev: Option<[f64; 2]> = None;
+        // The loop's bounds in each direction, each with the number of poles the loop had passed
+        // through when it got there; and the first and last points off a pole.
+        let mut bounds: Vec<(usize, usize, f64)> = Vec::new();
+        let (mut crossings, mut on_pole) = (0usize, false);
+        let mut first: Option<[f64; 2]> = None;
         for (c, [t0, t1], forward) in l {
             let curve = super::eval::CurveEval::new(c).ok()?;
             // The point at `t` on the label, a periodic parameter unwrapped next to `near`.
@@ -531,28 +609,34 @@ pub fn extent(label: &Surface, loops: &[Vec<(&Curve, [f64; 2], bool)>]) -> Optio
                 }
                 Some(q)
             };
-            let mut samples: Vec<(f64, [f64; 2], [bool; 2])> = Vec::with_capacity(EXTENT_POINTS + 1);
+            let mut samples: Vec<(f64, [f64; 2], [bool; 2], usize)> = Vec::with_capacity(EXTENT_POINTS + 1);
             for k in 0..=EXTENT_POINTS {
                 let f = k as f64 / EXTENT_POINTS as f64;
                 let t = if *forward { t0 * (1.0 - f) + t1 * f } else { t1 * (1.0 - f) + t0 * f };
                 let q = at(t, prev)?;
                 // At a pole the collapsed parameter is anything: it bounds nothing.
                 let pole = eval.pole(q);
-                for d in 0..2 {
-                    if !pole.get(d).copied().unwrap_or(false) {
-                        l_lo[d] = l_lo[d].min(q[d]);
-                        l_hi[d] = l_hi[d].max(q[d]);
+                if pole.iter().any(|p| *p) {
+                    on_pole = first.is_some();
+                } else {
+                    if on_pole {
+                        crossings += 1;
+                        on_pole = false;
                     }
-                }
-                if !pole.iter().any(|p| *p) {
+                    first = first.or(Some(q));
                     prev = Some(q);
                 }
-                samples.push((t, q, pole));
+                for (d, x) in q.iter().enumerate() {
+                    if !pole.get(d).copied().unwrap_or(false) {
+                        bounds.push((crossings, d, *x));
+                    }
+                }
+                samples.push((t, q, pole, crossings));
             }
             // A sample is a point of the boundary, not its extreme: each sample higher (or lower)
             // than its neighbours brackets an extreme of the edge, which is found there.
             for k in 0..samples.len() {
-                let (_, q, pole) = samples[k];
+                let (_, q, pole, passed) = samples[k];
                 let (a, b) = (samples[k.saturating_sub(1)].0, samples[(k + 1).min(samples.len() - 1)].0);
                 for d in 0..2 {
                     // Next to a pole the parameter it collapses is no function of the point: a
@@ -573,9 +657,27 @@ pub fn extent(label: &Surface, loops: &[Vec<(&Curve, [f64; 2], bool)>]) -> Optio
                         }
                         let f = |t: f64| at(t, Some(q)).map_or(f64::NEG_INFINITY, |p| sign * p[d]);
                         let x = sign * golden_max(&f, a.min(b), a.max(b));
-                        l_lo[d] = l_lo[d].min(x);
-                        l_hi[d] = l_hi[d].max(x);
+                        bounds.push((passed, d, x));
                     }
+                }
+            }
+        }
+        // Through a pole the loop goes on from anywhere round the periodic direction it
+        // collapses, so continuing from the point before it is no measure of where: a loop
+        // through a pole closes in (u, v), the pole taking up its turn (a hemisphere bounded by its
+        // rim and its seam, down the seam to the pole and up it on the other side). Past the
+        // first pole, the loop is moved the whole periods that close it.
+        let last = prev;
+        for d in 0..2 {
+            let shift = match (period.get(d), first, last) {
+                (Some(Some(per)), Some(f), Some(e)) if crossings > 0 => -((e[d] - f[d]) / per).round() * per,
+                _ => 0.0,
+            };
+            for &(passed, dd, x) in &bounds {
+                if dd == d {
+                    let x = if passed > 0 { x + shift } else { x };
+                    l_lo[d] = l_lo[d].min(x);
+                    l_hi[d] = l_hi[d].max(x);
                 }
             }
         }

@@ -82,10 +82,19 @@ mod native_tests {
     fn edges_are_on_smlibs_curves() {
         let cyl = Brep::make_cylinder([0.0; 3], 5.0, 10.0).unwrap().to_native().unwrap();
         let side = cyl.faces.iter().find(|f| matches!(f.surface, b::Surface::Cylinder { .. })).unwrap();
-        assert!((side.domain[0][1] - side.domain[0][0] - TAU).abs() < 1e-12);
-        assert_eq!(side.domain[1], [0.0, 10.0]);
+        // The side is on SMLib's NURBS form of the cylinder (its domain is the form's): the whole
+        // turn, so its domain's two u ends meet, from the base to the top.
+        let form = b::eval::SurfaceEval::new(side.parameters()).unwrap();
+        let [[u0, u1], [v0, v1]] = side.domain;
+        for v in [v0, v1] {
+            let (a, z) = (form.point([u0, v]).unwrap(), form.point([u1, v]).unwrap());
+            assert!(a.dist(z) < 1e-9, "{a:?} {z:?}");
+        }
+        let heights = [form.point([u0, v0]).unwrap().z, form.point([u0, v1]).unwrap().z];
+        assert!(heights.iter().any(|h| h.abs() < 1e-9) && heights.iter().any(|h| (h - 10.0).abs() < 1e-9), "{heights:?}");
         for e in &cyl.edges {
-            let eval = b::eval::CurveEval::new(&e.curve).unwrap();
+            // Evaluated on the curve its interval is on (a circle's NURBS form).
+            let eval = b::eval::CurveEval::new(e.parameters()).unwrap();
             let [a, z] = e.interval;
             // Ends on the edge's vertices.
             for (t, v) in [(a, e.vertices[0]), (z, e.vertices[1])] {
@@ -94,6 +103,7 @@ mod native_tests {
                 assert!((p - Vec3::new(q[0], q[1], q[2])).len() < 1e-9, "{:?} at {t}", e.curve);
             }
             if let b::Curve::Circle { radius, .. } = e.curve {
+                let [a, z] = e.curve_interval().unwrap();
                 assert!((radius - 5.0).abs() < 1e-12 && (z - a - TAU).abs() < 1e-9);
             }
         }
@@ -101,6 +111,16 @@ mod native_tests {
         let cone = Brep::make_cone([0.0; 3], 5.0, 0.0, 10.0).unwrap().to_native().unwrap();
         let half = cone.faces.iter().find_map(|f| if let b::Surface::Cone { half_angle, .. } = f.surface { Some(half_angle) } else { None });
         assert!((half.unwrap() + 0.5f64.atan()).abs() < 1e-12);
+    }
+
+    /// A cone whose half angle is within rounding of zero (a52's thread bosses: 1e-13) is exported as
+    /// a cylinder; as a cone the portable record's validation refuses it.
+    #[test]
+    fn a_cone_of_rounding_angle_is_exported_as_a_cylinder() {
+        let near = Brep::make_cone([0.0; 3], 4.0, 4.0 - 1e-12, 10.0).unwrap().to_native().unwrap();
+        assert!(near.faces.iter().any(|f| matches!(f.surface, b::Surface::Cylinder { .. })));
+        assert!(!near.faces.iter().any(|f| matches!(f.surface, b::Surface::Cone { .. })));
+        near.validate().unwrap();
     }
 
     /// A hole tangent to the block's outline from inside: the material touches itself along the
@@ -126,7 +146,8 @@ mod native_tests {
                 p[0].abs() < 1e-9 && (p[1] - 14.5).abs() < 1e-9
             })
         };
-        let middle = |e: &b::Edge| b::eval::CurveEval::new(&e.curve).unwrap().point(0.5 * (e.interval[0] + e.interval[1])).unwrap();
+        // On the curve the interval is on (a circle's NURBS form).
+        let middle = |e: &b::Edge| b::eval::CurveEval::new(e.parameters()).unwrap().point(0.5 * (e.interval[0] + e.interval[1])).unwrap();
         let copies: Vec<&b::Edge> = record.edges.iter().filter(|e| on_line(e)).collect();
         assert_eq!(copies.len(), 2);
         for copy in copies {
@@ -225,6 +246,49 @@ mod native_tests {
         assert!(check.is_valid(), "{check}");
         let got = back.mass_properties(MEASURE_ACCURACY).unwrap().volume;
         assert!((got - want).abs() < 1e-6 * want, "volume {got} vs {want}");
+    }
+
+    /// The variable round r1 -> r5 along a box's top back edge run on into the R5 round of its
+    /// corner (ladder 07-fillets/012): its end trimmed by the R5 cylinder is a NURBS edge, whose
+    /// interval SMLib gave 7e-15 before the first knot. The record's interval is the NURBS's own
+    /// where it overshoots it by rounding, and the record validates; farther past it stays an error.
+    #[test]
+    fn a_nurbs_edge_interval_a_rounding_past_its_knots_is_moved_onto_them() {
+        let block = Brep::make_box([0.0; 3], [60.0, 40.0, 20.0]).unwrap();
+        let rounded = block.fillet(&[[60.0, 40.0, 10.0]], 0.1, 5.0).unwrap();
+        let r = rounded.fillet_variable([27.5, 40.0, 20.0], 0.1, [0.0, 40.0, 20.0], 1, &[0.0, 0.0, 1.0, 1.0], &[1.0, 5.0]).unwrap();
+        let arrays = r.arrays().unwrap();
+        let kinds = arrays.ints.get(&EDGE_CURVE_TYPE).cloned().unwrap_or_default();
+        let counts = arrays.ints.get(&EDGE_NURBS_VERTEX_COUNT).cloned().unwrap_or_default();
+        let orders = arrays.ints.get(&EDGE_NURBS_ORDER).cloned().unwrap_or_default();
+        let forms = arrays.ints.get(&EDGE_NURBS_FORM).cloned().unwrap_or_default();
+        let knots = arrays.reals.get(&EDGE_NURBS_KNOTS).cloned().unwrap_or_default();
+        // Each NURBS block's first and last knots of its domain, in edge order.
+        let (mut at, mut block_of) = (0usize, Vec::new());
+        for (n, o) in counts.iter().zip(&orders) {
+            let (n, o) = (*n as usize, *o as usize);
+            block_of.push((knots[at + o - 1], knots[at + n]));
+            at += n + o;
+        }
+        let mut nurbs = 0usize;
+        let mut edge = None;
+        for (e, kind) in kinds.iter().enumerate() {
+            let has_block = *kind == CURVE_NURBS || forms.get(e) == Some(&1);
+            if *kind == CURVE_NURBS && edge.is_none() {
+                edge = Some((e, block_of[nurbs]));
+            }
+            nurbs += usize::from(has_block);
+        }
+        let (e, (first, last)) = edge.expect("the round's end on the cylinder is a NURBS edge");
+        let shifted = |by: f64| {
+            let mut a = arrays.clone();
+            a.reals.get_mut(&EDGE_RANGE).unwrap()[2 * e] = first - by;
+            a
+        };
+        let (record, _) = native(&shifted(7e-15)).unwrap();
+        record.validate().unwrap();
+        assert!(record.edges.iter().any(|x| x.interval[0] == first && x.interval[1] <= last), "an interval on the NURBS's first knot");
+        assert!(native(&shifted(1e-3)).map(|(r, _)| r.validate()).map_or(true, |v| v.is_err()), "a real overshoot is not moved");
     }
 
     #[test]
