@@ -91,6 +91,7 @@ pub(crate) fn fixes() -> UpstreamFixes {
     f.offset_analytic_mate_edges = true;
     f.precise_properties_split_at_surface_knots = true;
     f.nurb_cylinder_inside_out_frame = true;
+    f.shell_inner_shell_of_statuses = true;
     f.offset_collapsed_rounds_mated = true;
     f.offset_missing_surface_fails = true;
     f.fillet_nx1_end_rib_global_merge = true;
