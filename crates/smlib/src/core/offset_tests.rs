@@ -520,10 +520,11 @@ fn faces_are_picked_on_the_box_and_on_its_working_copy() {
             box_face_distances_are_exact(what, &face_distances(k, x, &proven.identity(), p)?);
         }
         // The copy under its naming scheme alone (the arena's identities): no face's geometry
-        // owner resolves, and the query says so rather than answering from the vertices.
+        // owner resolves, and the query says so rather than answering from the vertices. Since
+        // solidcore#1452 that is a port-side invariant, not an SMLib status.
         let arena = BrepIdentity::of_naming_with_id(solidcore::topology::BrepId::from_index(0), &w);
         match face_distances(k, &mut w, &arena, p) {
-            Err(SolidError::InvalidInput { .. }) => {}
+            Err(e @ SolidError::PortInvariant { .. }) if e.sm_status().is_none() => {}
             other => panic!("the copy under the arena's identities: {other:?}"),
         }
         Ok(())
