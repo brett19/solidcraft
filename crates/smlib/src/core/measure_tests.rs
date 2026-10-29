@@ -292,3 +292,56 @@ fn hostile_numbers_are_refused() {
     assert!(rel(mass_properties(&b, 1e-30).unwrap().volume, 6000.0) < TOL);
     assert!(rel(mass_properties(&b, 10.0).unwrap().volume, 6000.0) < TOL);
 }
+
+/// A 20 mm box minus a centred 10 mm box (a sealed void), as solidcore's boolean makes it and as
+/// it comes back from arrays listing its solid region's shells inner first.
+fn sealed_voids() -> [(&'static str, Body); 2] {
+    use crate::BooleanOp;
+    use crate::flat::{FACEUSE_FACE, FACEUSE_ORIENTATION, REGION_SHELL_COUNT, SHELL_FACEUSE_COUNT};
+    let body = super::boolean::boolean(&make_box([-10.0; 3], [20.0; 3]).unwrap(), &make_box([-5.0; 3], [10.0; 3]).unwrap(), BooleanOp::Subtract)
+        .unwrap()
+        .unwrap();
+    // The bounded solid region of two shells: swap their blocks (the shell counts match, as do
+    // the face-use counts, six faces each), so only the face uses move.
+    let mut a = super::to_arrays(&body).unwrap();
+    let regions = &a.ints[&REGION_SHELL_COUNT];
+    let first = regions.iter().position(|&n| n == 2).unwrap();
+    let shell: usize = regions[..first].iter().map(|&n| usize::try_from(n).unwrap()).sum();
+    let counts = &a.ints[&SHELL_FACEUSE_COUNT];
+    assert_eq!((counts[shell], counts[shell + 1]), (6, 6));
+    let fu: usize = counts[..shell].iter().map(|&n| usize::try_from(n).unwrap()).sum();
+    for id in [FACEUSE_FACE, FACEUSE_ORIENTATION] {
+        let v = a.ints.get_mut(&id).unwrap();
+        let (x, y) = v[fu..fu + 12].split_at_mut(6);
+        x.swap_with_slice(y);
+    }
+    let reordered = super::from_arrays(&a).unwrap();
+    [("solidcore's", body), ("inner first", reordered)]
+}
+
+/// The sealed void's mass properties: 8000 − 1000 to 1e-9, centroid at the origin, one solid,
+/// in either shell order; with SMLib built, the C++ kernel's own.
+#[test]
+fn a_sealed_void_measures_its_volume() {
+    let want = 8000.0 - 1000.0;
+    // Ixx of a cube of side s about its centre: s⁵ / 6.
+    let moment = (20.0f64.powi(5) - 10.0f64.powi(5)) / 6.0;
+    #[cfg(feature = "native")]
+    let theirs = {
+        use crate::{Brep, ffi};
+        crate::init().unwrap();
+        let make = |o: f64, s: f64| ffi::make_box(&[o; 3], &[s; 3]).map(Brep::made).unwrap();
+        let (outer, inner) = (make(-10.0, 20.0), make(-5.0, 10.0));
+        let h = ffi::ops::boolean(outer.cpp().unwrap(), inner.cpp().unwrap(), ffi::ops::BOOLEAN_SUBTRACT).unwrap();
+        ffi::volume(&h, 1e-9).unwrap()
+    };
+    for (at, b) in sealed_voids() {
+        let m = mass_properties(&b, MEASURE_ACCURACY).unwrap();
+        assert!(rel(m.volume, want) < TOL, "{at}: volume {}", m.volume);
+        assert!(m.centroid.iter().all(|c| c.abs() < TOL * 20.0), "{at}: centroid {:?}", m.centroid);
+        assert!(m.moments.iter().all(|&i| rel(i, moment) < TOL), "{at}: moments {:?} vs {moment}", m.moments);
+        assert_eq!(solid_count(&b).unwrap(), 1, "{at}");
+        #[cfg(feature = "native")]
+        same(m.volume, theirs, theirs, &format!("{at} volume"));
+    }
+}
