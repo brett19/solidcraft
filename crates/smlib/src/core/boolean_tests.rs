@@ -337,3 +337,40 @@ fn operands_stay_as_they_were() {
     let v = same.unwrap().unwrap().unwrap();
     assert!(rel(v, 1000.0) < 1e-9, "A ∪ A: {v}");
 }
+
+/// Face and edge tags (`Brep::tagged`) through a boolean routed to solidcore, as on C++.
+#[cfg(feature = "native")]
+mod history {
+    use crate::history::Raw;
+    use crate::{BooleanOp, Brep, ffi};
+
+    fn tagged_box(origin: [f64; 3], operand: usize) -> Brep {
+        crate::init().unwrap();
+        Brep::made(ffi::make_box(&origin, &[10.0; 3]).unwrap()).tagged(operand).unwrap()
+    }
+
+    /// Two 10 mm cubes overlapping in a 5 mm one (the capi's `overlapping_boxes_union`): 12
+    /// faces, each from one face of one box, six from each.
+    fn check(h: &Raw) {
+        assert_eq!(h.faces.len(), 12, "{h:?}");
+        assert!(h.faces.iter().all(|f| f.origins.len() == 1), "a face without exactly one origin: {h:?}");
+        for operand in [0, 1] {
+            assert_eq!(h.faces.iter().filter(|f| f.origins[0].0 == operand).count(), 6, "operand {operand}: {h:?}");
+        }
+    }
+
+    #[test]
+    fn tags_cross_a_cpp_boolean() {
+        let (a, b) = (tagged_box([0.0; 3], 0), tagged_box([5.0; 3], 1));
+        let r = Brep::made(ffi::ops::boolean(a.cpp().unwrap(), b.cpp().unwrap(), ffi::ops::BOOLEAN_UNION).unwrap());
+        check(&r.history().unwrap());
+    }
+
+    #[test]
+    #[ignore = "solidcore has no way to carry attributes through a boolean: scratchpad/bugs/boolean-operand-attributes-lost.md"]
+    fn tags_cross_a_solidcore_boolean() {
+        let (a, b) = (tagged_box([0.0; 3], 0), tagged_box([5.0; 3], 1));
+        let r = super::boolean(a.core().unwrap(), b.core().unwrap(), BooleanOp::Union).unwrap().unwrap();
+        check(&Brep::made_core(r).history().unwrap());
+    }
+}
