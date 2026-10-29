@@ -179,6 +179,39 @@ fn run_one(o: &Options, case: &Path, kernel: &str) -> Value {
     r
 }
 
+/// Waits for `child` for at most `timeout` while reading its stdout and stderr, so a child that
+/// writes more than the pipe buffer (64 KiB on Linux) is not blocked in `write` and taken for a
+/// hang. `None`: the child was still running at the timeout and has been killed.
+fn wait_draining(mut child: std::process::Child, timeout: Duration) -> Result<Option<std::process::Output>, String> {
+    fn drain<R: std::io::Read + Send + 'static>(pipe: Option<R>) -> std::thread::JoinHandle<Vec<u8>> {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut p) = pipe {
+                let _ = p.read_to_end(&mut buf);
+            }
+            buf
+        })
+    }
+    let (stdout, stderr) = (drain(child.stdout.take()), drain(child.stderr.take()));
+    let start = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if start.elapsed() > timeout => {
+                let _ = child.kill();
+                let _ = child.wait();
+                // The readers are left to finish on their own: a grandchild (`cargo run`'s CLI)
+                // may still hold the pipes open.
+                return Ok(None);
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+            Err(e) => return Err(format!("wait: {e}")),
+        }
+    };
+    let join = |h: std::thread::JoinHandle<Vec<u8>>| h.join().map_err(|_| "output: a pipe reader stopped".to_string());
+    Ok(Some(std::process::Output { status, stdout: join(stdout)?, stderr: join(stderr)? }))
+}
+
 fn run_case(o: &Options, case: &Path, kernel: &str) -> Value {
     let rel = case.strip_prefix(root()).unwrap_or(case).to_path_buf();
     let mut cmd = match &o.cli {
@@ -204,28 +237,17 @@ fn run_case(o: &Options, case: &Path, kernel: &str) -> Value {
         let id = case.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
         json!({"case": id, "area": area, "status": status, "error": error})
     };
-    let mut child = match cmd.spawn() {
+    let child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => return base("fail", format!("solidcraft-cli: {e}")),
     };
     // A case may need longer than the run's timeout (`timeout_s`, at most 30 min).
     let timeout = read(&case.join("expected.json"))["timeout_s"].as_u64().map_or(o.timeout, |s| Duration::from_secs(s.min(1800)).max(o.timeout));
     let start = Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) if start.elapsed() > timeout => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return base("hang", format!("no result after {} s", timeout.as_secs()));
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
-            Err(e) => return base("fail", format!("wait: {e}")),
-        }
-    }
-    let out = match child.wait_with_output() {
-        Ok(o) => o,
-        Err(e) => return base("fail", format!("output: {e}")),
+    let out = match wait_draining(child, timeout) {
+        Ok(Some(out)) => out,
+        Ok(None) => return base("hang", format!("no result after {} s", timeout.as_secs())),
+        Err(e) => return base("fail", e),
     };
     match serde_json::from_slice::<Value>(&out.stdout).ok().and_then(|v| v.as_array().and_then(|a| a.first().cloned())) {
         Some(mut r) => {
@@ -651,6 +673,25 @@ fn gate(text: &str, cases: &[String], statuses: &[&str]) -> Result<String, Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A child that writes more than the pipe buffer still finishes, with all its output.
+    #[cfg(unix)]
+    #[test]
+    fn a_child_writing_more_than_the_pipe_buffer_is_not_a_hang() {
+        let child = Command::new("sh")
+            .args(["-c", "head -c 200000 /dev/zero; head -c 100000 /dev/zero >&2"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let out = wait_draining(child, Duration::from_secs(60)).unwrap().unwrap();
+        assert!(out.status.success());
+        assert_eq!((out.stdout.len(), out.stderr.len()), (200_000, 100_000));
+        let slow = Command::new("sh").args(["-c", "sleep 30"]).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+        let t = Instant::now();
+        assert!(wait_draining(slow, Duration::from_millis(200)).unwrap().is_none());
+        assert!(t.elapsed() < Duration::from_secs(20));
+    }
 
     #[test]
     fn side_by_side_counts_and_puts_differences_first() {
