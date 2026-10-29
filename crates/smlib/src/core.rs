@@ -92,6 +92,11 @@ pub(crate) fn fixes() -> UpstreamFixes {
     f.precise_properties_split_at_surface_knots = true;
     f.nurb_cylinder_inside_out_frame = true;
     f.shell_inner_shell_of_statuses = true;
+    f.local_operation_offset_status = true;
+    f.torus_major_radius_from_origin = true;
+    f.fillet_corner_sphere_from_four_arcs = true;
+    f.fillet_nx1_opposite_continuation_side_edge = true;
+    f.fillet_trace_rejects_short_step = true;
     f.offset_collapsed_rounds_mated = true;
     f.offset_missing_surface_fails = true;
     f.fillet_nx1_end_rib_global_merge = true;
