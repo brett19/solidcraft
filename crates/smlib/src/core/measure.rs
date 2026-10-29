@@ -3,16 +3,15 @@
 //! (`smlib_flat_api.cpp`) and `smlib_brep_check` (`smlib_check.cpp`) do on the C++ kernel, here
 //! composed from solidcore's ports of the same SMLib routines.
 //!
-//! Two of them have no solidcore port yet and fail with "not supported yet":
-//! `SmApiBrepMaterialCensus` ([`solid_count`]) and the topology-level `SmBrep::AssertValid`
-//! ([`check`]).
+//! One has no solidcore port yet and fails with "not supported yet": the topology-level
+//! `SmBrep::AssertValid` ([`check`]).
 
 use solidcore::geom::attribute::{AttributeStore, ObjectKey};
 use solidcore::geom::tol::{SmallTopoType, context_xsect_tol_3d};
 use solidcore::heal::gap::GapFunction;
 use solidcore::mass::integrator::properties::{MassPropertyBehavior, PropertyAttributes, brep_properties, face_properties};
 use solidcore::nurbs::b_spline_surface_n_lib::p2::OrientType;
-use solidcore::query::api_queries::{brep_bounding_box, brep_is_manifold_solid, face_bounding_box};
+use solidcore::query::api_queries::{brep_bounding_box, brep_is_manifold_solid, brep_material_census, face_bounding_box};
 use solidcore::topology::brep::p1 as bl;
 use solidcore::topology::face::p2::{PPF_AREA, PPF_AREA_FIRST_MOMENTS};
 use solidcore::{Kernel, Point3, SolidError, Vec3};
@@ -177,10 +176,9 @@ pub(crate) fn is_manifold_solid(body: &Body) -> Result<bool> {
     with_body("is_manifold_solid", body, |_, b| brep_is_manifold_solid(b))
 }
 
-/// `smlib_brep_solid_count` calls `SmApiBrepMaterialCensus`, which solidcore does not port yet.
+/// `smlib_brep_solid_count`: the solids of `SmApiBrepMaterialCensus` (its voids are dropped).
 pub(crate) fn solid_count(body: &Body) -> Result<usize> {
-    let _ = body;
-    Err(Error::Solidcore("SmApiBrepMaterialCensus: not supported yet: solidcore has no port of it".into()))
+    with_body("solid_count", body, |_, b| brep_material_census(b).map(|(solids, _voids)| solids))
 }
 
 /// `smlib_brep_check` runs `SmBrep::ValidatePointers`, then `SmBrep::AssertValid` over the whole

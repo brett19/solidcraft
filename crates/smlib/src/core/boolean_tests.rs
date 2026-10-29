@@ -1,6 +1,7 @@
 //! Booleans on solidcore, against analytic volumes: every result exports to a record that
-//! validates. With SMLib built, the same case on the C++ kernel gives the same volume, counts and
-//! faces by surface kind (parity only: the expected values are the analytic ones).
+//! validates and counts the solids it should. With SMLib built, the same case on the C++ kernel
+//! gives the same volume, counts, faces by surface kind and solids (parity only: the expected
+//! values are the analytic ones).
 //!
 //! Curved operands are built on solidcore itself: a record's circles, cylinders and tori do not
 //! come into solidcore yet (solidcore#1432, #1433).
@@ -16,7 +17,7 @@ use solidcore::mass::integrator::properties::brep_area;
 use solidcore::primitive::primitive_creation::p1::create_rectangle;
 
 use super::boolean::{boolean, boolean2d, imprint, union_all};
-use super::{Body, counts, make_box, make_cylinder, make_sphere, run, to_arrays, volume, with_body};
+use super::{Body, counts, make_box, make_cylinder, make_sphere, run, solid_count, to_arrays, volume, with_body};
 use crate::export::native;
 use crate::{BooleanOp, Error};
 
@@ -50,21 +51,26 @@ enum Op {
     Imprint(Shape, Shape),
 }
 
-/// A case: the operation, its analytic volume (`None`: the result is empty), and the faces it
-/// must have where they are known analytically.
+/// A case: the operation, its analytic volume (`None`: the result is empty), the faces it
+/// must have where they are known analytically, and its solids (`smlib_brep_solid_count`).
 struct Case {
     op: Op,
     volume: Option<f64>,
     faces: Option<usize>,
+    solids: usize,
 }
 
 const A: Shape = Shape::Box([0.0; 3], [10.0; 3]);
 
 fn case(name: &str) -> Case {
-    let plain = |op, volume: Option<f64>, faces| Case { op, volume, faces };
+    let plain = |op, volume: Option<f64>, faces| Case { op, volume, faces, solids: 1 };
     match name {
         // |A| + |B| - |A ∩ B|: two 10 mm cubes overlapping in a 5 mm cube.
         "union_overlapping" => plain(Op::Boolean(A, Shape::Box([5.0; 3], [10.0; 3]), BooleanOp::Union), Some(1000.0 + 1000.0 - 125.0), Some(12)),
+        // Two 10 mm cubes 10 mm apart: one body of two solids, 12 faces.
+        "union_disjoint" => {
+            Case { solids: 2, ..plain(Op::Boolean(A, Shape::Box([20.0, 0.0, 0.0], [10.0; 3]), BooleanOp::Union), Some(2000.0), Some(12)) }
+        }
         "intersect_overlapping" => plain(Op::Boolean(A, Shape::Box([5.0; 3], [10.0; 3]), BooleanOp::Intersect), Some(125.0), Some(6)),
         // A slot 5 mm wide and 5 mm deep from the top, right through a 30 x 20 x 10 block.
         "subtract_through_slot" => plain(
@@ -78,7 +84,7 @@ fn case(name: &str) -> Case {
             Some(6000.0 - 10.0 * 20.0 * 5.0),
             Some(10),
         ),
-        // A 4 mm cube inside a 10 mm one: a void.
+        // A 4 mm cube inside a 10 mm one: a void, still one solid.
         "subtract_inside_void" => plain(Op::Boolean(A, Shape::Box([3.0; 3], [4.0; 3]), BooleanOp::Subtract), Some(1000.0 - 64.0), Some(12)),
         // abc - πr²c: a 3 mm hole through a 20 x 20 x 10 block.
         "subtract_cylinder_hole" => plain(
@@ -119,6 +125,7 @@ struct Measured {
     counts: [usize; 3],
     /// The record's faces by surface kind.
     kinds: BTreeMap<String, usize>,
+    solids: usize,
 }
 
 fn kinds(rec: &solidcraft_geom::brep::Brep) -> BTreeMap<String, usize> {
@@ -174,9 +181,11 @@ fn solidcore_case(name: &'static str) -> Option<Measured> {
         if let Some(f) = c.faces {
             assert_eq!(n[0], f, "{name}: faces {n:?}");
         }
+        let solids = solid_count(body).unwrap_or_else(|e| panic!("{name}: solid count: {e}"));
+        assert_eq!(solids, c.solids, "{name}: solids");
         let (rec, _) = native(&to_arrays(body).unwrap()).unwrap_or_else(|e| panic!("{name}: record: {e:?}"));
         rec.validate().unwrap_or_else(|e| panic!("{name}: record: {e}"));
-        Some(Measured { volume: v, counts: n, kinds: kinds(&rec) })
+        Some(Measured { volume: v, counts: n, kinds: kinds(&rec), solids })
     })
 }
 
@@ -216,10 +225,11 @@ fn cpp_case(name: &str) -> Option<Measured> {
     };
     let v = ffi::volume(&h, 1e-8).unwrap();
     let n = ffi::counts(&h).unwrap().map(|x| usize::try_from(x).unwrap());
+    let solids = usize::try_from(ffi::ops::solid_count(&h).unwrap()).unwrap();
     let b = Brep::made(h);
     let (rec, _) = native(&b.cpp_arrays().unwrap()).unwrap();
     rec.validate().unwrap();
-    Some(Measured { volume: v, counts: n, kinds: kinds(&rec) })
+    Some(Measured { volume: v, counts: n, kinds: kinds(&rec), solids })
 }
 
 /// solidcore and C++ agree: volume within 1e-9, the same counts and faces by kind.
@@ -233,6 +243,7 @@ fn parity(name: &'static str) {
             assert!(rel(a.volume, b.volume) < 1e-9, "{name}: solidcore {} vs C++ {}", a.volume, b.volume);
             assert_eq!(a.counts, b.counts, "{name}: face, edge, vertex counts (solidcore vs C++)");
             assert_eq!(a.kinds, b.kinds, "{name}: faces by surface kind (solidcore vs C++)");
+            assert_eq!(a.solids, b.solids, "{name}: solids (solidcore vs C++)");
         }
         (a, b) => panic!("{name}: solidcore {a:?} vs C++ {b:?}"),
     }
@@ -258,6 +269,7 @@ macro_rules! cases {
 
 cases!(
     union_overlapping,
+    union_disjoint,
     intersect_overlapping,
     subtract_through_slot,
     subtract_flush_notch,
