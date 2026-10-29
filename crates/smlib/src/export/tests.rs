@@ -115,7 +115,6 @@ mod native_tests {
 
     /// A cone whose half angle is within rounding of zero (a52's thread bosses: 1e-13) is exported as
     /// a cylinder; as a cone the portable record's validation refuses it.
-    #[cfg(any(feature = "native", feature = "solidcore"))]
     #[test]
     fn a_cone_of_rounding_angle_is_exported_as_a_cylinder() {
         let near = Brep::make_cone([0.0; 3], 4.0, 4.0 - 1e-12, 10.0).unwrap().to_native().unwrap();
