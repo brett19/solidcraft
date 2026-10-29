@@ -266,7 +266,7 @@ macro_rules! primitive {
 primitive!(box_, "box");
 primitive!(cylinder, "cylinder", area: ignore = "solidcore#1435: face area at 1e-8 is 3.7e-8 off");
 primitive!(sphere, "sphere",
-    mass: ignore = "solidcore#1437: trim_boundary_seam_wrap zeroes a sphere's properties (and #1435 after)",
+    mass: ignore = "solidcore#1435: a sphere's properties at 1e-8 miss 1e-9",
     area: ignore = "solidcore#1435: face area at 1e-8 is 1.2e-8 off");
 primitive!(cone, "cone",
     mass: ignore = "solidcore#1435: cone inertia at 1e-8 is 1.7e-9 off",
