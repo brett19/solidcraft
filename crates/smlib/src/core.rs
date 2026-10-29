@@ -193,9 +193,10 @@ pub(crate) fn with_body<T>(
     })
 }
 
-/// An axis-aligned box from its lower corner (`SmApiCreateBox`).
+/// An axis-aligned box from its lower corner (`SmApiCreateBox`, as `smlib_make_box` checks it:
+/// every edge length positive).
 pub(crate) fn make_box(origin: [f64; 3], size: [f64; 3]) -> Result<Body> {
-    if !origin.iter().chain(&size).all(|x| x.is_finite()) {
+    if !origin.iter().chain(&size).all(|x| x.is_finite()) || !size.iter().all(|&s| s > 0.0) {
         return Err(Error::Argument);
     }
     let [x, y, z] = size;

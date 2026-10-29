@@ -122,12 +122,14 @@ impl Op {
         Op::ALL.iter().position(|op| *op == self).unwrap_or(0)
     }
 
-    /// The routing table: the kernel each family runs on when nothing overrides it. Every family
+    /// The routing table: the kernel each family runs on when nothing overrides it. A family
     /// stays on SMLib until the rig shows solidcore's parity for it.
     pub fn route(self) -> Backend {
         match self {
+            // At parity on the rig, routed alone: 469 of 469 cases agree (solidcore 3546c9bc); as
+            // the default, 449 of 479 pass against SMLib-only 445, none worse.
+            Op::Primitive => Backend::Solidcore,
             Op::Convert
-            | Op::Primitive
             | Op::Transform
             | Op::Measure
             | Op::Check

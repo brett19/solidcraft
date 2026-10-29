@@ -93,19 +93,23 @@ fn checks_valid(name: &str) {
     }
 }
 
-/// The C++ kernel's body of the same primitive.
+/// The C++ kernel's body of the same primitive, built by its C API whatever `Op::Primitive`
+/// routes to: a body imported from solidcore's arrays is not the C++ kernel's own (its
+/// `edge_face_distance` measures to each face's surface over its domain, which the import sets).
 #[cfg(feature = "native")]
 fn cpp(name: &str) -> crate::Brep {
-    use crate::Brep;
+    use crate::{Brep, ffi};
+    crate::init().unwrap();
     match name {
-        "box" => Brep::make_box([1.0, -2.0, 3.0], [10.0, 20.0, 30.0]),
-        "cylinder" => Brep::make_cylinder([1.0, 2.0, -3.0], 5.0, 12.0),
-        "sphere" => Brep::make_sphere([1.0, 2.0, 3.0], 7.0),
-        "cone" => Brep::make_cone([0.0, 1.0, 2.0], 6.0, 0.0, 9.0),
-        "frustum" => Brep::make_cone([0.0, 1.0, 2.0], 6.0, 2.0, 9.0),
-        "torus" => Brep::make_torus([1.0, -1.0, 0.5], 10.0, 3.0),
+        "box" => ffi::make_box(&[1.0, -2.0, 3.0], &[10.0, 20.0, 30.0]),
+        "cylinder" => ffi::make_cylinder(&[1.0, 2.0, -3.0], 5.0, 12.0),
+        "sphere" => ffi::make_sphere(&[1.0, 2.0, 3.0], 7.0),
+        "cone" => ffi::make_cone(&[0.0, 1.0, 2.0], 6.0, 0.0, 9.0),
+        "frustum" => ffi::make_cone(&[0.0, 1.0, 2.0], 6.0, 2.0, 9.0),
+        "torus" => ffi::make_torus(&[1.0, -1.0, 0.5], 10.0, 3.0),
         _ => panic!("{name}"),
     }
+    .map(Brep::made)
     .unwrap()
 }
 
