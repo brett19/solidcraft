@@ -87,6 +87,7 @@ pub(crate) fn fixes() -> UpstreamFixes {
     f.join_touching_loops = true;
     f.uv_trim_reversal_on_surface = true;
     f.offset_resolve_crossing_loops = true;
+    f.offset_walls_touch_refused = true;
     f.offset_collapsed_rounds_mated = true;
     f.offset_missing_surface_fails = true;
     f.fillet_nx1_end_rib_global_merge = true;
