@@ -100,6 +100,9 @@ fn diagnostics_kernel_reports_and_sets_the_choice() {
     }
     let environment = route::overridden();
     assert_eq!(r["environment"], json!(environment), "{r}");
+    // SOLIDCRAFT_KERNEL_ROUTES, as the families it moves.
+    let moved: serde_json::Map<String, serde_json::Value> = route::overrides().iter().map(|(op, b)| (op.id().to_string(), json!(b.id()))).collect();
+    assert_eq!(r["overrides"], serde_json::Value::Object(moved), "{r}");
     for choice in ["solidcore", "smlib", "routed"] {
         let c = route::Choice::from_id(choice).unwrap();
         // `.smb` files stay on SMLib whatever is chosen.
@@ -109,7 +112,7 @@ fn diagnostics_kernel_reports_and_sets_the_choice() {
                 "routed" => op.route().id(),
                 other => other,
             };
-            assert_eq!(op.backend_under(c).id(), want, "{choice}: {op:?}");
+            assert_eq!(op.backend_with(c, &route::Overrides::NONE).id(), want, "{choice}: {op:?}");
         }
         if !route::Op::ALL.iter().all(|op| op.backend_under(c) == op.route()) {
             continue; // it would move other tests' bodies to another kernel
