@@ -55,7 +55,7 @@ use crate::flat::*;
 use crate::import::Arrays;
 use crate::{Error, Result};
 
-use super::{Body, run, with_body};
+use super::{Body, answer, run, with_body};
 
 // ---- shared ------------------------------------------------------------------------------------
 
@@ -415,18 +415,34 @@ fn edge_curve_as_bspline<'c>(k: &Kernel, c: &'c Curve, ivl: &Extent1d, approx_to
 /// `center + s * axis`), circle or ellipse (over `[d_min, d_max]` degrees, its NURBS parameter
 /// then set to that interval with its notification, `EditParameterization`).
 fn build_analytic_edge_curve(k: &Kernel, ty: i64, d_min: f64, d_max: f64, center: Point3, axis: Vec3, refd: Vec3, r1: f64, r2: f64) -> Result<Curve> {
+    analytic_edge_curve(k, ty, d_min, d_max, center, axis, refd, r1, r2).map_err(|(call, e)| sc(call)(e))
+}
+
+/// [`build_analytic_edge_curve`] with solidcore's own error, and the call that gave it.
+#[allow(clippy::too_many_arguments)] // BuildAnalyticEdgeCurve's
+fn analytic_edge_curve(
+    k: &Kernel,
+    ty: i64,
+    d_min: f64,
+    d_max: f64,
+    center: Point3,
+    axis: Vec3,
+    refd: Vec3,
+    r1: f64,
+    r2: f64,
+) -> std::result::Result<Curve, (&'static str, SolidError)> {
     if ty == CURVE_LINE_I {
         return Ok(Curve::from(Line::create_canonical(center, axis)));
     }
     let mut placement = Axis2Placement::default();
-    placement.set_canonical(center, refd, axis.cross(refd)).map_err(sc("SmAxis2Placement::SetCanonical"))?;
+    placement.set_canonical(center, refd, axis.cross(refd)).map_err(|e| ("SmAxis2Placement::SetCanonical", e))?;
     let degrees = Extent1d::from_min_max(d_min, d_max);
     let mut e = if ty == CURVE_CIRCLE_I {
-        Ellipse::create_canonical_circle(k, &placement, r1, Some(&degrees), None).map_err(sc("SmCircle::CreateCanonical"))?
+        Ellipse::create_canonical_circle(k, &placement, r1, Some(&degrees), None).map_err(|e| ("SmCircle::CreateCanonical", e))?
     } else {
-        Ellipse::create_canonical(k, &placement, r1, r2, Some(&degrees), None).map_err(sc("SmEllipse::CreateCanonical"))?
+        Ellipse::create_canonical(k, &placement, r1, r2, Some(&degrees), None).map_err(|e| ("SmEllipse::CreateCanonical", e))?
     };
-    e.edit_parameterization(k, &degrees, true, None).map_err(sc("SmEllipse::EditParameterization"))?;
+    e.edit_parameterization(k, &degrees, true, None).map_err(|e| ("SmEllipse::EditParameterization", e))?;
     Ok(Curve::from(e))
 }
 
@@ -466,12 +482,15 @@ const NURBS_EXPORT: EdgeExport = EdgeExport {
 /// `ClassifyEdgeCurve`: a circle, ellipse or line kept as its kind when the curve the import
 /// builds from it ([`build_analytic_edge_curve`]) matches it pointwise at the edge's ends and
 /// along the STEP parameter; anything else NURBS. A curve whose STEP parameter runs against its
-/// NURBS one goes with its axis reversed and its range negated.
-fn classify_edge_curve(k: &Kernel, c: Option<&Curve>, ivl: &Extent1d) -> EdgeExport {
-    c.and_then(|c| classify(k, c, ivl)).unwrap_or(NURBS_EXPORT)
+/// NURBS one goes with its axis reversed and its range negated. A call that returns a status
+/// other than success makes the edge NURBS, as there ([`answer`]); any other solidcore error
+/// fails the export.
+fn classify_edge_curve(k: &Kernel, c: Option<&Curve>, ivl: &Extent1d) -> Result<EdgeExport> {
+    let Some(c) = c else { return Ok(NURBS_EXPORT) };
+    Ok(classify(k, c, ivl).map_err(sc("ClassifyEdgeCurve"))?.unwrap_or(NURBS_EXPORT))
 }
 
-fn classify(k: &Kernel, c: &Curve, ivl: &Extent1d) -> Option<EdgeExport> {
+fn classify(k: &Kernel, c: &Curve, ivl: &Extent1d) -> std::result::Result<Option<EdgeExport>, SolidError> {
     let mut e = NURBS_EXPORT;
     match c.kind() {
         CurveKind::Ellipse(el) => {
@@ -489,12 +508,18 @@ fn classify(k: &Kernel, c: &Curve, ivl: &Extent1d) -> Option<EdgeExport> {
             e.center = can.point;
             e.axis = can.vector;
         }
-        _ => return None,
+        _ => return Ok(None),
     }
-    let mut s0 = c.convert_t_from_nurbs_to_step(k, ivl.min()).ok()?;
-    let mut s1 = c.convert_t_from_nurbs_to_step(k, ivl.max()).ok()?;
+    let mut s0 = {
+        let Some(x) = answer(c.convert_t_from_nurbs_to_step(k, ivl.min()))? else { return Ok(None) };
+        x
+    };
+    let mut s1 = {
+        let Some(x) = answer(c.convert_t_from_nurbs_to_step(k, ivl.max()))? else { return Ok(None) };
+        x
+    };
     if !s0.is_finite() || !s1.is_finite() {
-        return None;
+        return Ok(None);
     }
     // sNew = sign * sOld + shift
     let (mut sign, mut shift) = (1.0, 0.0);
@@ -505,18 +530,18 @@ fn classify(k: &Kernel, c: &Curve, ivl: &Extent1d) -> Option<EdgeExport> {
         e.axis = Vec3::new(-e.axis.x, -e.axis.y, -e.axis.z);
     }
     if !(s1 > s0) {
-        return None;
+        return Ok(None);
     }
     if e.ty == CURVE_LINE_I {
         if s0.abs() > INFINITE_PARAMETER || s1.abs() > INFINITE_PARAMETER {
-            return None;
+            return Ok(None);
         }
         (e.lo, e.sm_lo, e.hi, e.sm_hi) = (s0, s0, s1, s1);
     } else {
         // SmCircle/SmEllipse::CreateCanonical take intervals within [-360, 360] degrees. (Not
         // in the C++: angles past a million degrees are refused, bounding the loops below.)
         if s1 - s0 > 360.0 + 1e-9 || s0.abs() > 1.0e6 || s1.abs() > 1.0e6 {
-            return None;
+            return Ok(None);
         }
         while s1 > 360.0 + 1e-9 {
             s0 -= 360.0;
@@ -529,7 +554,7 @@ fn classify(k: &Kernel, c: &Curve, ivl: &Extent1d) -> Option<EdgeExport> {
             shift += 360.0;
         }
         if s1 > 360.0 + 1e-9 {
-            return None;
+            return Ok(None);
         }
         e.lo = deg2rad(s0);
         e.hi = deg2rad(s1);
@@ -538,9 +563,20 @@ fn classify(k: &Kernel, c: &Curve, ivl: &Extent1d) -> Option<EdgeExport> {
         e.sm_hi = radians_to_smlib_degrees(e.hi);
     }
 
-    let built = build_analytic_edge_curve(k, e.ty, e.sm_lo, e.sm_hi, e.center, e.axis, e.refd, e.r1, e.r2).ok()?;
-    let a = c.evaluate_point(k, ivl.min()).ok()?;
-    let b = c.evaluate_point(k, ivl.max()).ok()?;
+    let built = {
+        let Some(x) = answer(analytic_edge_curve(k, e.ty, e.sm_lo, e.sm_hi, e.center, e.axis, e.refd, e.r1, e.r2).map_err(|(_, e)| e))? else {
+            return Ok(None);
+        };
+        x
+    };
+    let a = {
+        let Some(x) = answer(c.evaluate_point(k, ivl.min()))? else { return Ok(None) };
+        x
+    };
+    let b = {
+        let Some(x) = answer(c.evaluate_point(k, ivl.max()))? else { return Ok(None) };
+        x
+    };
     let tol = 1e-9 * (1.0 + e.r1 + e.r2 + a.max_dimension() + b.max_dimension());
     let mut affine = true;
     for step in 0..=8 {
@@ -548,24 +584,42 @@ fn classify(k: &Kernel, c: &Curve, ivl: &Extent1d) -> Option<EdgeExport> {
         // the same point by the STEP parameter of each curve
         let s_new = e.sm_lo + f * (e.sm_hi - e.sm_lo);
         let s_old = (s_new - shift) * sign;
-        let t_old = c.convert_t_from_step_to_nurbs(k, s_old).ok()?;
-        let t_new = built.convert_t_from_step_to_nurbs(k, s_new).ok()?;
-        let p_old = c.evaluate_point(k, t_old).ok()?;
-        let p_new = built.evaluate_point(k, t_new).ok()?;
+        let t_old = {
+            let Some(x) = answer(c.convert_t_from_step_to_nurbs(k, s_old))? else { return Ok(None) };
+            x
+        };
+        let t_new = {
+            let Some(x) = answer(built.convert_t_from_step_to_nurbs(k, s_new))? else { return Ok(None) };
+            x
+        };
+        let p_old = {
+            let Some(x) = answer(c.evaluate_point(k, t_old))? else { return Ok(None) };
+            x
+        };
+        let p_new = {
+            let Some(x) = answer(built.evaluate_point(k, t_new))? else { return Ok(None) };
+            x
+        };
         if !(p_old.distance(p_new) <= tol) {
-            return None;
+            return Ok(None);
         }
         // the same point by each edge's NURBS parameter, affinely matched
-        let q_old = c.evaluate_point(k, ivl.min() + f * (ivl.max() - ivl.min())).ok()?;
-        let q_new = built.evaluate_point(k, e.sm_lo + f * (e.sm_hi - e.sm_lo)).ok()?;
+        let q_old = {
+            let Some(x) = answer(c.evaluate_point(k, ivl.min() + f * (ivl.max() - ivl.min())))? else { return Ok(None) };
+            x
+        };
+        let q_new = {
+            let Some(x) = answer(built.evaluate_point(k, e.sm_lo + f * (e.sm_hi - e.sm_lo)))? else { return Ok(None) };
+            x
+        };
         let d = q_old.distance(q_new);
         if (step == 0 || step == 8) && !(d <= tol) {
-            return None; // the ends must match exactly as the edge's vertices do
+            return Ok(None); // the ends must match exactly as the edge's vertices do
         }
         affine = affine && d <= tol;
     }
     e.affine = affine;
-    Some(e)
+    Ok(Some(e))
 }
 
 /// `WriteEdgeCurve`: one edge's kind, range and geometry. A circle or ellipse also goes with its
@@ -752,7 +806,7 @@ fn flat_from_brep(k: &mut Kernel, b: &mut Brep) -> Result<Arrays> {
     let edge_curve = |i: usize| -> Result<Option<&Curve>> { edge::curve(b, get(&edge_ids, i)?).map_err(sc("SmEdge::GetCurve")) };
     let mut exports = Vec::with_capacity(bd.edges.len());
     for (i, ed) in bd.edges.iter().enumerate() {
-        exports.push(classify_edge_curve(k, edge_curve(i)?, &ed.interval));
+        exports.push(classify_edge_curve(k, edge_curve(i)?, &ed.interval)?);
     }
 
     // Regions
@@ -826,9 +880,9 @@ fn flat_from_brep(k: &mut Kernel, b: &mut Brep) -> Result<Arrays> {
             let mut q = [Point2::new(0.0, 0.0); 3];
             let mut ok = true;
             for (qk, at) in q.iter_mut().zip([Point2::new(0.0, 0.0), Point2::new(1.0, 0.0), Point2::new(0.0, 1.0)]) {
-                match surface.convert_uv_from_nurbs_to_step(k, at) {
-                    Ok(st) => *qk = Point2::new(st.x * scale.x, st.y * scale.y),
-                    Err(_) => {
+                match answer(surface.convert_uv_from_nurbs_to_step(k, at)).map_err(sc("SmSurface::ConvertUVFromNURBSToSTEP"))? {
+                    Some(st) => *qk = Point2::new(st.x * scale.x, st.y * scale.y),
+                    None => {
                         ok = false;
                         break;
                     }
@@ -1879,9 +1933,9 @@ fn same_nurbs(a: &NurbSurface, b: &NurbSurface, tol: f64) -> bool {
 /// only when its NURBS is `nurbs` (the face's trims are in its parameters).
 fn analytic_of_nurbs(k: &Kernel, nurbs: &BSplineSurface, ty: i64, tol: f64) -> Result<Option<Surface>> {
     let found: Option<Surface> = if ty == SURFACE_CONE_I {
-        Cone::is_nurb_surface_cone(k, nurbs, 1.0).ok().flatten().map(Surface::from)
+        answer(Cone::is_nurb_surface_cone(k, nurbs, 1.0)).map_err(sc("SmCone::IsNurbSurfaceCone"))?.flatten().map(Surface::from)
     } else if ty == SURFACE_SPHERE_I {
-        Sphere::is_nurb_surface_sphere(k, nurbs, 1.0).ok().flatten().map(Surface::from)
+        answer(Sphere::is_nurb_surface_sphere(k, nurbs, 1.0)).map_err(sc("SmSphere::IsNurbSurfaceSphere"))?.flatten().map(Surface::from)
     } else if ty == SURFACE_CYLINDER_I {
         return Err(unported("SmCylinder::IsNurbSurfaceCylinder"));
     } else if ty == SURFACE_TORUS_I {

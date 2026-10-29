@@ -28,7 +28,7 @@ use solidcore::offset::offset_executive::p2::{
     OffsetNotifications, OffsetOptions, ShellCopyIdentities, ShellOptions, api_offset_brep_full, api_shell_brep_full,
 };
 use solidcore::query::api_queries::{BrepRef, face_bounding_box, face_classify_uv, face_closest_point_in_shape, face_internal_point};
-use solidcore::query::brep::{BrepIdentity, LiveBrepObjects};
+use solidcore::query::brep::{BrepIdentity, BrepQuery, LiveBrepObjects};
 use solidcore::surface::surface::SurfaceKind;
 use solidcore::sweep::topology_sweep::store::SweepIdentities;
 use solidcore::topology::brep::{p1 as brep_p1, p2 as brep_p2, p3 as brep_p3};
@@ -36,8 +36,8 @@ use solidcore::topology::face::p2 as face_p2;
 use solidcore::topology::topology::{NotifyRecords, Topology};
 use solidcore::topology::{Brep, BrepId, EdgeId, FaceId, FaceuseId, RegionId};
 
-use super::Body;
-use super::blend::{Miss, answer, on_copy, p3, pick, points_ok, status as blend_status, tolerance_ok};
+use super::blend::{Miss, on_copy, p3, pick, points_ok, status as blend_status, tolerance_ok};
+use super::{Body, answer};
 use crate::{Error, Result};
 
 /// The capi's statuses as SolidCraft errors: an operation's own result.
@@ -116,13 +116,17 @@ impl FaceSet {
     }
 }
 
-/// The live view of `b` the closest-point solves read.
-fn live<'a>(b: &'a mut Brep, identity: &'a BrepIdentity<'static>) -> solidcore::Result<LiveBrepObjects<'a, 'static>> {
+/// The live view of `b` the closest-point solves read, under `identity`: `query`'s effective
+/// identity ([`BrepQuery::effective_identity`]). A working copy (`copy_of`) has no naming
+/// scheme of its own, so `BrepIdentity::of_brep` gives it the arena's identities, which name
+/// none of its geometry owners (`copy_of`'s keys, recorded on the copy as proven owners): every
+/// face and edge then drops out of a solve (solidcore#1440 was this).
+fn live<'a, 'i>(b: &'a mut Brep, identity: &'a BrepIdentity<'i>) -> solidcore::Result<LiveBrepObjects<'a, 'i>> {
     LiveBrepObjects::new(b, identity, None)
 }
 
-/// `pick_faces` (`face_distance`: `SmApiFaceClosestPoint`; a face whose distance cannot be
-/// measured is skipped).
+/// `pick_faces` (`face_distance`: `SmApiFaceClosestPoint`; a face whose query returns a status
+/// other than success is skipped, [`answer`]).
 pub(super) fn pick_faces(k: &mut Kernel, b: &mut Brep, points: &[[f64; 3]], tol: f64) -> solidcore::Result<std::result::Result<Vec<FaceId>, Miss>> {
     let all = brep_p1::faces(b, None)?;
     let model_tol = b.tolerance();
@@ -130,7 +134,8 @@ pub(super) fn pick_faces(k: &mut Kernel, b: &mut Brep, points: &[[f64; 3]], tol:
     for &f in &all {
         shapes.push(answer(Shape::new(k, &(ONE, &*b), &[], &[(ONE, f)], &[], &[]))?);
     }
-    let identity = BrepIdentity::of_brep(b);
+    let query = BrepQuery::of_brep(b);
+    let identity = query.effective_identity();
     let objects = live(b, &identity)?;
     let k: &Kernel = k;
     let indices: Vec<usize> = (0..all.len()).collect();
@@ -214,7 +219,8 @@ fn leaves_cavity(k: &mut Kernel, b: &mut Brep, open: &[FaceId], wall: f64) -> so
             }
         }
     }
-    let identity = BrepIdentity::of_brep(b);
+    let query = BrepQuery::of_brep(b);
+    let identity = query.effective_identity();
     let objects = live(b, &identity)?;
     let k: &Kernel = k;
     // A step of `h` inward from a sample ends at a ball's centre when no face is nearer to it

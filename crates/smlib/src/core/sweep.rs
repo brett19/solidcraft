@@ -61,7 +61,7 @@ use solidcore::topology::{Brep, FaceId};
 
 use super::blend::status;
 use super::offset::{face_miss, pick_faces};
-use super::{Body, run, with_body};
+use super::{Body, answer, run, with_body};
 use crate::sweeps::{Affine, Curve as Profile, DraftCorner, Ends, MAX_CURVES, MAX_STATION_CURVES, MAX_STATIONS, SweepFrame};
 use crate::{Error, Result, ffi};
 
@@ -304,12 +304,12 @@ fn tangent(k: &Kernel, c: &Curve, t: f64, from_left: bool) -> solidcore::Result<
 }
 
 /// Whether the angle about `n` from `a` to `b` is a sharp corner (`sm_DraftHasCorner`: more than
-/// `SM_EFF_ZERO_SQRT`); an angle that cannot be measured is none, as there.
-fn sharp(n: Vec3, a: Option<Vec3>, b: Option<Vec3>) -> bool {
-    match (a, b) {
-        (Some(a), Some(b)) => n.ccw_angle_between(a, b).is_ok_and(|x| x.abs() > EFF_ZERO_SQRT),
+/// `SM_EFF_ZERO_SQRT`); an angle whose measure returns a status is none, as there ([`answer`]).
+fn sharp(n: Vec3, a: Option<Vec3>, b: Option<Vec3>) -> solidcore::Result<bool> {
+    Ok(match (a, b) {
+        (Some(a), Some(b)) => answer(n.ccw_angle_between(a, b))?.is_some_and(|x| x.abs() > EFF_ZERO_SQRT),
         _ => false,
-    }
+    })
 }
 
 /// `sm_DraftHasCorner`, on the profile as given (one closed loop, in order): whether it has a
@@ -320,14 +320,14 @@ fn has_corner(k: &Kernel, curves: &[Curve], n: Vec3) -> solidcore::Result<bool> 
     for (i, b) in curves.iter().enumerate() {
         let Some(a) = curves.get((i + count - 1) % count) else { continue };
         let (ia, ib) = (a.natural_interval(), b.natural_interval());
-        if sharp(n, tangent(k, a, ia.max(), true)?, tangent(k, b, ib.min(), false)?) {
+        if sharp(n, tangent(k, a, ia.max(), true)?, tangent(k, b, ib.min(), false)?)? {
             return Ok(true);
         }
         if let CurveKind::BSpline(s) = b.kind() {
             let c = s.canonical()?;
             let inner = c.knots.iter().zip(&c.knot_multiplicities).skip(1).take(c.knots.len().saturating_sub(2));
             for (&u, &m) in inner {
-                if m >= c.degree && sharp(n, tangent(k, b, u, true)?, tangent(k, b, u, false)?) {
+                if m >= c.degree && sharp(n, tangent(k, b, u, true)?, tangent(k, b, u, false)?)? {
                     return Ok(true);
                 }
             }

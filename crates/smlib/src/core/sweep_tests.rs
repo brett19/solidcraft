@@ -464,7 +464,6 @@ fn the_cpp_kernel_places_the_profile_alike() {
 /// A diagonal 10 above a 10 x 10 x 10 box's top, projected down onto the top: the same diagonal
 /// at z = 10.
 #[test]
-#[ignore = "solidcore#1440: the topology point solve misses faces, so SmApiFaceClosestPoint picks no face (solidcore#1440)"]
 fn project_a_line_onto_a_face() {
     let got = timed("project", || {
         let b = make_box([0.0; 3], [10.0; 3]).unwrap();
@@ -482,7 +481,6 @@ fn project_a_line_onto_a_face() {
 /// A face's planar section needs `SmBrep::CreatePlanarSectionCurves`: not supported, after the
 /// face pick.
 #[test]
-#[ignore = "solidcore#1440: the topology point solve misses faces, so the face pick fails first (solidcore#1440); then no CreatePlanarSectionCurves (solidcore#1451)"]
 fn a_face_section_is_not_supported_yet() {
     let got = timed("section", || {
         let b = make_box([0.0; 3], [10.0; 3]).unwrap();

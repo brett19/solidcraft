@@ -47,7 +47,7 @@ fn named(entity: EntityRef, domain: u64) -> ObjectRef {
 /// `copy_of` (smlib_ops.cpp, smlib_imprint.cpp): `SmApiBrepCopy`, a copy that owns its geometry.
 /// A plain `Clone` is not one: its geometry keeps the source's owners. Copy `n` (from 1) names
 /// its objects in key domain `n`.
-pub(super) fn copy_of(k: &mut Kernel, b: &Brep, n: u64) -> SolidResult<Brep> {
+pub(crate) fn copy_of(k: &mut Kernel, b: &Brep, n: u64) -> SolidResult<Brep> {
     let target = move |e| named(e, n.saturating_mul(100_000_000));
     let mut state = p2::ArenaNotifyState::new(&Brep::new());
     let mut env = state.env(None);

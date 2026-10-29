@@ -160,6 +160,19 @@ pub(crate) fn run<T>(call: &'static str, f: impl FnOnce(&mut Kernel) -> std::res
     }
 }
 
+/// A call the capi checks for `SM_SUCCESS`, treating any other status as no answer: an SMLib
+/// status (solidcore's [`SolidError::Upstream`](solidcore::SolidError::Upstream), or NLib's
+/// [`SolidError::Nlib`](solidcore::SolidError::Nlib)) is `None`. Every other solidcore error
+/// (unported code, invalid input to an adapter, a missing record...) is not a status the C++
+/// path returns, so it fails the call instead of hiding as a skipped entity.
+pub(crate) fn answer<T>(r: std::result::Result<T, solidcore::SolidError>) -> std::result::Result<Option<T>, solidcore::SolidError> {
+    match r {
+        Ok(v) => Ok(Some(v)),
+        Err(solidcore::SolidError::Upstream { .. } | solidcore::SolidError::Nlib { .. }) => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
 /// Runs `f` on the kernel and `body`, locking the kernel first.
 pub(crate) fn with_body<T>(
     call: &'static str,

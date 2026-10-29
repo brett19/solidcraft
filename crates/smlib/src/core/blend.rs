@@ -48,7 +48,7 @@ use solidcore::topology::face::p2 as face_p2;
 use solidcore::topology::{Brep, EdgeId, EdgeuseId, FaceId, FaceuseId, VertexId, edge, vertex};
 
 use super::boolean::copy_of;
-use super::{Body, run};
+use super::{Body, answer, run};
 use crate::{Blend, ChamferSecond, Error, MAX_POINTS, Result};
 
 /// The capi's statuses as SolidCraft errors: an operation's own result.
@@ -97,8 +97,8 @@ pub(super) enum Miss {
 /// `smlib_pick::pick`: the entity nearest each point, each once, with the index of the point that
 /// first picked it. A point picks none when the nearest is farther than `tol`, and is ambiguous
 /// when the second nearest is within `tol` too and nearer than the first by at most `model_tol`.
-/// An entity whose distance cannot be measured is skipped, as the capi skips a failed query
-/// (solidcore's refusal of unported code is not skipped: it fails the pick).
+/// An entity whose distance query returns a status other than success is skipped, as the capi
+/// skips it ([`answer`]); any other solidcore error fails the pick.
 pub(super) fn pick<T: Copy + PartialEq>(
     all: &[T],
     points: &[[f64; 3]],
@@ -135,15 +135,6 @@ pub(super) fn pick<T: Copy + PartialEq>(
         }
     }
     Ok(Ok((picked, first)))
-}
-
-/// A query's failure the capi treats as no answer; solidcore's unported code still fails.
-pub(super) fn answer<T>(r: solidcore::Result<T>) -> solidcore::Result<Option<T>> {
-    match r {
-        Ok(v) => Ok(Some(v)),
-        Err(e) if e.is_unported() => Err(e),
-        Err(_) => Ok(None),
-    }
 }
 
 /// `pick_edges` (`edge_distance`: `SmApiEdgeClosestPoint`).
