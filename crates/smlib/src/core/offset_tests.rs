@@ -489,11 +489,15 @@ fn faces_are_picked_on_the_box_and_on_its_working_copy() {
         }
         assert!(faces[0].as_ref().is_some_and(|f| f.len() == 1), "the body: {faces:?}");
         assert_eq!(faces[0], faces[1], "the body and its copy pick the same face");
-        // The maintainers' usage: the body itself, keyed by its naming scheme.
-        let body = BrepIdentity::of_brep(&b);
-        box_face_distances_are_exact("of_brep on the body", &face_distances(k, &mut b, &body, p)?);
-        // The copy under the arena's identities: no face's geometry owner resolves.
-        let arena = BrepIdentity::of_brep(&w);
+        // `BrepIdentity::of_brep` honours a copy's owner keys since solidcore#1445: the body
+        // and its copy both resolve.
+        for (what, x) in [("of_brep on the body", &mut b), ("of_brep on its copy", &mut w)] {
+            let proven = BrepIdentity::of_brep(x);
+            box_face_distances_are_exact(what, &face_distances(k, x, &proven.identity(), p)?);
+        }
+        // The copy under its naming scheme alone (the arena's identities): no face's geometry
+        // owner resolves, and the query says so rather than answering from the vertices.
+        let arena = BrepIdentity::of_naming_with_id(solidcore::topology::BrepId::from_index(0), &w);
         match face_distances(k, &mut w, &arena, p) {
             Err(SolidError::InvalidInput { .. }) => {}
             other => panic!("the copy under the arena's identities: {other:?}"),
