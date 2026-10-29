@@ -113,6 +113,7 @@ mod prism_measure;
 pub mod profile;
 pub mod provenance;
 mod record;
+mod repair;
 #[cfg(test)]
 mod seam_faces_tests;
 mod sew;
@@ -154,8 +155,8 @@ mod validity;
 pub mod watch;
 
 pub use blend::{
-    ChamferSide, chamfer, chamfer_sides, fillet, fillet_each, fillet_g2, fillet_g2_corners, fillet_least_setback, fillet_max, fillet_max_each,
-    fillet_setback, tangent_chain,
+    ChamferSide, blend_edges, chamfer, chamfer_sides, fillet, fillet_each, fillet_g2, fillet_g2_corners, fillet_least_setback, fillet_max,
+    fillet_max_each, fillet_setback, tangent_chain,
 };
 pub use blend_corner::fillet_radii;
 pub use blend_variable::{RadiusSpline, Taper, fillet_chord, fillet_tapered, fillet_variable, fillet_variable_points, fillet_variable_spline, taper};
@@ -206,6 +207,7 @@ pub use polybool::faceted_boolean;
 pub use polyhedron::{HalfSpace, convex_polyhedron, draft, offset_faces, shell};
 pub use prism::{PLANAR_FIT_TOL, extrude_planar_regions, planar_regions_boolean};
 pub use prism_measure::certified_prism_equivalent;
+pub use repair::{Hole, RebuiltFace, RefusedFace, RepairOptions, RepairReport, SewnGap, repair};
 pub use sew::{EdgeSpec, FaceSpec, SurfSpec, sew, sew_touching};
 /// Which kernel answers each operation, SMLib or solidcore (crates/smlib/src/route.rs).
 pub use solidcraft_smlib::route as kernel_route;

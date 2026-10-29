@@ -535,6 +535,10 @@ pub struct ModelState {
     /// How the pieces a join split off into bodies of their own touched the others (by feature
     /// id), for its notice.
     kept_separate: BTreeMap<u64, KeptSeparate>,
+    /// For a feature saved before format 14 that split a body, a digest of the later features'
+    /// picks its pieces were named by (by feature id, see [`crate::lineage::order_legacy_lumps`]):
+    /// the state stands for the feature only while those picks are the same.
+    legacy_picks: BTreeMap<u64, u64>,
 }
 
 /// How a piece a join split off into a body of its own (`Touching::Separate`) touched the
@@ -645,7 +649,7 @@ impl ModelState {
     /// After a feature evaluated to this state from `before` with cache key `key`: bodies it
     /// made or changed take that key, sketches it made a digest of their solved geometry (see
     /// [`quantize`]); the rest keep theirs.
-    fn stamp(&mut self, before: &Arc<ModelState>, f: &Feature, key: u64, mats: Vec<Mat>) {
+    fn stamp(&mut self, doc: &Document, before: &Arc<ModelState>, f: &Feature, key: u64, mats: Vec<Mat>) {
         let feature = f.id;
         let depth = before.bodies.iter().filter_map(|b| b.names.depth()).max().unwrap_or(0) + 1;
         let sheets = if f.kind.is_sheet() { self.sheets.clone() } else { Vec::new() };
@@ -654,7 +658,13 @@ impl ModelState {
         // the feature was saved when they were named in that order).
         if !f.shell_piece_order {
             crate::lineage::order_lumps(&mut self.bodies, &origin);
+        } else {
+            crate::lineage::order_legacy_lumps(&mut self.bodies, before, doc, f);
         }
+        match crate::lineage::legacy_picks_digest(&self.bodies, before, doc, f) {
+            0 => self.legacy_picks.remove(&f.id),
+            d => self.legacy_picks.insert(f.id, d),
+        };
         // The bodies before the feature by name, in their order (names repeat only in damaged
         // states): every lookup below is the first match of a linear search, without walking
         // every earlier body for every body, after every feature.
@@ -734,6 +744,7 @@ struct CachedEval {
     error: Option<String>,
     warning: Option<String>,
     import_report: Option<Arc<kernel::ImportReport>>,
+    repair: Option<Arc<kernel::RepairReport>>,
     ms: f64,
     state: Arc<ModelState>,
     /// What the state costs, worked out once when it was stored (see
@@ -943,6 +954,9 @@ pub struct FeatureResult {
     /// (`warning` is the first of them as the kernel words them).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub import_report: Option<Arc<kernel::ImportReport>>,
+    /// What a Repair Part feature changed, face by face (the command's reply says it).
+    #[serde(skip)]
+    pub repair: Option<Arc<kernel::RepairReport>>,
     pub ms: f64,
     pub skipped: bool,
     /// Not evaluated on the document's current inputs: a feature at or after a sketch shown live
@@ -1322,6 +1336,15 @@ fn context_digest(doc: &Document, vals: &BTreeMap<String, Value>) -> u64 {
         }
     }
     h.finish()
+}
+
+/// Whether `after`, a state feature `f` evaluated to from `before` in an earlier evaluation, is
+/// still its result in `doc`: a feature saved before format 14 names the pieces it splits a body
+/// into as the later features pick them ([`crate::lineage::order_legacy_lumps`]), which neither
+/// its fingerprint nor its cache key cover. (A script replays those features after it: the state
+/// made before they were there named the pieces otherwise.)
+fn legacy_current(doc: &Document, f: &Feature, before: &ModelState, after: &ModelState) -> bool {
+    !f.shell_piece_order || after.legacy_picks.get(&f.id).copied().unwrap_or(0) == crate::lineage::legacy_picks_digest(&after.bodies, before, doc, f)
 }
 
 /// The cache key of a feature evaluation: its own inputs, the document context and the state it
@@ -1856,9 +1879,11 @@ impl Model {
             if f.suppressed && !rolled_back {
                 reserved.extend(f.body_names.iter().map(|n| n.trim()).filter(|n| !n.is_empty()).map(str::to_string));
             }
+            // A feature that names its pieces as later features pick them (saved before format 14)
+            // has a result only while those picks are what they were.
             if reuse
                 && !unkept
-                && let Some(old) = self.results.get(i).filter(current)
+                && let Some(old) = self.results.get(i).filter(current).filter(|old| old.skipped || legacy_current(doc, f, &state, &old.state))
             {
                 if !old.skipped {
                     state = old.state.clone();
@@ -1874,6 +1899,7 @@ impl Model {
                     error: None,
                     warning: None,
                     import_report: None,
+                    repair: None,
                     ms: 0.0,
                     skipped: true,
                     stale: false,
@@ -1893,7 +1919,13 @@ impl Model {
                 cache_key(f, fp, fingerprint(doc, 0, f, &vals, false, &self.step_digests) ^ placement_digest(doc, f, Some(&state)), ctx, &state);
             let kept = self.kept.0.as_ref().filter(|_| !self.no_cache);
             if !self.no_cache
-                && let Some(c) = self.cache.lock().ok().and_then(|mut m| m.get(key)).or_else(|| kept.and_then(|k| k.get(key)))
+                && let Some(c) = self
+                    .cache
+                    .lock()
+                    .ok()
+                    .and_then(|mut m| m.get(key))
+                    .or_else(|| kept.and_then(|k| k.get(key)))
+                    .filter(|c| c.error.is_some() || legacy_current(doc, f, &state, &c.state))
             {
                 if let Some(k) = kept {
                     k.put(key, &c);
@@ -1910,6 +1942,7 @@ impl Model {
                     error: c.error,
                     warning: c.warning,
                     import_report: c.import_report,
+                    repair: c.repair,
                     ms: c.ms,
                     skipped: false,
                     stale: false,
@@ -1921,7 +1954,12 @@ impl Model {
             }
             // An active result hidden by the marker, or evaluated ahead on these same inputs
             // (the same chain of definitions from the start). Changed inputs never reuse it.
-            if let Some(r) = rolled.as_ref().filter(current).or_else(|| primed.as_ref().and_then(|p| p.get(&f.id)).filter(current)) {
+            if let Some(r) = rolled
+                .as_ref()
+                .filter(current)
+                .or_else(|| primed.as_ref().and_then(|p| p.get(&f.id)).filter(current))
+                .filter(|r| r.error.is_some() || legacy_current(doc, f, &state, &r.state))
+            {
                 restored += 1;
                 if r.error.is_none() {
                     state = r.state.clone();
@@ -1944,6 +1982,7 @@ impl Model {
             }
             let mut warning = None;
             let mut import_report = None;
+            let mut repair = None;
             // Face references by name: move each face point onto its named face (on the body the
             // feature names, when it names one and the face is there).
             let renamed;
@@ -1967,7 +2006,8 @@ impl Model {
             let r = match frame_error.or(bad_param) {
                 Some(e) => Err(kernel::KernelError::Failed(e)),
                 None => kernel::guard(&f.name, || {
-                    eval_feature(doc, &vals, f, &mut next, &mut warning, &mut import_report).map_err(|e| kernel::KernelError::Failed(e.to_string()))
+                    eval_feature(doc, &vals, f, &mut next, &mut warning, &mut import_report, &mut repair)
+                        .map_err(|e| kernel::KernelError::Failed(e.to_string()))
                 }),
             };
             if r.is_ok() {
@@ -2002,7 +2042,7 @@ impl Model {
                         }
                         _ => mats,
                     };
-                    next.stamp(&state, f, key, mats);
+                    next.stamp(doc, &state, f, key, mats);
                     for b in &mut next.bodies {
                         if !b.transferred {
                             b.component = match doc.body_components.get(&b.name) {
@@ -2023,6 +2063,7 @@ impl Model {
                     error: error.clone(),
                     warning: warning.clone(),
                     import_report: import_report.clone(),
+                    repair: repair.clone(),
                     ms,
                     bytes: state.added_bytes(&before),
                     state: state.clone(),
@@ -2041,6 +2082,7 @@ impl Model {
                 error,
                 warning,
                 import_report,
+                repair,
                 ms,
                 skipped: false,
                 stale: false,
@@ -3216,7 +3258,8 @@ pub fn edge_refs(st: &ModelState, body: &Option<crate::BodyName>, pts: &[Vec3]) 
 }
 
 /// Persistent names of the edges picked at `pts`, each on the body it lies on (see
-/// [`picked_bodies`]).
+/// [`picked_bodies`]): of the edge a blend takes at each pick (at a vertex where a seam meets a
+/// rim, the rim), else of the nearest edge.
 pub fn edge_names_for(st: &ModelState, body: &Option<crate::BodyName>, pts: &[Vec3]) -> Vec<String> {
     let Some(on) = picked_bodies(st, body, pts) else { return Vec::new() };
     let mut out = vec![String::new(); pts.len()];
@@ -3230,7 +3273,14 @@ pub fn edge_names_for(st: &ModelState, body: &Option<crate::BodyName>, pts: &[Ve
         // The body's names are worked out once for all its picks.
         let idx: Vec<usize> = on.iter().enumerate().filter(|(_, t)| **t == ti).map(|(i, _)| i).collect();
         let at: Vec<Vec3> = idx.iter().filter_map(|i| pts.get(*i).copied()).collect();
-        for (i, n) in idx.into_iter().zip(crate::naming::edge_names_at(b, &at)) {
+        let names = match kernel::blend_edges(&b.body, &at) {
+            Ok(edges) => {
+                let all = crate::naming::edge_names(b);
+                edges.iter().map(|e| all.get(*e).cloned().unwrap_or_default()).collect()
+            }
+            Err(_) => crate::naming::edge_names_at(b, &at),
+        };
+        for (i, n) in idx.into_iter().zip(names) {
             if let Some(slot) = out.get_mut(i) {
                 *slot = n;
             }
@@ -3541,6 +3591,19 @@ fn off_the_ends(mb: &ModelBody, edge: usize, p: Vec3) -> Vec3 {
 
 /// The edges a tapered fillet tapered (a point on each, with its taper).
 type Tapered = Vec<(Vec3, kernel::Taper)>;
+
+/// A blend's refusal when the feature blended the picked edges' tangent chains too (tangent
+/// propagation, the default), saying so and how to blend the picked edges alone.
+fn with_propagation_hint(e: DocError) -> DocError {
+    const HINT: &str = " (tangent propagation blended the picked edges' tangent chain with them; with it off, tangent_chain: false, only the picked edges are blended)";
+    match e {
+        DocError::Kernel(kernel::KernelError::TooLarge(m)) => DocError::Kernel(kernel::KernelError::TooLarge(m + HINT)),
+        DocError::Kernel(kernel::KernelError::Invalid(m)) => DocError::Kernel(kernel::KernelError::Invalid(m + HINT)),
+        DocError::Kernel(kernel::KernelError::Failed(m)) => DocError::Kernel(kernel::KernelError::Failed(m + HINT)),
+        DocError::Invalid(m) => DocError::Invalid(m + HINT),
+        e => e,
+    }
+}
 
 /// Body `mb` with blend `f` applied at `edges` (radius or distance `r`), the radii a fitted fillet
 /// used (when it reduced any) and the edges it tapered.
@@ -6237,6 +6300,7 @@ fn eval_feature(
     st: &mut ModelState,
     warning: &mut Option<String>,
     import_report: &mut Option<Arc<kernel::ImportReport>>,
+    repair: &mut Option<Arc<kernel::RepairReport>>,
 ) -> Result<()> {
     // Its tools meet bodies in other placements where those are shown (#3383).
     let _frames = ToolFrames::install(doc, f, st);
@@ -6782,12 +6846,15 @@ fn eval_feature(
                 let Some(mb) = st.bodies.get(*ti) else { return Err(DocError::Invalid("body".into())) };
                 let mut w = None;
                 let edges = blend_edges_on(mb, f, edges, idx, &mut w)?;
+                let picked = edges.len();
                 let edges = if chain { kernel::tangent_chain(&mb.body, &edges)? } else { edges };
                 if let Some(w) = w {
                     notes.push(w);
                 }
                 let mut note = None;
-                let (nb, used, tapered) = blend_body(vals, f, mb, &edges, r, &mut note)?;
+                let propagated = edges.len() > picked;
+                let (nb, used, tapered) =
+                    blend_body(vals, f, mb, &edges, r, &mut note).map_err(|e| if propagated { with_propagation_hint(e) } else { e })?;
                 if let Some(n) = note {
                     notes.push(n);
                 }
@@ -7017,6 +7084,30 @@ fn eval_feature(
             let result = ModelBody::new(source.name.clone(), converted, f.id);
             let target = st.bodies.get_mut(index).ok_or_else(|| DocError::Unknown(format!("body `{body}`")))?;
             *target = result;
+            Ok(())
+        }
+        FeatureKind::Repair { body, gap, patch_holes } => {
+            let gap = val(vals, gap, Kind::Length)?;
+            let index = st.bodies.iter().position(|b| &b.name == body).ok_or_else(|| DocError::Unknown(format!("body `{body}`")))?;
+            let source = st.bodies.get(index).ok_or_else(|| DocError::Unknown(format!("body `{body}`")))?;
+            let (repaired, report) = kernel::repair(&source.body, &kernel::RepairOptions { gap, patch_holes: *patch_holes })?;
+            let repaired = repaired.with_color(source.body.color());
+            let result = ModelBody::new(source.name.clone(), repaired, source.feature);
+            let mut left: Vec<String> =
+                report.refused.iter().map(|r| format!("SMLib still refuses face {} ({:?}): {}", r.face + 1, r.surface, r.why)).collect();
+            left.extend(
+                report
+                    .holes
+                    .iter()
+                    .filter(|h| !h.patched)
+                    .map(|h| h.why.clone().unwrap_or_else(|| format!("a hole of {} edges is left open", h.edges.len()))),
+            );
+            if !left.is_empty() {
+                *warning = Some(left.join("; "));
+            }
+            let target = st.bodies.get_mut(index).ok_or_else(|| DocError::Unknown(format!("body `{body}`")))?;
+            *target = result;
+            *repair = Some(Arc::new(report));
             Ok(())
         }
         FeatureKind::MeshImport { meshes, .. } => {
@@ -7814,6 +7905,50 @@ mod chain_tests {
             assert_eq!(crate::appearance::face_index_at(b, *point), Some(*index));
         }
         assert_eq!(tangent_face_chain(b, &[Vec3::new(20.0, 15.0, 20.0); 2]), pts);
+    }
+
+    fn fillet(at: Vec3, radius: &str, tangent_chain: bool) -> FeatureKind {
+        FeatureKind::Fillet {
+            edges: vec![crate::Position(at)],
+            radius: radius.into(),
+            body: None,
+            style: crate::FilletStyle::Constant,
+            fit: Default::default(),
+            corner: Default::default(),
+            setbacks: Vec::new(),
+            tangent_chain,
+        }
+    }
+
+    /// A 20 box's top edge along y rounded r2, then the top front edge (along x) rounded r3: that
+    /// edge runs on tangentially into the round's end arc, so by default (tangent propagation)
+    /// the arc is rounded with it, which an r3 round on an r2 arc cannot be: refused, saying that
+    /// propagation blended the chain and how to blend the edge alone. With propagation off the
+    /// edge is rounded alone, ending on the r2 round.
+    #[test]
+    fn a_propagated_chain_that_cannot_build_says_how_to_blend_the_edge_alone() {
+        let build = |chain: bool| {
+            let mut doc = Document::new("T");
+            let solid = FeatureKind::Box {
+                corner: crate::point_expr(Vec3::ZERO),
+                length: "20".into(),
+                width: "20".into(),
+                height: "20".into(),
+                operation: Operation::NewBody,
+            };
+            doc.add_feature(solid, None).unwrap();
+            doc.add_feature(fillet(Vec3::new(20.0, 10.0, 20.0), "2", true), None).unwrap();
+            let last = doc.add_feature(fillet(Vec3::new(10.0, 0.0, 20.0), "3", chain), None).unwrap();
+            let mut m = Model::new();
+            m.evaluate(&doc);
+            (m.result(last).and_then(|r| r.error.clone()), m.state().bodies.first().map(|b| b.body.face_count()))
+        };
+        let (on, _) = build(true);
+        let on = on.expect("the propagated chain is refused");
+        assert!(on.contains("with it off, tangent_chain: false, only the picked edges are blended"), "{on}");
+        let (off, faces) = build(false);
+        assert_eq!(off, None);
+        assert_eq!(faces, Some(8));
     }
 }
 

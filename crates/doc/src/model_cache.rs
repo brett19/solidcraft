@@ -364,6 +364,10 @@ impl SavedModel {
                 tapered: serde_json::from_value(field("tapered")?).map_err(invalid)?,
                 // A join's notice is for the evaluation that made it, not kept with the cache.
                 kept_separate: BTreeMap::new(),
+                // Not kept either: a saved model's states carry no lineage, so the check of a
+                // legacy split's picks (`lineage::legacy_picks_digest`) finds no pieces in them
+                // and takes them as the design's evaluation they were saved as.
+                legacy_picks: BTreeMap::new(),
             };
             held = held.saturating_add(st.bodies.len()).saturating_add(st.sketches.len()).saturating_add(st.sheets.len());
             if held > MAX_HELD {
@@ -596,6 +600,7 @@ impl Model {
                     .get("import_report")
                     .map(|v| serde_json::from_value::<kernel::ImportReport>(v.clone()).map(Arc::new).map_err(|_| bad("saved model: import report")))
                     .transpose()?,
+                repair: None,
                 ms,
                 skipped: r.get("skipped").and_then(Json::as_bool).ok_or_else(|| bad("saved model: skipped"))?,
                 stale: false,
@@ -634,6 +639,7 @@ impl Model {
                         error: None,
                         warning: r.warning.clone(),
                         import_report: r.import_report.clone(),
+                        repair: r.repair.clone(),
                         ms: r.ms,
                         bytes: r.state.retained_bytes(),
                         state: r.state.clone(),

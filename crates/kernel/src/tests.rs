@@ -31,7 +31,9 @@ fn cylinder_measures_match_analytic() {
     let a = 2.0 * PI * 225.0 + 2.0 * PI * 15.0 * 50.0;
     assert!(rel(m.volume, v) < 5e-4, "{} vs {v}", m.volume);
     assert!(rel(m.area, a) < 5e-4, "{} vs {a}", m.area);
-    assert_eq!((m.merged.faces, m.merged.edges, m.merged.vertices), (3, 2, 2), "{:?}", m.merged);
+    // Two closed circles and the side's seam (the ladder's count: each whole curve once, and each
+    // cylinder's seam); a vertex on each circle.
+    assert_eq!((m.merged.faces, m.merged.edges, m.merged.vertices), (3, 3, 2), "{:?}", m.merged);
     assert_eq!(m.merged.face_types.get("cylinder"), Some(&1));
 }
 
@@ -463,10 +465,27 @@ fn tapered_extrudes() {
     assert!(rel(m.volume, v) < 5e-4, "{} vs {v}", m.volume);
     assert!(m.bbox.max.z < 1e-6 && m.bbox.min.z > -10.0 - 1e-6, "{:?}", m.bbox);
     assert!(extrude_tapered(&Plane::XY, &c, 10.0, 1.0, -60f64.to_radians(), crate::DraftCorner::default()).is_err(), "closes the profile");
+    // The square with a 10 × 10 square hole, 30 up, 5° inward: every wall leans in toward the
+    // material's outside, so the outer frustum narrows and the hole's widens; the solid is the
+    // one frustum less the other, with each wall a face of its own (four out, four in, two caps).
+    let t = 5f64.to_radians().tan();
+    let hole = Loop2::polygon(&[Vec2::new(-5.0, -5.0), Vec2::new(-5.0, 5.0), Vec2::new(5.0, 5.0), Vec2::new(5.0, -5.0)]);
+    let ring = Region2 { outer: sq.outer.clone(), holes: vec![hole] };
+    let b = extrude_tapered(&Plane::XY, &ring, 30.0, 1.0, -5f64.to_radians(), crate::DraftCorner::default()).unwrap();
+    let frustum = |a0: f64, a1: f64| 30.0 / 3.0 * (a0 * a0 + a1 * a1 + a0 * a1);
+    let v = frustum(40.0, 40.0 - 60.0 * t) - frustum(10.0, 10.0 + 60.0 * t);
+    let m = measure(&b).unwrap();
+    assert!(rel(m.volume, v) < 1e-6, "{} vs {v}", m.volume);
+    assert_eq!(m.merged.faces, 10);
+    // At 30° the hole would grow past the outer wall: refused, saying why.
+    let e = extrude_tapered(&Plane::XY, &ring, 30.0, 1.0, -30f64.to_radians(), crate::DraftCorner::default()).unwrap_err();
+    assert!(e.to_string().contains("hole"), "{e}");
 }
 
 /// A slot (two lines and two half-circles, tangent) tapered inward: every edge moves in by
-/// d = z · tan 8°, so A(d) = A₀ − P·d + π·d² (#546). An arc meeting a line at a corner is refused.
+/// d = z · tan 8°, so A(d) = A₀ − P·d + π·d² (#546). A quarter disc, its arc meeting the lines at
+/// corners, tapered outward: each wall continues as itself, so the section at d is the disc of
+/// radius r + d over x ≥ −d, y ≥ −d.
 #[test]
 fn tapered_extrude_of_lines_and_arcs() {
     let (r, l, h, a) = (5.0, 20.0, 12.0, 8f64.to_radians());
@@ -492,8 +511,34 @@ fn tapered_extrude_of_lines_and_arcs() {
             Seg2::Line { a: Vec2::new(0.0, r), b: Vec2::ZERO },
         ],
     };
-    let e = extrude_tapered(&Plane::XY, &Region2 { outer: quarter, holes: vec![] }, h, 1.0, a, crate::DraftCorner::default()).unwrap_err();
-    assert!(e.to_string().contains("arc meets another edge at a corner"), "{e}");
+    let b = extrude_tapered(&Plane::XY, &Region2 { outer: quarter, holes: vec![] }, h, 1.0, a, crate::DraftCorner::default()).unwrap();
+    // The section's area: under the circle of radius R = r + d down to y = −d from x = −d to
+    // x₁, where the circle meets y = −d, then the whole circle's width out to x = R;
+    // F(x) = ∫ √(R² − x²) dx.
+    let section = |d: f64| {
+        let big = r + d;
+        let f = |x: f64| 0.5 * (x * (big * big - x * x).max(0.0).sqrt() + big * big * (x / big).clamp(-1.0, 1.0).asin());
+        let x1 = (big * big - d * d).sqrt();
+        f(x1) - f(-d) + d * (x1 + d) + 2.0 * (f(big) - f(x1))
+    };
+    // Gauss–Legendre on 8 nodes over each of 16 pieces of the height: the area is smooth in d.
+    let (nodes, weights) = (
+        [0.183_434_642_495_649_8, 0.525_532_409_916_329, 0.796_666_477_413_626_7, 0.960_289_856_497_536_3],
+        [0.362_683_783_378_362, 0.313_706_645_877_887_3, 0.222_381_034_453_374_5, 0.101_228_536_290_376_3],
+    );
+    let pieces = 16;
+    let v: f64 = (0..pieces)
+        .map(|k| {
+            let (z0, dz) = (k as f64 * h / pieces as f64, h / pieces as f64);
+            let mid = z0 + 0.5 * dz;
+            nodes.iter().zip(weights).map(|(x, w)| w * (section((mid - 0.5 * dz * x) * t) + section((mid + 0.5 * dz * x) * t))).sum::<f64>()
+                * 0.5
+                * dz
+        })
+        .sum();
+    let m = measure(&b).unwrap();
+    assert!(rel(m.volume, v) < 1e-6, "quarter disc: {} vs {v}", m.volume);
+    assert_eq!(m.merged.faces, 5, "quarter disc: bottom, top, two flat walls and the cone");
 }
 
 /// A circle with a lobe on each side (four arcs of three circles, meeting at corners: the outline of
@@ -958,13 +1003,16 @@ fn sphere_booleans() {
     let s = sphere(Vec3::ZERO, 15.0).unwrap();
     let m = measure(&s).unwrap();
     assert!(rel(m.volume, 4.0 / 3.0 * PI * 3375.0) < 1e-3, "{}", m.volume);
-    assert_eq!((m.merged.faces, m.merged.edges), (1, 0));
+    // One spherical face, closed along its seam from pole to pole.
+    assert_eq!((m.merged.faces, m.merged.edges), (1, 1));
     // A ball cut out of the top face of a slab (oracle 14).
     let b = box_solid(Vec3::new(-25.0, -25.0, -20.0), Vec3::new(25.0, 25.0, 0.0)).unwrap();
     let c = boolean(&b, &s, BoolOp::Cut).unwrap().unwrap();
     let m = measure(&c).unwrap();
     assert!(rel(m.volume, 50.0 * 50.0 * 20.0 - 2.0 / 3.0 * PI * 3375.0) < 1e-3, "{}", m.volume);
-    assert_eq!((m.merged.faces, m.merged.edges, m.merged.vertices), (7, 13, 9));
+    // The box's 6 faces and the sphere's; its 12 edges, the rim circle and the sphere's seam down
+    // to its pole; its 8 corners, the rim's vertex and the pole.
+    assert_eq!((m.merged.faces, m.merged.edges, m.merged.vertices), (7, 14, 10));
 }
 
 #[test]
@@ -1575,7 +1623,9 @@ fn overlapping_holes_and_mirror_joins() {
     let both = boolean(&half, &other, BoolOp::Union).unwrap().unwrap();
     let v = measure(&half).unwrap().volume;
     let mb = measure(&both).unwrap();
-    assert!(rel(mb.volume, 2.0 * v) < 1e-9, "{} vs {}", mb.volume, 2.0 * v);
+    // Both volumes are SMLib's integrals, each good to its relative accuracy (1e-8,
+    // measure::ACCURACY): they agree to the two together.
+    assert!(rel(mb.volume, 2.0 * v) < 2e-8, "{} vs {}", mb.volume, 2.0 * v);
     // One body: the shared face is gone and the faces either side of it merged.
     assert_eq!(mb.merged.faces, 10, "{:?}", mb.merged);
     // Two equal cylinders on one axis, overlapping: one longer cylinder.
@@ -1640,12 +1690,9 @@ fn fillet_an_open_curved_edge() {
         ],
     };
     let b = extrude(&Plane::XY, &[Region2 { outer: d, holes: vec![] }], 0.0, 15.0).unwrap().pop().unwrap();
-    let v0 = measure(&b).unwrap().volume;
     let f = fillet(&b, &[Vec3::new(0.0, 10.0, 15.0)], 2.0).unwrap();
-    // (A fine tessellation: the difference of two measured volumes magnifies their error.)
-    let _ = v0;
-    let fine = |x: &Body| x.mesh(&crate::MeshTolerance::chord(0.002)).unwrap().measure().volume;
-    let removed = fine(&b) - fine(&f);
+    // Exact volumes (SMLib's, to 1e-8): the difference of two mesh volumes magnifies their sag.
+    let removed = measure(&b).unwrap().volume - measure(&f).unwrap().volume;
     // Pappus: the corner's cross-section r²(1 − π/4), its centroid 0.2234 r in from the wall.
     let r = 2.0;
     let want = r * r * (1.0 - PI / 4.0) * (10.0 - r * (10.0 - 3.0 * PI) / (3.0 * (4.0 - PI))) * PI;
@@ -1761,7 +1808,8 @@ fn fillet_sharp_arc_and_arc_loop() {
             (area(10.0) - area(10.0 - 0.5 * (1.0 - theta.cos()))) * 0.5 * theta.cos() * dt
         })
         .sum();
-    let removed = body.mesh(&crate::MeshTolerance::chord(1e-4)).unwrap().measure().volume - mesh.measure().volume;
+    // Exact volumes (SMLib's, to 1e-8): the difference of two mesh volumes magnifies their sag.
+    let removed = measure(&body).unwrap().volume - measure(&blended).unwrap().volume;
     assert!(rel(removed, want) < 1e-3, "{removed} vs {want}");
 }
 
@@ -1877,9 +1925,9 @@ fn d_fillet_removed_reference(r: f64, steps: u32) -> f64 {
 #[test]
 fn fillet_mixed_arc_and_line_removed_volume_converges() {
     let body = mixed_arc_and_line_prism();
-    let source_exact = PI * 100.0 * 15.0 / 2.0;
     let tolerances = [1e-4, 2.5e-5];
     let source_volumes = tolerances.map(|tol| body.mesh(&crate::MeshTolerance::chord(tol)).unwrap().measure().volume);
+    let source = measure(&body).unwrap();
     for r in [0.5, 0.25] {
         let want = d_fillet_removed_reference(r, 8192);
         assert!((want - d_fillet_removed_reference(r, 4096)).abs() < 1e-7, "reference quadrature must converge");
@@ -1887,23 +1935,18 @@ fn fillet_mixed_arc_and_line_removed_volume_converges() {
             assert!((want - 2.715578447526581).abs() < 1e-7, "{want}");
         }
         let blended = fillet(&body, &[Vec3::new(0.0, 10.0, 15.0), Vec3::new(5.0, 0.0, 15.0)], r).unwrap();
-        let mut previous = None;
-        for (tol, source) in tolerances.into_iter().zip(source_volumes) {
-            let volume = blended.mesh(&crate::MeshTolerance::chord(tol)).unwrap().measure().volume;
-            // Equal chord tolerances reduce (not necessarily cancel) the error from the
-            // unchanged walls. The convergence and exact-source checks below guard this.
-            let removed = source - volume;
-            assert!(rel(removed, want) < 1e-3, "r={r}, tol={tol}: removed {removed}, expected {want}");
-            if let Some(coarser) = previous {
-                assert!(rel(removed, coarser) < 1e-3, "r={r}: removal has not converged: {coarser} -> {removed}");
-                let exact_removed = source_exact - volume;
-                // The source's inscribed semicylinder loses at most pi*R*H*tol.
-                // Do not charge its chord error to the much smaller fillet volume.
-                let source_error = (source_exact - source).abs();
-                assert!(source_error < PI * 10.0 * 15.0 * tol, "source chord error {source_error}");
-                assert!((exact_removed - want).abs() < source_error + want * 1e-3, "r={r}: exact-source removal {exact_removed}, expected {want}");
-            }
-            previous = Some(removed);
+        // The removal from the exact volumes (SMLib's, to 1e-8): the reference to a hundred
+        // thousandth (the blend's surfaces are SMLib's fits; their section error is
+        // fillet_mixed_arc_and_line_joint_preserves_both_section_radii's).
+        let done = measure(&blended).unwrap();
+        let exact = source.volume - done.volume;
+        assert!(rel(exact, want) < 1e-5, "r={r}: removed {exact}, expected {want}");
+        // From meshes, the removal converges on it: each mesh lies within its chord of its
+        // faces, so the two differ from the exact removal by at most their areas times it.
+        for (tol, source_mesh) in tolerances.into_iter().zip(source_volumes) {
+            let removed = source_mesh - blended.mesh(&crate::MeshTolerance::chord(tol)).unwrap().measure().volume;
+            let bound = (source.area + done.area) * tol;
+            assert!((removed - exact).abs() <= bound, "r={r}, tol={tol}: mesh removal {removed}, exact {exact} (within {bound})");
         }
     }
 }
@@ -1926,7 +1969,7 @@ fn fillet_mixed_arc_and_line_joint_preserves_both_section_radii() {
             if !mitres.insert(id) {
                 continue;
             }
-            let curve = solidcraft_geom::brep::eval::CurveEval::new(&edge.curve).unwrap();
+            let curve = solidcraft_geom::brep::eval::CurveEval::new(edge.parameters()).unwrap();
             let [lo, hi] = edge.interval;
             for i in 0..=257 {
                 let p = curve.point(lo + (hi - lo) * f64::from(i) / 257.0).unwrap();
