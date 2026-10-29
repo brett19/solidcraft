@@ -91,17 +91,20 @@ fn round_trips(name: &str) {
 /// The C++ kernel's arrays of the same primitive: every id, ints exact, reals within 1e-12.
 #[cfg(feature = "native")]
 fn matches_cpp(name: &str) {
-    use crate::Brep;
     use crate::flat::{TOLERANCE, VERTEX_TOLERANCE, WIRE_EDGE_NURBS_FORM};
+    use crate::{Brep, ffi};
+    // built by the C API whatever `Op::Primitive` routes to
+    crate::init().unwrap();
     let cpp = match name {
-        "box" => Brep::make_box([1.0, -2.0, 3.0], [10.0, 20.0, 30.0]),
-        "cylinder" => Brep::make_cylinder([1.0, 2.0, -3.0], 5.0, 12.0),
-        "sphere" => Brep::make_sphere([1.0, 2.0, 3.0], 7.0),
-        "cone" => Brep::make_cone([0.0, 1.0, 2.0], 6.0, 0.0, 9.0),
-        "frustum" => Brep::make_cone([0.0, 1.0, 2.0], 6.0, 2.0, 9.0),
-        "torus" => Brep::make_torus([1.0, -1.0, 0.5], 10.0, 3.0),
+        "box" => ffi::make_box(&[1.0, -2.0, 3.0], &[10.0, 20.0, 30.0]),
+        "cylinder" => ffi::make_cylinder(&[1.0, 2.0, -3.0], 5.0, 12.0),
+        "sphere" => ffi::make_sphere(&[1.0, 2.0, 3.0], 7.0),
+        "cone" => ffi::make_cone(&[0.0, 1.0, 2.0], 6.0, 0.0, 9.0),
+        "frustum" => ffi::make_cone(&[0.0, 1.0, 2.0], 6.0, 2.0, 9.0),
+        "torus" => ffi::make_torus(&[1.0, -1.0, 0.5], 10.0, 3.0),
         _ => panic!("{name}"),
     }
+    .map(Brep::made)
     .unwrap();
     let flat = cpp.export().unwrap();
     let ours = to_arrays(&case(name).body).unwrap();
@@ -197,7 +200,8 @@ fn hostile_arrays_are_refused() {
 #[cfg(feature = "native")]
 #[test]
 fn a_cpp_box_comes_into_solidcore() {
-    let cpp = crate::Brep::make_box([1.0, -2.0, 3.0], [10.0, 20.0, 30.0]).unwrap();
+    crate::init().unwrap();
+    let cpp = crate::ffi::make_box(&[1.0, -2.0, 3.0], &[10.0, 20.0, 30.0]).map(crate::Brep::made).unwrap();
     let body = from_arrays(&cpp.cpp_arrays().unwrap()).unwrap();
     let v = volume(&body, 1e-8).unwrap();
     assert!(rel(v, 6000.0) < 1e-9, "{v}");
