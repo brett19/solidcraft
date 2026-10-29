@@ -41,7 +41,8 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("diagnostics.kernel", "Geometry Kernel", kernel).icon("bug_report").noundo().params(
         "choice?: routed | smlib | solidcore (sets which kernel answers: routed = each operation on the kernel the routing \
          table gives it, smlib = the C++ SMLib kernel for all, solidcore = its Rust port for all; bodies already computed \
-         keep their results). SOLIDCRAFT_KERNEL, when set, wins over it. Returns {choice, environment, routes: [{op, \
+         keep their results). SOLIDCRAFT_KERNEL, when set, wins over it, and SOLIDCRAFT_KERNEL_ROUTES (op=backend,...) \
+         moves single operations on top of both. Returns {choice, environment, overrides: {op: backend}, routes: [{op, \
          route, backend}]}: route is the table's kernel for the operation, backend the one it runs on now",
     ),
     CommandSpec::new("diagnostics.crash_test", "Crash Test", crash_test).icon("bug_report").noundo().enabled(crash_test_enabled).params(
@@ -58,11 +59,10 @@ fn kernel(_: &mut Session, p: &Value) -> Result<Value> {
         let c = v.as_str().and_then(route::Choice::from_id).ok_or_else(|| bad("diagnostics.kernel", "`choice` is routed, smlib or solidcore"))?;
         route::set_choice(c);
     }
-    let routes: Vec<Value> = route::Op::ALL
-        .iter()
-        .map(|op| json!({ "op": format!("{op:?}").to_lowercase(), "route": op.route().id(), "backend": op.backend().id() }))
-        .collect();
-    Ok(json!({ "choice": route::choice().id(), "environment": route::overridden(), "routes": routes }))
+    let routes: Vec<Value> =
+        route::Op::ALL.iter().map(|op| json!({ "op": op.id(), "route": op.route().id(), "backend": op.backend().id() })).collect();
+    let overrides: serde_json::Map<String, Value> = route::overrides().iter().map(|(op, b)| (op.id().to_string(), json!(b.id()))).collect();
+    Ok(json!({ "choice": route::choice().id(), "environment": route::overridden(), "overrides": overrides, "routes": routes }))
 }
 
 fn dir(cmd: &str) -> Result<std::path::PathBuf> {
