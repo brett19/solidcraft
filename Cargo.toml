@@ -35,7 +35,7 @@ solidcraft-3dx-client = { path = "crates/threedx-client" }
 # they reach parity (crates/smlib/src/route.rs). Pinned; move the rev on its own commit. For a
 # local checkout, add `[patch."https://github.com/tangency-labs/solidcore"] solidcore = { path =
 # "../solidcore/crates/solidcore" }` to a `.cargo/config.toml` outside the repository.
-solidcore = { git = "https://github.com/tangency-labs/solidcore", rev = "2a47645e9c289f35619bf97401857b5aafa67fc0" }
+solidcore = { git = "https://github.com/tangency-labs/solidcore", rev = "fa3caa94760625a65bfe6390531d62d5e8b770db" }
 
 # foundation
 thiserror = "2"
