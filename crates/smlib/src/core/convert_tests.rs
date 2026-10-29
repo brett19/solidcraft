@@ -159,11 +159,8 @@ macro_rules! primitive {
 
 primitive!(box_, "box");
 primitive!(cylinder, "cylinder");
-primitive!(sphere, "sphere",
-    volume: ignore = "solidcore#1435: a sphere's volume at 1e-8 is 2e-9 off",
-    round_trip: ignore = "solidcore#1435: the record comes back the same; its volume at 1e-8 is 2e-9 off");
-primitive!(cone, "cone",
-    round_trip: ignore = "solidcore#1435: the record comes back the same, but its volume at 1e-8 is 1.4e-9 off (the C++ kernel 1.1e-11 on the same arrays); the side face's precise properties do not split at the surface's knots, fork 08d9a14 (solidcore PR #1456)");
+primitive!(sphere, "sphere");
+primitive!(cone, "cone");
 primitive!(frustum, "frustum");
 primitive!(torus, "torus");
 

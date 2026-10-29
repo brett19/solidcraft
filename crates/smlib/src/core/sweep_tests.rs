@@ -390,7 +390,7 @@ cases!(
     revolve_rectangle_full,
     revolve_rectangle_quarter,
     sweep_circle_straight,
-    sweep_circle_along_an_arc: ignore = "solidcore#1435: a torus's volume at 1e-8 is 2.2e-9 off; precise properties do not split at the surface's knots, fork 08d9a14 (solidcore#1435)",
+    sweep_circle_along_an_arc,
     sweep_along_a_bent_path: ignore = "solidcore#1450: no curve sweep keeping the profile at the path's start, fork 2dd71a0 / 5d3939e",
     loft_two_squares,
     loft_two_circles,
@@ -398,7 +398,7 @@ cases!(
     sweep_stations_prism,
     sweep_stations_scaled,
     screw_sweep_square_thread,
-    screw_sweep_radial_taper [ignore = "solidcore#1435: B-spline walls' volume at 1e-8 is 3.6e-8 off the closed form (C++ 1.1e-8); precise properties do not split at the surface's knots, fork 08d9a14 (solidcore#1435)"],
+    screw_sweep_radial_taper,
 );
 
 fn near(a: [f64; 3], b: [f64; 3]) -> bool {

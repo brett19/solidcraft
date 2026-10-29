@@ -264,19 +264,11 @@ macro_rules! primitive {
 }
 
 primitive!(box_, "box");
-primitive!(cylinder, "cylinder", area: ignore = "solidcore#1435: face area at 1e-8 is 3.7e-8 off");
-primitive!(sphere, "sphere",
-    mass: ignore = "solidcore#1435: a sphere's properties at 1e-8 miss 1e-9",
-    area: ignore = "solidcore#1435: face area at 1e-8 is 1.2e-8 off");
-primitive!(cone, "cone",
-    mass: ignore = "solidcore#1435: cone inertia at 1e-8 is 1.7e-9 off",
-    area: ignore = "solidcore#1435: face area at 1e-8 is 4.2e-8 off");
-primitive!(frustum, "frustum",
-    mass: ignore = "solidcore#1435: frustum inertia at 1e-8 misses 1e-9",
-    area: ignore = "solidcore#1435: face area at 1e-8 is 3.5e-8 off");
-primitive!(torus, "torus",
-    mass: ignore = "solidcore#1435: torus inertia at 1e-8 is 1.7e-9 off",
-    area: ignore = "solidcore#1435: face area at 1e-8 is 6.0e-9 off");
+primitive!(cylinder, "cylinder");
+primitive!(sphere, "sphere");
+primitive!(cone, "cone");
+primitive!(frustum, "frustum");
+primitive!(torus, "torus");
 
 /// Until solidcore ports it (solidcore#1419), the check says so instead of guessing.
 #[test]
