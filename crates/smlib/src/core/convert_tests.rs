@@ -203,3 +203,34 @@ fn a_cpp_box_comes_into_solidcore() {
     assert!(rel(v, 6000.0) < 1e-9, "{v}");
     record(&to_arrays(&body).unwrap());
 }
+
+/// Each edge's and vertex's tolerance crosses the kernels as it is. One box edge given eight times
+/// the box's tolerance, in arrays whose TOLERANCE is the largest (as the C++ kernel writes them),
+/// keeps it round after round, and the B-rep and every other edge and vertex keep the box's. Every
+/// crossing used to give every entity the largest, so a chain of blends on a mixed route grew the
+/// whole body's tolerance fourfold per blend (fillets/2341).
+#[test]
+fn tolerances_cross_the_arrays_per_entity() {
+    use crate::flat::{EDGE_TOLERANCE, TOLERANCE, VERTEX_TOLERANCE};
+    let mut a = to_arrays(&case("box").body).unwrap();
+    let base = a.reals[&TOLERANCE][0];
+    assert!(a.reals[&EDGE_TOLERANCE].iter().chain(&a.reals[&VERTEX_TOLERANCE]).all(|&t| t == base), "{a:?}");
+    a.reals.get_mut(&EDGE_TOLERANCE).unwrap()[0] = 8.0 * base;
+    a.reals.get_mut(&TOLERANCE).unwrap()[0] = 8.0 * base;
+    for round in 0..3 {
+        let body = from_arrays(&a).unwrap();
+        assert_eq!(body.0.lock().unwrap().tolerance(), base / 2.0, "round {round}");
+        a = to_arrays(&body).unwrap();
+        assert_eq!(a.reals[&TOLERANCE], [base], "round {round}");
+        let edges = &a.reals[&EDGE_TOLERANCE];
+        assert_eq!(edges[0], 8.0 * base, "round {round}");
+        assert!(edges[1..].iter().chain(&a.reals[&VERTEX_TOLERANCE]).all(|&t| t == base), "round {round}: {a:?}");
+        // and through the C++ kernel, which keeps them too
+        #[cfg(feature = "native")]
+        {
+            let cpp = crate::flat::Flat::from_arrays(&a).unwrap().import().unwrap().cpp_arrays().unwrap();
+            assert_eq!((&cpp.reals[&EDGE_TOLERANCE], &cpp.reals[&VERTEX_TOLERANCE]), (edges, &a.reals[&VERTEX_TOLERANCE]), "round {round}");
+            a = cpp;
+        }
+    }
+}
