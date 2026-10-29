@@ -205,7 +205,6 @@ macro_rules! primitive {
                 bounds_match($name);
             }
             #[test]
-            #[ignore = "solidcore#1436: no SmApiBrepMaterialCensus"]
             fn is_one_solid() {
                 one_solid($name);
             }
@@ -241,7 +240,6 @@ macro_rules! primitive {
             }
             #[cfg(feature = "native")]
             #[test]
-            #[ignore = "solidcore#1436: no SmApiBrepMaterialCensus"]
             fn solid_count_matches_the_cpp_kernel() {
                 solid_count_parity($name);
             }
@@ -280,13 +278,12 @@ primitive!(torus, "torus",
     mass: ignore = "solidcore#1435: torus inertia at 1e-8 is 1.7e-9 off",
     area: ignore = "solidcore#1435: face area at 1e-8 is 6.0e-9 off");
 
-/// Until solidcore ports them, the census and the check say so instead of guessing.
+/// Until solidcore ports it (solidcore#1419), the check says so instead of guessing.
 #[test]
 fn unported_calls_say_not_supported_yet() {
     let (b, _) = case("box");
-    for e in [solid_count(&b).map(|_| ()).unwrap_err(), check(&b, CheckLevel::Basic).map(|_| ()).unwrap_err()] {
-        assert!(e.to_string().contains("not supported yet"), "{e}");
-    }
+    let e = check(&b, CheckLevel::Basic).unwrap_err();
+    assert!(e.to_string().contains("not supported yet"), "{e}");
 }
 
 #[test]
