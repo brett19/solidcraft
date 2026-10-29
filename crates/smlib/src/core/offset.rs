@@ -123,7 +123,7 @@ fn live<'a>(b: &'a mut Brep, identity: &'a BrepIdentity<'static>) -> solidcore::
 
 /// `pick_faces` (`face_distance`: `SmApiFaceClosestPoint`; a face whose distance cannot be
 /// measured is skipped).
-fn pick_faces(k: &mut Kernel, b: &mut Brep, points: &[[f64; 3]], tol: f64) -> solidcore::Result<std::result::Result<Vec<FaceId>, Miss>> {
+pub(super) fn pick_faces(k: &mut Kernel, b: &mut Brep, points: &[[f64; 3]], tol: f64) -> solidcore::Result<std::result::Result<Vec<FaceId>, Miss>> {
     let all = brep_p1::faces(b, None)?;
     let model_tol = b.tolerance();
     let mut shapes = Vec::with_capacity(all.len());
@@ -142,7 +142,7 @@ fn pick_faces(k: &mut Kernel, b: &mut Brep, points: &[[f64; 3]], tol: f64) -> so
 }
 
 /// A face pick's failure as `pick_error` (ops.rs) reads it.
-fn face_miss(m: Miss) -> Error {
+pub(super) fn face_miss(m: Miss) -> Error {
     match m {
         Miss::None(point) => Error::NoMatch { point },
         Miss::Ambiguous(point) => Error::Ambiguous { point },
