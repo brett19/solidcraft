@@ -45,6 +45,18 @@ pub static COMMANDS: &[CommandSpec] = &[
          moves single operations on top of both. Returns {choice, environment, overrides: {op: backend}, routes: [{op, \
          route, backend}]}: route is the table's kernel for the operation, backend the one it runs on now",
     ),
+    CommandSpec::new("diagnostics.validation", "Validation", crate::checked!("diagnostics.validation", validation))
+        .icon("bug_report")
+        .noundo()
+        .contract(&VALIDATION_CONTRACT)
+        .output(crate::schema::output_schema_for::<crate::schema::diagnostics::ValidationReply>)
+        .params(
+            "mode?: each_step | each_feature | off (default: leave it). When the kernel's full check runs on the features computed \
+             from now on: after every sweep, boolean and blend (each_step), once on the bodies each feature makes or changes \
+             (each_feature, the default; a body it refuses still fails its feature, with the check's reason), or never (off, \
+             experimental). Results already there stand until their features are computed again (timeline.compute_all). \
+             The app's preference of the same name sets it. Returns {mode, previous}",
+        ),
     CommandSpec::new("diagnostics.crash_test", "Crash Test", crash_test).icon("bug_report").noundo().enabled(crash_test_enabled).params(
         "mode: panic | kernel | abort. Checks that crash reports work: panic = an internal error in this command (caught; \
          the design is unchanged), kernel = one inside the geometry kernel (caught), abort = the app ends at once (reported \
@@ -111,6 +123,26 @@ fn crash_test(_: &mut Session, p: &Value) -> Result<Value> {
 }
 
 const PROFILE_CONTRACT: crate::schema::TypedContract<crate::schema::diagnostics::ProfileParams> = crate::schema::TypedContract::new();
+
+const VALIDATION_CONTRACT: crate::schema::TypedContract<crate::schema::diagnostics::ValidationParams> = crate::schema::TypedContract::new();
+
+fn validation(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "diagnostics.validation";
+    let mode = match p.get("mode") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(
+            v.as_str()
+                .and_then(solidcraft_kernel::Validation::parse)
+                .ok_or_else(|| bad(cmd, format!("`mode` {}", crate::schema::diagnostics::VALIDATION_MODES)))?,
+        ),
+    };
+    let previous = s.validation();
+    if let Some(mode) = mode {
+        s.set_validation(mode);
+    }
+    let out = crate::schema::diagnostics::ValidationReply { mode: s.validation().into(), previous: previous.into() };
+    serde_json::to_value(out).map_err(|e| EngineError::Other(format!("{cmd}: {e}")))
+}
 
 /// Rows `diagnostics.profile` returns at most.
 const MAX_PROFILE_ROWS: u64 = 10_000;

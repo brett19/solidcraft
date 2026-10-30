@@ -2635,6 +2635,13 @@ mod naming {
         s.model.result(id).and_then(|r| r.warning.clone())
     }
 
+    /// The reference feature `name` failed on, asking for it to be picked again.
+    fn reselect(s: &Session, name: &str) -> Option<String> {
+        let id = s.doc.find_feature(name).map(|f| f.id)?;
+        let error = s.model.result(id).and_then(|r| r.error.clone())?;
+        solidcraft_doc::reselect_parts(&error).filter(|(feature, _)| *feature == name).map(|(_, reference)| reference.to_string())
+    }
+
     /// A 40 x 30 x 10 block (sketch S: l1…l4 counter-clockwise from the origin), a hole H, a
     /// fillet on the right top edge.
     fn block() -> Session {
@@ -2692,8 +2699,10 @@ mod naming {
         assert_eq!(warning(&s, "Round"), None);
     }
 
+    /// The notch leaves the filleted edge in two pieces: neither is the edge, so the fillet fails,
+    /// asking for its edge again, and never rounds the piece nearest the pick.
     #[test]
-    fn a_split_edge_warns_and_takes_the_nearest_piece() {
+    fn a_split_edge_fails_the_fillet_asking_for_the_edge_again() {
         let mut s = block();
         // Upstream of the fillet, a notch through the middle of the filleted edge.
         run(&mut s, "timeline.roll_to", json!({"feature": "Hole"}));
@@ -2702,12 +2711,13 @@ mod naming {
         run(&mut s, "sketch.finish", json!({}));
         run(&mut s, "solid.extrude", json!({"sketch": "N", "distance": 10, "operation": "cut", "name": "Notch"}));
         run(&mut s, "timeline.roll_to", json!({}));
-        let w = warning(&s, "Round").unwrap_or_default();
-        assert!(w.contains("split"), "{w}");
+        assert_eq!(reselect(&s, "Round").as_deref(), Some("F2:side:l2|F2:top"));
     }
 
+    /// The face the filleted edge bounded is gone with its sketch line: the fillet fails, asking
+    /// for its edge again.
     #[test]
-    fn a_removed_segment_warns() {
+    fn a_removed_segment_fails_the_fillet_asking_for_the_edge_again() {
         let mut s = block();
         // Replace the right side (l2) of the rectangle with a new line: the face it made is gone.
         let sk = s.doc.find_feature("S").map(|f| f.id).unwrap();
@@ -2716,8 +2726,7 @@ mod naming {
         run(&mut s, "sketch.line", json!({"points": [[40, 0], [40, 30]], "ids": ["right"]}));
         let r: Result<Value, _> = s.execute("sketch.finish", &json!({}));
         assert!(r.is_ok() || r.is_err());
-        let w = warning(&s, "Round").unwrap_or_default();
-        assert!(w.contains("no longer exists"), "{w}");
+        assert_eq!(reselect(&s, "Round").as_deref(), Some("F2:side:l2|F2:top"));
     }
 
     fn face_names(s: &mut Session, body: &str) -> Vec<String> {
@@ -2776,7 +2785,9 @@ mod naming {
         model.evaluate(&reopened);
         assert_eq!(model.state().sketch(reopened.find_feature("Top").unwrap().id).unwrap().plane.origin.z, 10.);
         assert!((model.state().bodies[0].mesh().bounds().max.z - 15.).abs() < 1e-6);
-        // A historical format-10 attachment uses its saved generic face name and no strong anchor.
+        // A format-10 attachment has only the face name that build worked out from geometry, and
+        // no strong anchor: that name finds no face today. The sketch fails, asking for its face
+        // again, and so does the peg on it; the block builds.
         let mut old = (*s.doc).clone();
         let solidcraft_doc::FeatureKind::Sketch { plane: solidcraft_doc::PlaneRef::Face { anchor, name, .. }, sketch } =
             &mut old.features.iter_mut().find(|f| f.name == "Top").unwrap().kind
@@ -2784,6 +2795,7 @@ mod naming {
             panic!("fixture must contain a face sketch");
         };
         *anchor = None;
+        let saved = name.clone().unwrap();
         for link in &mut sketch.links {
             if link.auto_face {
                 link.auto_face = false;
@@ -2791,30 +2803,20 @@ mod naming {
             }
         }
         old.format = "solidcraft/10".into();
-        let mut legacy = Session::new(solidcraft_doc::Document::from_json(&old.to_json()).unwrap());
-        assert_eq!(attached(&legacy), Some(10.));
-        assert!((top(&mut legacy) - 15.).abs() < 1e-6);
+        let legacy = Session::new(solidcraft_doc::Document::from_json(&old.to_json()).unwrap());
+        let error = |s: &Session, name: &str| s.model.results.iter().find(|r| r.id == s.doc.find_feature(name).unwrap().id).unwrap().error.clone();
+        let reference = format!("{}{saved}", solidcraft_doc::naming::LEGACY_MARK);
+        assert_eq!(error(&legacy, "Top").as_deref().and_then(solidcraft_doc::reselect_parts), Some(("Top", reference.as_str())));
+        assert!(error(&legacy, "Peg").is_some());
+        assert!(error(&legacy, "Block").is_none());
         // An upstream join that trims the certified face: the attachment stays on what is left
         // of it and never follows the substitute roof (see face_tests for a face covered whole).
-        for target in [&mut s, &mut legacy] {
-            run(target, "timeline.roll_to", json!({"feature": "Block"}));
-            run(target, "sketch.create", json!({"plane": "XY", "name": "B"}));
-            run(target, "sketch.rectangle.two_point", json!({"p0": [8, -5], "p1": [45, 35]}));
-            run(target, "sketch.finish", json!({}));
-            run(target, "solid.extrude", json!({"sketch": "B", "distance": 20, "operation": "join", "name": "Boss"}));
-            run(target, "timeline.roll_to", json!({}));
-        }
-        assert_eq!(attached(&legacy), Some(10.), "historical weak naming retains its saved geometry behavior");
-        assert!((top(&mut legacy) - 20.).abs() < 1e-6);
-        let legacy_reopened = Session::new(solidcraft_doc::Document::from_json(&legacy.doc.to_json()).unwrap());
-        assert_eq!(attached(&legacy_reopened), Some(10.));
-        assert!((legacy_reopened.model.state().bodies[0].mesh().bounds().max.z - 20.).abs() < 1e-6);
-        let solidcraft_doc::FeatureKind::Sketch { plane: solidcraft_doc::PlaneRef::Face { anchor, .. }, .. } =
-            &legacy_reopened.doc.find_feature("Top").unwrap().kind
-        else {
-            panic!("saved historical face reference must remain present");
-        };
-        assert!(anchor.is_none(), "opening old face references must not infer a strict attachment");
+        run(&mut s, "timeline.roll_to", json!({"feature": "Block"}));
+        run(&mut s, "sketch.create", json!({"plane": "XY", "name": "B"}));
+        run(&mut s, "sketch.rectangle.two_point", json!({"p0": [8, -5], "p1": [45, 35]}));
+        run(&mut s, "sketch.finish", json!({}));
+        run(&mut s, "solid.extrude", json!({"sketch": "B", "distance": 20, "operation": "join", "name": "Boss"}));
+        run(&mut s, "timeline.roll_to", json!({}));
         let failed = |s: &Session, name: &str| s.model.results.iter().find(|r| r.id == s.doc.find_feature(name).unwrap().id).unwrap().error.is_some();
         assert!(!failed(&s, "Top"));
         assert!(!failed(&s, "Peg"));
@@ -4088,10 +4090,11 @@ fn extrude_reply_lists_the_bodies_it_created() {
     assert_eq!(r["created_bodies"], json!(["Ribs", "Ribs (2)", "Ribs (3)"]), "{r}");
 }
 
-/// A design saved before format 14 names the bodies past its stored names `BodyN`, as it did when
-/// it was saved, so later features that name them still find them (#373).
+/// A design saved before format 14 with fewer stored body names than bodies (#373) opens and
+/// evaluates: the first body takes its stored name, and every body has a name of its own. (The
+/// names the others had when it was saved are not promised.)
 #[test]
-fn a_design_saved_before_format_14_keeps_generic_names_past_body_name() {
+fn a_design_saved_before_format_14_with_fewer_body_names_opens_and_names_every_body() {
     let mut s = Session::default();
     run(&mut s, "sketch.create", json!({"plane": "XY", "name": "R"}));
     for x in [0, 10, 20] {
@@ -4109,8 +4112,10 @@ fn a_design_saved_before_format_14_keeps_generic_names_past_body_name() {
     std::fs::write(&design, legacy.to_string()).unwrap();
     let mut old = Session::default();
     run(&mut old, "doc.open", json!({"path": design.to_string_lossy()}));
+    assert!(old.model.results.iter().all(|r| r.error.is_none()), "{:?}", old.model.results);
     let names: Vec<String> = old.model.state().bodies.iter().map(|b| b.name.clone()).collect();
-    assert_eq!(names, ["Ribs", "Body1", "Body2"]);
+    assert_eq!((names.len(), names.first().map(String::as_str)), (3, Some("Ribs")), "{names:?}");
+    assert_eq!(names.iter().collect::<std::collections::BTreeSet<_>>().len(), 3, "{names:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -4449,12 +4454,12 @@ fn a_side_drawn_in_two_collinear_pieces_extrudes_into_one_face() {
     assert_eq!(run(&mut s, "inspect.measure", json!({}))["bodies"][0]["kernel"]["faces"], 6);
     let names: Vec<&str> = f.iter().filter_map(|x| x["name"].as_str()).collect();
     assert!(names.contains(&format!("F2:side:{}", pieces[0]).as_str()), "{names:?}");
-    // The second piece's name answers for the same face, so a reference made when the side was
-    // two faces (an edge of the second piece) still finds its edge.
+    // The extrude made the side from both pieces: the second piece's role names that very face
+    // too, so an edge named after it is that edge.
     let st = s.model.state();
     let body = st.body("Body1").unwrap();
     let edge = format!("F2:side:{}|F2:top", pieces[1]);
-    let (at, _) = solidcraft_doc::naming::find_edge(body, &edge, geom::Vec3::new(15.0, 0.0, 5.0)).unwrap();
+    let at = solidcraft_doc::naming::find_edge(body, &edge, geom::Vec3::new(15.0, 0.0, 5.0)).unwrap();
     assert!(at.y.abs() < 1e-9 && (at.z - 5.0).abs() < 1e-9, "{edge} at {at:?}");
     // A sketch attaches to the joined side as to any side.
     assert_eq!(run(&mut s, "sketch.create", json!({"plane": {"face": [15, 0, 2.5]}}))["attachment"], "exact_face");

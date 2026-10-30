@@ -47,7 +47,7 @@ commands:
                   replay the reference tests (tests/oracle/*/recipe.json), compare with each
                   case's expected.json and write docs/oracle.md (--cli: a solidcraft-cli
                   already built, instead of cargo run --release)
-  kernel-cases [--area AREA] [--cli BIN] [--timeout S] [--jobs N] [--out DIR] [--kernel K] [--route R] [--known-failing FILE] [--coverage]
+  kernel-cases [--area AREA] [--cli BIN] [--timeout S] [--jobs N] [--out DIR] [--kernel K] [--route R] [--known-failing FILE] [--validation MODE] [--coverage]
                   the kernel regression rig: run every case in tests/kernel-cases/<area>/<id>/ on
                   SMLib (one process each, killed after --timeout, default 180 s), grade it against
                   the case's own answer and write docs/kernel-cases.md; DIR (default
@@ -66,6 +66,9 @@ commands:
                   (tests/kernel-cases/<area>/KNOWN_FAILING, CI's Kernel rig workflow); it grades
                   the SMLib side, so it needs --kernel smlib or both (with both, every side's
                   results.json is saved, and no report or side by side is written)
+                  --validation MODE: when SMLib's full check runs on the cases' features:
+                  each_step, each_feature (the default) or off (solidcraft-cli kernel-cases
+                  --validation=MODE); with --ladder too
                   --ladder [--record REASON | --gate]: the complexity ladder instead
                   (tests/kernel-cases/ladder/ladder.json, tiers in order), graded and compared
                   with its timing golden (one case at a time unless --jobs), into

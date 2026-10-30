@@ -37,9 +37,8 @@ fn bad(what: &str) -> DocError {
     DocError::Invalid(what.into())
 }
 
-/// A design whose stored face or edge names were saved before format 14 (marked
-/// [`crate::naming::LEGACY_MARK`]) finds them through names worked out from geometry on demand,
-/// which a saved model does not keep.
+/// A design holding a face or edge name saved before format 14 (marked
+/// [`crate::naming::LEGACY_MARK`]): it saves without a model.
 fn has_legacy_names(doc: &Document) -> bool {
     let mark = format!("\"{}", crate::naming::LEGACY_MARK);
     doc.features.iter().any(|f| match &f.kind {
@@ -122,7 +121,7 @@ impl Writer {
             return *i;
         }
         let names = crate::naming::names(b);
-        let info: Vec<Json> = names.info.iter().map(|i| json!([i.aliases, i.bounds, i.verified])).collect();
+        let info: Vec<Json> = names.info.iter().map(|i| json!([i.aliases, i.bounds, i.verified, i.synonyms])).collect();
         self.names.push(json!({"faces": *names.faces, "info": info}));
         self.names_index.insert(id, self.names.len() - 1);
         self.names.len() - 1
@@ -233,9 +232,10 @@ impl Model {
                 }
                 features.push(f);
             }
+            // The check mode the results were evaluated under: they are another mode's results.
             let records = json!({
                 "features": features, "states": w.states, "model_bodies": w.model_bodies, "names": w.names, "sketches": w.sketches,
-                "sheets": w.sheets,
+                "sheets": w.sheets, "validation": self.validation().id(),
             });
             Ok(SavedModel { records, bodies: w.bodies })
         })
@@ -257,12 +257,12 @@ impl SavedModel {
         let mut names = Vec::new();
         for n in list("names")? {
             let faces: Vec<String> = serde_json::from_value(parse(n.get("faces"))?).map_err(|_| bad("saved model: names"))?;
-            let info: Vec<(Vec<String>, std::collections::BTreeSet<String>, bool)> =
+            let info: Vec<(Vec<String>, std::collections::BTreeSet<String>, bool, Vec<String>)> =
                 serde_json::from_value(parse(n.get("info"))?).map_err(|_| bad("saved model: names"))?;
             if info.len() != faces.len() {
                 return Err(bad("saved model: names"));
             }
-            let info = info.into_iter().map(|(aliases, bounds, verified)| FaceInfo { aliases, bounds, verified }).collect();
+            let info = info.into_iter().map(|(aliases, bounds, verified, synonyms)| FaceInfo { aliases, synonyms, bounds, verified }).collect();
             names.push(Arc::new(Names { faces: Arc::new(faces), info }));
         }
         let mut sketches = Vec::new();
@@ -541,6 +541,7 @@ impl SavedModel {
         let records = json!({
             "features": out_features, "states": out_states, "model_bodies": out_bodies, "names": kept_of(names.as_slice(), &names_used),
             "sketches": kept_of(sketches.as_slice(), &sketches_used), "sheets": sheets,
+            "validation": self.records.get("validation").cloned().unwrap_or(Json::Null),
         });
         let kept: Vec<usize> = (0..self.bodies.len()).filter(|i| kernel_used.get(*i) == Some(&true)).collect();
         let bodies = kept.iter().filter_map(|i| self.bodies.get(*i).cloned()).collect();
@@ -551,8 +552,9 @@ impl SavedModel {
 impl Model {
     /// The model a design file kept for `doc` ([`Model::saved`]), taken as `doc`'s evaluation:
     /// every feature's result as saved, nothing evaluated but the features whose state the file
-    /// did not keep ([`SavedModel::thinned`]). Refused (an error) unless every feature's
-    /// fingerprint is the one `doc` gives it now, and every record is well formed.
+    /// did not keep ([`SavedModel::thinned`]), under the check mode it was evaluated in
+    /// ([`Model::validation`]). Refused (an error) unless every feature's fingerprint is the one
+    /// `doc` gives it now, and every record is well formed.
     pub fn adopt(doc: &Document, saved: &SavedModel) -> Result<Model> {
         let mut states = saved.states()?;
         let frame_bodies = Arc::new(std::sync::Mutex::new(FrameBodies::default()));
@@ -566,13 +568,16 @@ impl Model {
         let text =
             |v: Option<&Json>| v.and_then(Json::as_str).filter(|s| s.len() <= 1 << 16).map(str::to_owned).ok_or_else(|| bad("saved model: text"));
         let features = records.get("features").and_then(Json::as_array).ok_or_else(|| bad("saved model: features"))?;
+        let validation =
+            records.get("validation").and_then(Json::as_str).and_then(kernel::Validation::parse).ok_or_else(|| bad("saved model: validation"))?;
         if features.len() != doc.features.len() {
             return Err(bad("saved model: features"));
         }
         let (vals, param_errors) = evaluation_values(doc);
         let step_digests = StepDigests::of(doc, &StepDigests::default());
         let marker = doc.marker.unwrap_or(usize::MAX);
-        let ctx = context_digest(doc, &vals);
+        // As `evaluate` digests the context under the mode, so the next evaluation reuses these.
+        let ctx = context_digest(doc, &vals) ^ validation_digest(validation);
         let mut before = Arc::new(ModelState::default());
         // Whether `before` is the state before the feature: one the file left out only stands in.
         let mut exact = true;
@@ -614,7 +619,7 @@ impl Model {
             }
             results.push(result);
         }
-        let mut model = Model { results, param_errors, step_digests, context: ctx, frame_bodies, ..Model::default() };
+        let mut model = Model { results, param_errors, step_digests, context: ctx, frame_bodies, validation, ..Model::default() };
         let unkept = model.results.iter().filter(|r| r.unkept).count();
         if unkept > 0 {
             // The features whose state the file did not keep, each evaluated again from the state
