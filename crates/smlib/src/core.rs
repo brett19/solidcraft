@@ -186,14 +186,20 @@ pub(crate) fn fixes() -> UpstreamFixes {
     f.fillet_knife_edge_rounds = true;
     f.taper_wall_closes_at_apex = true;
     f.revolution_round_offset_collapses = true;
+    f.fillet_chamfer_cone_stored_as_cone = true;
+    f.offset_point_vertex_caps = true;
+    f.approximate_surface_bezier_starter = true;
+    f.proto_edge_splits_at_captured_vertices = true;
+    f.stitch_solid_nests_cavities = true;
     f
 }
 
 /// Opt-in fixes left off because the C++ fork (`SMLIB_REV`) does not carry them yet, so turning
 /// them on would part this backend from the C++ one. `precise_properties_trim_base_v`
-/// (solidcore#1664, WR-563) has no fork commit.
+/// (solidcore#1664, WR-563) and `bspline_trim_keeps_rational_end_spans` (solidcore#1711, WR-575)
+/// have no fork commit.
 #[cfg(test)]
-const HELD_BACK: &[&str] = &["precise_properties_trim_base_v"];
+const HELD_BACK: &[&str] = &["precise_properties_trim_base_v", "bspline_trim_keeps_rational_end_spans"];
 
 fn fresh() -> Kernel {
     let mut k = Kernel::new(&KernelOptions::default());
