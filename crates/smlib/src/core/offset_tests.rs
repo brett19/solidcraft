@@ -97,6 +97,8 @@ enum Expect {
     Volume(f64),
     /// A solid of this volume whose bounds along z are these.
     Slab(f64, f64, f64),
+    /// A solid of this volume (relative 1e-9) whose bounds are these.
+    Solid(f64, [f64; 3], [f64; 3]),
     /// A sheet of this area (relative 1e-9) whose bounds are these.
     Sheet(f64, [f64; 3], [f64; 3]),
     /// This error.
@@ -154,7 +156,10 @@ fn case(name: &str) -> Case {
         // The quarter cylinder moved 2 along its normal (outward: the arc's tangent swept along
         // z): radius 7, area (π/2) 7 · 10.
         "offset_sheet_quarter_cylinder" => c(Op::OffsetSheet(QUARTER, 2.0), Expect::Sheet(PI / 2.0 * 7.0 * 10.0, [0.0, 0.0, 0.0], [7.0, 7.0, 10.0])),
-        "offset_sheet_a_solid" => c(Op::OffsetSheet(BLOCK, 1.0), Expect::Fails(Error::Argument)),
+        // A closed sheet offsets as an open one (tangency-labs/smlib fix #17, develop 9d0fb564):
+        // each face moved out 1 along its normal, the convex edges extended, gives the block
+        // (a + 2d)(b + 2d)(c + 2d) of six planes, from -d to (a, b, c) + d.
+        "offset_sheet_a_solid" => c(Op::OffsetSheet(BLOCK, 1.0), Expect::Solid(32.0 * 22.0 * 12.0, [-1.0, -1.0, -1.0], [31.0, 21.0, 11.0])),
         // The top moved out 2: abc + d·ab.
         "offset_faces_top_out" => c(Op::OffsetFaces(BLOCK, vec![TOP], 2.0), Expect::Volume(ABC + 2.0 * 600.0)),
         // The top moved in 10, as deep as the block: nothing left behind it.
@@ -188,11 +193,17 @@ fn case(name: &str) -> Case {
             let s = (5.0f64).to_radians().tan();
             c(Op::Draft(BLOCK, vec![FRONT], [0.0, 0.0, 10.0], Z, Z, 5f64.to_radians()), Expect::Volume(ABC + 30.0 * 100.0 * s / 2.0))
         }
-        // A cylinder's side is not flat.
-        "draft_a_curved_face" => c(
-            Op::Draft(Shape::Cylinder([0.0; 3], 5.0, 10.0), vec![[5.0, 0.0, 5.0]], [0.0; 3], [0.0, 0.0, 1.0], [0.0, 0.0, 1.0], 0.1),
-            Expect::Fails(Error::Unsupported),
-        ),
+        // A cylinder along the pull drafts to a cone (tangency-labs/smlib fix #27, develop
+        // 9d0fb564): R = 5, h = 10, θ = 0.1 about the bottom, leaning in: a frustum of radii R
+        // and r = R - h tanθ (a cone and its two caps): V = π h (R² + R r + r²) / 3.
+        "draft_a_curved_face" => {
+            let (big, h) = (5.0, 10.0);
+            let small = big - h * 0.1f64.tan();
+            c(
+                Op::Draft(Shape::Cylinder([0.0; 3], big, h), vec![[5.0, 0.0, 5.0]], [0.0; 3], [0.0, 0.0, 1.0], [0.0, 0.0, 1.0], 0.1),
+                Expect::Volume(PI * h * (big * big + big * small + small * small) / 3.0),
+            )
+        }
         // The top is square to the pull, not along it.
         "draft_a_face_across_the_pull" => {
             c(Op::Draft(BLOCK, vec![TOP], [0.0; 3], [0.0, 0.0, 1.0], [0.0, 0.0, 1.0], 0.1), Expect::Fails(Error::Unsupported))
@@ -276,6 +287,10 @@ fn judge(name: &str, who: &str, expect: &Expect, got: Got) -> Got {
             assert!(rel(m.size, *v) < 1e-9, "{name}: {who} volume {} vs analytic {v}", m.size);
             let (a, b) = (m.bounds.0[2], m.bounds.1[2]);
             assert!((a - lo).abs() < 1e-6 && (b - hi).abs() < 1e-6, "{name}: {who} z from {a} to {b}, expected {lo} to {hi}");
+        }
+        (Expect::Solid(v, lo, hi), Ok(m)) => {
+            assert!(rel(m.size, *v) < 1e-9, "{name}: {who} volume {} vs analytic {v}", m.size);
+            assert!(near(m.bounds.0, *lo) && near(m.bounds.1, *hi), "{name}: {who} bounds {:?}, expected {lo:?} {hi:?}", m.bounds);
         }
         (Expect::Sheet(s, lo, hi), Ok(m)) => {
             assert!(rel(m.size, *s) < 1e-9, "{name}: {who} area {} vs analytic {s}", m.size);
@@ -410,14 +425,14 @@ cases!(
     thicken_a_solid,
     offset_sheet_plate,
     offset_sheet_quarter_cylinder: ignore = "solidcore#1441: an offset surface does not export, no SmSurface::ApproximateSurface (solidcore#1441)",
-    offset_sheet_a_solid,
+    offset_sheet_a_solid: ignore = "the port lags tangency-labs/smlib#17: core/offset.rs still refuses a closed solid (solidcore offsets it exactly once it does not)",
     offset_faces_top_out: ignore = "no SmOffsetFacesExecutive, fork a96ce9f (solidcore#1060)",
     offset_faces_through,
     draft_box_sides,
     draft_one_side,
     draft_one_side_out,
     draft_one_side_hinged_at_the_top,
-    draft_a_curved_face,
+    draft_a_curved_face: ignore = "the port lags tangency-labs/smlib#27: core/offset.rs drafts planes only (solidcore has Cone::lean_cylinder, solidcore#1545)",
     draft_a_face_across_the_pull,
 );
 
