@@ -371,10 +371,13 @@ impl Brep {
     /// The edges nearest to `keep` (each within `tolerance`) stay. The shape is unchanged, and
     /// SMLib's history tags follow the merge.
     pub fn merge_faces(&self, keep: &[[f64; 3]], tolerance: f64) -> Result<Brep> {
-        init()?;
         if keep.len() > MAX_POINTS {
             return Err(Error::Argument);
         }
+        if route::Op::Split.backend() == route::Backend::Solidcore {
+            return core::merge::merge_faces(self.core()?, keep, tolerance).map(Brep::made_core);
+        }
+        init()?;
         ffi::ops::merge_faces(self.cpp()?, keep, tolerance).map(Brep::made).map_err(pick_error)
     }
 

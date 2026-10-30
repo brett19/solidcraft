@@ -29,6 +29,9 @@ pub(crate) mod history;
 mod measure;
 #[cfg(test)]
 mod measure_tests;
+pub(crate) mod merge;
+#[cfg(test)]
+mod merge_tests;
 pub(crate) mod offset;
 #[cfg(test)]
 mod offset_tests;
