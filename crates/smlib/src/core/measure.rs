@@ -5,7 +5,6 @@
 //!
 //! [`check`] fails with "not supported yet" while a test it reaches is unported in solidcore.
 
-use solidcore::error::EntityRef;
 use solidcore::geom::assert_array::{AssertArray, AssertReport, obj_type_string};
 use solidcore::geom::attribute::{AttributeStore, ObjectKey};
 use solidcore::geom::tol::{SmallTopoType, context_xsect_tol_3d};
@@ -15,7 +14,7 @@ use solidcore::nurbs::b_spline_surface_n_lib::p2::OrientType;
 use solidcore::query::api_queries::{brep_bounding_box, brep_is_manifold_solid, brep_material_census, face_bounding_box};
 use solidcore::topology::NamingScheme;
 use solidcore::topology::brep::p1 as bl;
-use solidcore::topology::brep::validation::{CheckLevel as SolidcoreCheckLevel, check_brep, check_brep_with_keys};
+use solidcore::topology::brep::validation::{CheckLevel as SolidcoreCheckLevel, check_brep};
 use solidcore::topology::face::p2::{PPF_AREA, PPF_AREA_FIRST_MOMENTS};
 use solidcore::{Kernel, Point3, SolidError, Vec3};
 
@@ -214,43 +213,13 @@ fn collect(list: &AssertArray, out: &mut String, failures: &mut usize) {
     }
 }
 
-/// Whose identities name `b`'s geometry owners, as the check must be told them.
-enum Keys {
-    /// The B-rep's own naming scheme ([`NamingScheme::Notify`] or [`NamingScheme::Arena`]):
-    /// [`check_brep`] knows it.
-    Scheme,
-    /// A body SolidCraft made from arrays: [`NamingScheme::Caller`] under
-    /// [`super::convert::key_of`].
-    Convert,
-}
-
-/// The identities `b`'s geometry owners are named by, or `None` when the check cannot know them.
-/// A body under [`NamingScheme::Caller`] or [`NamingScheme::Unknown`] is named by its maker's
-/// own keys, and `check_brep` falls back to the arena identities, which no maker uses: every
-/// edge would fail `SmBrep` test 61 on the owner of its curve. The bodies SolidCraft imports
-/// from arrays are the one such kind whose keys are known here: every edge curve is owned by
-/// [`super::convert::key_of`] of its edge.
-fn keys(b: &solidcore::Brep) -> solidcore::Result<Option<Keys>> {
-    Ok(match b.naming() {
-        NamingScheme::Notify | NamingScheme::Arena => Some(Keys::Scheme),
-        NamingScheme::Caller => {
-            let mut convert = true;
-            for &e in b.edge_list().iter() {
-                if let Some(c) = b.edge(e)?.curve.as_ref() {
-                    convert &= c.owner() == Some(super::convert::key_of(EntityRef::Edge(e)));
-                }
-            }
-            convert.then_some(Keys::Convert)
-        }
-        NamingScheme::Unknown => None,
-    })
-}
-
 /// Why [`check`] could not run.
 enum Refusal {
     /// A test solidcore has not ported (its [`SolidError::Unported`]).
     Unported(&'static str, &'static str),
-    /// A body whose geometry owners' identities the check cannot know ([`keys`]).
+    /// A body whose geometry owners' identities the check cannot know: a
+    /// [`NamingScheme::Unknown`] body, or a [`NamingScheme::Caller`] one whose maker did not
+    /// record its keys (`check_brep`'s [`SolidError::InvalidInput`]).
     Naming(NamingScheme),
 }
 
@@ -259,9 +228,15 @@ enum Refusal {
 /// failed test as one line of the report and the capi's own lines for a failed status without a
 /// report. solidcore's [`check_brep`] runs the same two calls.
 ///
+/// The geometry owners are named as the body's naming scheme names them: `check_brep` reads a
+/// [`NamingScheme::Caller`] body's keys from where its maker recorded them (solidcore#1585: an
+/// array import through `make_topology_from_data`, `api_brep_copy`). A [`NamingScheme::Unknown`]
+/// body, or a Caller one without recorded keys, would be checked under the arena identities, which
+/// no maker uses: every edge would fail `SmBrep` test 61 on the owner of its curve.
+///
 /// A test solidcore has not ported yet (its [`SolidError::Unported`]), or a body whose geometry
-/// owners' identities the check cannot know ([`keys`]), fails the check with "not supported yet":
-/// the check never reports a body valid on fewer tests than the C++ kernel runs.
+/// owners' identities the check cannot know, fails the check with "not supported yet": the check
+/// never reports a body valid on fewer tests than the C++ kernel runs.
 pub(crate) fn check(body: &Body, level: CheckLevel) -> Result<CheckReport> {
     let lv = match level {
         CheckLevel::Basic => SolidcoreCheckLevel::Level0,
@@ -269,13 +244,13 @@ pub(crate) fn check(body: &Body, level: CheckLevel) -> Result<CheckReport> {
         CheckLevel::All => SolidcoreCheckLevel::Level2,
     };
     let c = match with_body("check", body, |k, b| {
-        let r = match keys(b)? {
-            Some(Keys::Scheme) => check_brep(k, b, lv),
-            Some(Keys::Convert) => check_brep_with_keys(k, b, lv, &super::convert::key_of),
-            None => return Ok(Err(Refusal::Naming(b.naming()))),
-        };
-        match r {
+        let naming = b.naming();
+        if naming == NamingScheme::Unknown {
+            return Ok(Err(Refusal::Naming(naming)));
+        }
+        match check_brep(k, b, lv) {
             Err(SolidError::Unported { upstream, unit }) => Ok(Err(Refusal::Unported(upstream, unit))),
+            Err(SolidError::InvalidInput { operation: "topology::brep::validation::check_brep", .. }) => Ok(Err(Refusal::Naming(naming))),
             r => r.map(Ok),
         }
     })? {
