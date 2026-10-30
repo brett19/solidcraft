@@ -1478,8 +1478,12 @@ pub(crate) fn project_curves(
         };
         let mut out = Vec::new();
         for c in &given {
-            let Some(root) = bspline(c)? else { return Ok(Err(Error::Argument)) };
-            let made = match create_parallel_projection_curves(k, b, &root, dir, &opts) {
+            // curve->GetRootCurve(): a line, an arc and a B-spline are their own root, and
+            // go in as themselves
+            if !matches!(c.kind(), CurveKind::BSpline(_) | CurveKind::Line(_) | CurveKind::Ellipse(_)) {
+                return Ok(Err(Error::Argument));
+            }
+            let made = match create_parallel_projection_curves(k, b, c, dir, &opts) {
                 Ok(m) => m.curves_3d.unwrap_or_default(),
                 Err(e) => return Ok(Err(status(e))),
             };
