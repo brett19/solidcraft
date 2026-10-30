@@ -6,14 +6,17 @@
 //!
 //! As there, every operation works on a copy of its body (`SmApiBrepCopy`) and picks faces by
 //! point; the shell and the offsets are `SmApiShellBrepFull` and `SmApiOffsetBrepFull`, with
-//! convex edges extended and the results merged.
+//! convex edges extended and the results merged. A sheet offset takes faces that close into a
+//! solid as the capi does since tangency-labs/smlib#17.
 //!
 //! What the capi asks of SMLib code that solidcore does not have is [`Error::Unsupported`],
 //! refused where the capi would first reach it, so every error before it is the C++ path's: a
 //! face move (`SmOffsetFacesExecutive`, fork a96ce9f, solidcore#1060).
 //!
-//! A draft's tilted faces go in through solidcore's `SmBrep::LocalOperation`
-//! ([`local_operation`]); the capi's check that it moved some face (`moved_faces`) needs face
+//! A draft tilts planes and, since tangency-labs/smlib#27, turns a cylinder about the pull into
+//! a cone (solidcore's `Cone::lean_cylinder`, solidcore#1545); a cone that is not a cylinder
+//! (smlib#53) is [`Error::Unsupported`]. A draft's tilted faces go in through solidcore's
+//! `SmBrep::LocalOperation` ([`local_operation`]); the capi's check that it moved some face (`moved_faces`) needs face
 //! history solidcore does not report (solidcore#1462) and is not made.
 
 use solidcore::EntityRef;
@@ -33,7 +36,8 @@ use solidcore::offset::offset_executive::p2::{
 };
 use solidcore::query::api_queries::{BrepRef, face_bounding_box, face_classify_uv, face_closest_point_in_shape, face_internal_point};
 use solidcore::query::brep::{BrepIdentity, BrepQuery, LiveBrepObjects};
-use solidcore::surface::surface::SurfaceKind;
+use solidcore::surface::cone::Cone;
+use solidcore::surface::surface::{Surface, SurfaceKind};
 use solidcore::sweep::topology_sweep::store::SweepIdentities;
 use solidcore::topology::brep::local_operation::local_operation;
 use solidcore::topology::brep::{p1 as brep_p1, p2 as brep_p2, p3 as brep_p3};
@@ -509,16 +513,18 @@ pub(crate) fn thicken(body: &Body, thickness: f64, symmetric: bool) -> Result<Bo
 }
 
 /// `smlib_offset_sheet`: every face of a sheet moved onto its surface's offset by `distance`
-/// along its normal; a closed solid is [`Error::Argument`].
+/// along its normal; faces that close into a solid (a sphere's one face, a block's six) give the
+/// offset solid (tangency-labs/smlib#17, which dropped the capi's refusal of a closed solid).
 pub(crate) fn offset_sheet(body: &Body, distance: f64) -> Result<Body> {
     if !distance_ok(distance) {
         return Err(Error::Argument);
     }
     on_copy("smlib_offset_sheet", body, |k, mut w| {
-        if brep_p2::is_manifold_solid(&w)? {
-            return Ok(Err(Error::Argument));
+        // `take`: a result without faces (a sphere moved in to its centre) is SMLIB_ERR_EMPTY.
+        match called(offset_brep_full(k, &mut w, distance))? {
+            Ok(r) => finish(r, false),
+            Err(e) => Ok(Err(e)),
         }
-        called(offset_brep_full(k, &mut w, distance))
     })
 }
 
@@ -533,10 +539,83 @@ fn unit(v: [f64; 3]) -> Option<Vec3> {
     (len > 1e-12 && len.is_finite()).then(|| u * (1.0 / len))
 }
 
+/// `outward_normal`: the outward normal of face `f` (its outer faceuse `fu`) at `at`, a point on
+/// it: its surface's normal there, turned with the outer faceuse. `None` where SMLib cannot place
+/// the point on the surface (the capi's `STEPInversionAnswered` also takes a point outside the
+/// domain or off the surface by more than its tolerance; solidcore's inversion answers those with
+/// a status, so they are `None` here: the face's own internal point is neither).
+fn outward_normal(k: &Kernel, b: &Brep, f: FaceId, fu: FaceuseId, at: Point3) -> solidcore::Result<Option<Vec3>> {
+    let Some(surf) = b.face(f)?.surface.as_ref() else { return Ok(None) };
+    let Some((step, _)) = answer(surf.step_inversion(k, &surf.step_uv_domain(), at, 1e6, None))? else { return Ok(None) };
+    let Some(nurb) = answer(surf.convert_uv_from_step_to_nurbs(k, step))? else { return Ok(None) };
+    let Some(mut n) = answer(surf.evaluate_normal(k, nurb, Side::Left, Side::Left))? else { return Ok(None) };
+    if b.faceuse(fu)?.orientation != OrientType::Same {
+        n = -n;
+    }
+    Ok(Some(n))
+}
+
+/// `drafted_cone` (tangency-labs/smlib#27): the cone a face on the cylinder `cyl` about the pull
+/// (its outward normal `n` at `inside`) becomes drafted by `angle` about its circle on the neutral
+/// plane (through `origin`, normal `normal`), so that it leans in going along `pull`: its radius
+/// R - s h tan(angle) at height h along the pull from that circle, s = 1 where the face looks
+/// away from the axis (a pin), -1 where it looks towards it (a hole). The capi moves the
+/// cylinder's NURB control points radially and lets `CopyAndAddAnalytics` find the cone;
+/// solidcore's `Cone::lean_cylinder` (solidcore#1545) is that edit, keeping the cylinder's
+/// parameters so the face's UV trims stay valid. [`Error::Unsupported`] when the pull does not
+/// run along the axis, the axis lies in the neutral plane, or the cone would close within the
+/// face's span. A cone that is not a cylinder (`drafted_cone`'s turned generators,
+/// tangency-labs/smlib#53) is [`Error::Unsupported`] too: `lean_cylinder` takes cylinders only.
+#[allow(clippy::too_many_arguments)] // the capi's drafted_cone
+fn drafted_cone(
+    k: &Kernel,
+    cyl: &Cone,
+    n: Vec3,
+    inside: Point3,
+    origin: Point3,
+    normal: Vec3,
+    pull: Vec3,
+    angle: f64,
+) -> solidcore::Result<Out<Cone>> {
+    let bot = cyl.bot_radius();
+    if (bot - cyl.top_radius()).abs() > 1e-12 * (1.0 + bot) {
+        return Ok(Err(Error::Unsupported));
+    }
+    let frame = cyl.canonical().origin;
+    let z = frame.x_axis().cross(frame.y_axis());
+    let len = z.length();
+    if !(len > 0.0 && len.is_finite()) {
+        return Ok(Err(Error::Unsupported));
+    }
+    let z = z * (1.0 / len);
+    let sense = z.dot(pull);
+    if (sense.abs() - 1.0).abs() > 1e-9 {
+        return Ok(Err(Error::Unsupported));
+    }
+    let axis = frame.origin();
+    let toward = z.dot(normal);
+    if toward.abs() < 1e-12 {
+        return Ok(Err(Error::Unsupported));
+    }
+    // The hinge circle's centre: the axis on the neutral plane, at the cylinder's height v0.
+    let v0 = (origin - axis).dot(normal) / toward;
+    let centre = axis + z * v0;
+    let radial = (inside - centre) - pull * (inside - centre).dot(pull);
+    let s = if radial.dot(n) >= 0.0 { 1.0 } else { -1.0 };
+    // The radius changes by -s tan(angle) per unit along the pull, so by -s tan(angle) (z . pull)
+    // per unit of the cylinder's height, from its radius at v0.
+    let slope = -s * angle.tan() * sense;
+    if !slope.is_finite() {
+        return Ok(Err(Error::Unsupported));
+    }
+    Ok(answer(cyl.lean_cylinder(k, slope, v0))?.ok_or(Error::Unsupported))
+}
+
 /// `smlib_draft`: its checks, the solid check, the pick, then `draft_faces`: each picked face (a
 /// plane parallel to the pull) gets a copy of its plane turned by `angle` about its line on the
-/// neutral plane, and `SmBrep::LocalOperation` extends or trims the faces around them to meet
-/// the tilted planes.
+/// neutral plane, and a cylinder about the pull the cone `drafted_cone` gives
+/// (tangency-labs/smlib#27); `SmBrep::LocalOperation` extends or trims the faces around them to
+/// meet the tilted surfaces.
 pub(crate) fn draft(
     body: &Body,
     points: &[[f64; 3]],
@@ -572,6 +651,21 @@ pub(crate) fn draft(
             let (Some(surf), Some(fu)) = (face.surface.as_ref(), fu) else {
                 return Ok(Err(Error::Status(INVALID_INPUT)));
             };
+            // A cylinder about the pull drafted becomes a cone (`drafted_cone`).
+            if let SurfaceKind::Cone(c) = surf.kind_with_nurb(k)? {
+                let cyl = (**c).clone();
+                let Some(inside) = answer(face_internal_point(k, &mut w, f))? else {
+                    return Ok(Err(Error::Status(INVALID_INPUT)));
+                };
+                let Some(n) = outward_normal(k, &w, f, fu, inside)? else {
+                    return Ok(Err(Error::Status(INVALID_INPUT)));
+                };
+                match drafted_cone(k, &cyl, n, inside, p3(neutral_origin), normal, along, angle)? {
+                    Ok(cone) => surfaces.push(Surface::from(cone)),
+                    Err(e) => return Ok(Err(e)),
+                }
+                continue;
+            }
             let SurfaceKind::Plane(plane) = surf.kind_with_nurb(k)? else {
                 return Ok(Err(Error::Unsupported));
             };

@@ -19,7 +19,7 @@ use solidcore::primitive::api_curves::create_line_segment;
 use solidcore::sweep::api_brep::create_linear_sweep;
 
 use super::offset::{draft, offset_faces, offset_sheet, shell, thicken};
-use super::{Body, area, bounds, counts, make_box, make_cylinder, run, to_arrays, volume};
+use super::{Body, area, bounds, counts, make_box, make_cylinder, make_sphere, run, to_arrays, volume};
 use crate::export::native;
 use crate::{BooleanOp, Error};
 
@@ -33,6 +33,7 @@ const TOL: f64 = 0.01;
 enum Shape {
     Box([f64; 3], [f64; 3]),
     Cylinder([f64; 3], f64, f64),
+    Sphere([f64; 3], f64),
     /// A sheet: the line from the first point to the second swept along `dir` by `dist`.
     LineSheet([f64; 3], [f64; 3], [f64; 3], f64),
     /// A sheet: the arc about +Z through `center` of `radius` from 0 to `degrees`, swept along
@@ -52,6 +53,7 @@ impl Shape {
         match self {
             Shape::Box(o, s) => make_box(o, s).unwrap(),
             Shape::Cylinder(o, r, h) => make_cylinder(o, r, h).unwrap(),
+            Shape::Sphere(o, r) => make_sphere(o, r).unwrap(),
             Shape::LineSheet(a, b, dir, dist) => run("sheet", |k| {
                 let c = Curve::from(create_line_segment(v3(a), v3(b))?);
                 create_linear_sweep(k, &[Some(&c)], v3(dir), dist, false)
@@ -97,6 +99,8 @@ enum Expect {
     Volume(f64),
     /// A solid of this volume whose bounds along z are these.
     Slab(f64, f64, f64),
+    /// A solid of this volume (relative 1e-9) whose bounds are these.
+    Solid(f64, [f64; 3], [f64; 3]),
     /// A sheet of this area (relative 1e-9) whose bounds are these.
     Sheet(f64, [f64; 3], [f64; 3]),
     /// This error.
@@ -119,6 +123,8 @@ const FRONT: [f64; 3] = [15.0, 0.0, 5.0];
 const Z: [f64; 3] = [0.0, 0.0, 1.0];
 /// A 30 x 20 sheet in z = 0: the x axis from 0 to 30 swept 20 along y.
 const PLATE: Shape = Shape::LineSheet([0.0; 3], [30.0, 0.0, 0.0], [0.0, 1.0, 0.0], 20.0);
+/// A sphere of radius 10 about the origin.
+const BALL: Shape = Shape::Sphere([0.0; 3], 10.0);
 /// A quarter of a cylinder of radius 5 about the z axis, 10 high.
 const QUARTER: Shape = Shape::ArcSheet([0.0; 3], 5.0, 90.0, 10.0);
 
@@ -151,10 +157,17 @@ fn case(name: &str) -> Case {
         "thicken_a_solid" => c(Op::Thicken(BLOCK, 2.0, false), Expect::Fails(Error::Argument)),
         // The plate moved 3 along its normal (+z: the x axis swept along y): still 600, at z = 3.
         "offset_sheet_plate" => c(Op::OffsetSheet(PLATE, 3.0), Expect::Sheet(600.0, [0.0, 0.0, 3.0], [30.0, 20.0, 3.0])),
+        // A sphere's one face closes on itself (tangency-labs/smlib fix #17): r = 10 moved out 2 is
+        // the ball of radius 12, (4/3) π 12³; moved in 10, to its centre, nothing is left.
+        "offset_sheet_a_sphere" => c(Op::OffsetSheet(BALL, 2.0), Expect::Volume(4.0 / 3.0 * PI * 12.0f64.powi(3))),
+        "offset_sheet_a_sphere_to_its_centre" => c(Op::OffsetSheet(BALL, -10.0), Expect::Fails(Error::Empty)),
         // The quarter cylinder moved 2 along its normal (outward: the arc's tangent swept along
         // z): radius 7, area (π/2) 7 · 10.
         "offset_sheet_quarter_cylinder" => c(Op::OffsetSheet(QUARTER, 2.0), Expect::Sheet(PI / 2.0 * 7.0 * 10.0, [0.0, 0.0, 0.0], [7.0, 7.0, 10.0])),
-        "offset_sheet_a_solid" => c(Op::OffsetSheet(BLOCK, 1.0), Expect::Fails(Error::Argument)),
+        // A closed sheet offsets as an open one (tangency-labs/smlib fix #17, develop 9d0fb564):
+        // each face moved out 1 along its normal, the convex edges extended, gives the block
+        // (a + 2d)(b + 2d)(c + 2d) of six planes, from -d to (a, b, c) + d.
+        "offset_sheet_a_solid" => c(Op::OffsetSheet(BLOCK, 1.0), Expect::Solid(32.0 * 22.0 * 12.0, [-1.0, -1.0, -1.0], [31.0, 21.0, 11.0])),
         // The top moved out 2: abc + d·ab.
         "offset_faces_top_out" => c(Op::OffsetFaces(BLOCK, vec![TOP], 2.0), Expect::Volume(ABC + 2.0 * 600.0)),
         // The top moved in 10, as deep as the block: nothing left behind it.
@@ -188,11 +201,17 @@ fn case(name: &str) -> Case {
             let s = (5.0f64).to_radians().tan();
             c(Op::Draft(BLOCK, vec![FRONT], [0.0, 0.0, 10.0], Z, Z, 5f64.to_radians()), Expect::Volume(ABC + 30.0 * 100.0 * s / 2.0))
         }
-        // A cylinder's side is not flat.
-        "draft_a_curved_face" => c(
-            Op::Draft(Shape::Cylinder([0.0; 3], 5.0, 10.0), vec![[5.0, 0.0, 5.0]], [0.0; 3], [0.0, 0.0, 1.0], [0.0, 0.0, 1.0], 0.1),
-            Expect::Fails(Error::Unsupported),
-        ),
+        // A cylinder along the pull drafts to a cone (tangency-labs/smlib fix #27, develop
+        // 9d0fb564): R = 5, h = 10, θ = 0.1 about the bottom, leaning in: a frustum of radii R
+        // and r = R - h tanθ (a cone and its two caps): V = π h (R² + R r + r²) / 3.
+        "draft_a_curved_face" => {
+            let (big, h) = (5.0, 10.0);
+            let small = big - h * 0.1f64.tan();
+            c(
+                Op::Draft(Shape::Cylinder([0.0; 3], big, h), vec![[5.0, 0.0, 5.0]], [0.0; 3], [0.0, 0.0, 1.0], [0.0, 0.0, 1.0], 0.1),
+                Expect::Volume(PI * h * (big * big + big * small + small * small) / 3.0),
+            )
+        }
         // The top is square to the pull, not along it.
         "draft_a_face_across_the_pull" => {
             c(Op::Draft(BLOCK, vec![TOP], [0.0; 3], [0.0, 0.0, 1.0], [0.0, 0.0, 1.0], 0.1), Expect::Fails(Error::Unsupported))
@@ -277,6 +296,10 @@ fn judge(name: &str, who: &str, expect: &Expect, got: Got) -> Got {
             let (a, b) = (m.bounds.0[2], m.bounds.1[2]);
             assert!((a - lo).abs() < 1e-6 && (b - hi).abs() < 1e-6, "{name}: {who} z from {a} to {b}, expected {lo} to {hi}");
         }
+        (Expect::Solid(v, lo, hi), Ok(m)) => {
+            assert!(rel(m.size, *v) < 1e-9, "{name}: {who} volume {} vs analytic {v}", m.size);
+            assert!(near(m.bounds.0, *lo) && near(m.bounds.1, *hi), "{name}: {who} bounds {:?}, expected {lo:?} {hi:?}", m.bounds);
+        }
         (Expect::Sheet(s, lo, hi), Ok(m)) => {
             assert!(rel(m.size, *s) < 1e-9, "{name}: {who} area {} vs analytic {s}", m.size);
             assert!(near(m.bounds.0, *lo) && near(m.bounds.1, *hi), "{name}: {who} bounds {:?}, expected {lo:?} {hi:?}", m.bounds);
@@ -313,6 +336,7 @@ fn cpp_case(name: &str) -> Got {
         match s {
             Shape::Box(o, z) => ffi::make_box(&o, &z).map(Brep::made).unwrap(),
             Shape::Cylinder(o, r, h) => ffi::make_cylinder(&o, r, h).map(Brep::made).unwrap(),
+            Shape::Sphere(o, r) => ffi::make_sphere(&o, r).map(Brep::made).unwrap(),
             Shape::LineSheet(a, b, dir, dist) => Brep::extrude(&[line(a, b)], dir, dist, 0.0, DraftCorner::default(), false).unwrap(),
             Shape::ArcSheet(o, r, degrees, h) => {
                 let arc = crate::sweeps::Curve::Arc {
@@ -411,13 +435,15 @@ cases!(
     offset_sheet_plate,
     offset_sheet_quarter_cylinder: ignore = "solidcore#1477: the quarter arc sweeps to an SmSurfOfExtrusion, whose offset exports as a spline, where the fork's 12918e9 sweeps an SmCylinder (solidcore#1477)",
     offset_sheet_a_solid,
+    offset_sheet_a_sphere,
+    offset_sheet_a_sphere_to_its_centre,
     offset_faces_top_out: ignore = "no SmOffsetFacesExecutive, fork a96ce9f (solidcore#1060)",
     offset_faces_through,
     draft_box_sides,
     draft_one_side,
     draft_one_side_out,
     draft_one_side_hinged_at_the_top,
-    draft_a_curved_face,
+    draft_a_curved_face: ignore = "solidcore#1606: Cone::lean_cylinder keeps its cylinder flag, so under cylinder_rebuild_mean_radius the rebuild refuses the cone",
     draft_a_face_across_the_pull,
 );
 
