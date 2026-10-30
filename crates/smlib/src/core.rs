@@ -35,6 +35,9 @@ mod offset_tests;
 pub(crate) mod sweep;
 #[cfg(test)]
 mod sweep_tests;
+pub(crate) mod transform;
+#[cfg(test)]
+mod transform_tests;
 
 pub(crate) use convert::{from_arrays, to_arrays};
 pub(crate) use measure::{area, bounds, check, edge_face_distance, is_manifold_solid, mass_properties, solid_count};

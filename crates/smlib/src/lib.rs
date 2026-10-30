@@ -315,6 +315,9 @@ impl Brep {
 
     /// A deep copy.
     pub fn try_clone(&self) -> Result<Brep> {
+        if route::Op::Transform.backend() == route::Backend::Solidcore {
+            return core::transform::copy(self.core()?).map(Brep::made_core);
+        }
         ffi::copy(self.cpp()?).map(Brep::made).map_err(error)
     }
 
@@ -323,6 +326,9 @@ impl Brep {
     /// mirror it, a non-uniform scale or a shear turns its geometry into NURBS, tolerances scale
     /// with it.
     pub fn transformed(&self, matrix: &[[f64; 4]; 4]) -> Result<Brep> {
+        if route::Op::Transform.backend() == route::Backend::Solidcore {
+            return core::transform::transform(self.core()?, matrix).map(Brep::made_core);
+        }
         ffi::transform(self.cpp()?, matrix).map(Brep::made).map_err(error)
     }
 
