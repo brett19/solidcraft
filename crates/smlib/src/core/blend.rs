@@ -14,8 +14,6 @@
 //! What the capi asks of fork-only SMLib code that solidcore does not have is
 //! [`Error::Unsupported`], refused where the capi would first reach it, so every error before
 //! it is the C++ path's:
-//! - a curvature-continuous blend (`SetBlendCurveAtThirds`, fork fd3b6a7; solidcore#1438);
-//! - a corner left open (`SetMarkCornerPatches`, fork 60af574; solidcore#1439);
 //! - a variable radius whose law has a corner (`SplitFilletFacesAtRadiusCorners`, fork 6eecf04; solidcore#430, PR #1403).
 //!
 //! - a blend whose rail leaves its face, which the fork may build over the cliff
@@ -24,14 +22,16 @@
 //! solidcore's own refusals of code it has not ported (`SolidError::Unported`) are
 //! [`Error::Unsupported`] too.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::PoisonError;
 
+use solidcore::EntityRef;
 use solidcore::SolidError;
 use solidcore::blend::fillet_executive::p1::{FilletLaw, FilletLawKind};
 use solidcore::blend::fillet_executive::session::FilletSession;
 use solidcore::blend::fillet_geom::p1::{FilletCornerType, FilletErrorType};
 use solidcore::blend::fillet_solver::p1::{FilletSurfaceGenerator, FilletSurfaceGeneratorType};
+use solidcore::geom::attribute::ids as attribute_ids;
 use solidcore::geom::vector3d::{Point3, Vec3};
 use solidcore::kernel::Kernel;
 use solidcore::mass::integrator::properties::edge_length;
@@ -41,15 +41,19 @@ use solidcore::query::api_queries::edge_closest_point;
 use solidcore::query::brep::evaluate_surface_normal;
 use solidcore::topology::brep::p1 as brep_p1;
 use solidcore::topology::brep::p2 as brep_p2;
+use solidcore::topology::brep::p2::ArenaNotifyState;
+use solidcore::topology::brep::p3::{DeleteFaceOptions, delete_face};
 use solidcore::topology::brep::p5::{StitchAndOrientOptions, stitch_and_orient};
 use solidcore::topology::edgeuse::p1 as eu_p1;
 use solidcore::topology::edgeuse::p3::{BinormalOptions, evaluate_binormal};
 use solidcore::topology::face::p2 as face_p2;
+use solidcore::topology::face::p4 as face_p4;
+use solidcore::topology::topology_traverser::Marks;
 use solidcore::topology::{Brep, EdgeId, EdgeuseId, FaceId, FaceuseId, VertexId, edge, vertex};
 
 use super::boolean::copy_of;
 use super::{Body, answer, run};
-use crate::{Blend, ChamferSecond, Error, MAX_POINTS, Result};
+use crate::{Blend, ChamferSecond, Error, Hole, HoleEdge, MAX_POINTS, Result};
 
 /// The capi's statuses as SolidCraft errors: an operation's own result.
 type Out<T> = std::result::Result<T, Error>;
@@ -220,6 +224,10 @@ fn chamfer_radius(k: &Kernel, b: &mut Brep, e: EdgeId, distance: f64) -> solidco
 #[derive(Clone, Copy, PartialEq)]
 enum Section<'a> {
     Round,
+    /// The curvature-continuous section (`SM_FSG_BLEND_CURVE`, continuity 2), the quintic whose
+    /// inner control points lie a third and two thirds of the way from each contact to the corner
+    /// its tangents make (`SetBlendCurveAtThirds`, fork fd3b6a7).
+    Curvature,
     Chord,
     /// A chamfer, with each edge's offset of its second surface (`chamfer_offsets`' `second`;
     /// the sizes are the first's).
@@ -264,6 +272,11 @@ fn blend_failure(s: &FilletSession<'_>, e: SolidError) -> Error {
 /// filleting, or (a chamfer) every corner bevelled; then `StitchAndOrient`. A blend that made
 /// no face is [`Error::NoEffect`]. A setback corner that is not SMLib's same-convexity N x N
 /// corner is refused with its index in `setbacks` (`Err(Ok(j))`).
+///
+/// With `patches`, the session marks the set-back corners' patches (`SetMarkCornerPatches`, fork
+/// 60af574), and after the stitch `patches` gets each corner's, in `setbacks`' order: the faces
+/// marked with its index, in the body's face order. A corner whose patch has no face is
+/// [`Error::Unsupported`].
 fn blend_edges(
     k: &mut Kernel,
     b: &mut Brep,
@@ -272,10 +285,12 @@ fn blend_edges(
     section: Section<'_>,
     law: Option<FilletLaw>,
     setbacks: &[SetBack],
+    patches: Option<&mut Vec<Vec<FaceId>>>,
 ) -> solidcore::Result<std::result::Result<(), std::result::Result<usize, Error>>> {
     let before = face_set(b)?;
     let done = {
         let mut s = FilletSession::new(k, b)?;
+        s.set_blend_curve_at_thirds(matches!(section, Section::Curvature));
         // `SetFilletParameters(b, es, sections, solvers, values, laws, -1, -1, -1, -1,
         // continuity 1, thumbweight 1)`: the session sets the executive's global merge first, as
         // `SmApiFilletEdges` does, and `SetFilletParameters` resets it, as in the capi.
@@ -286,30 +301,34 @@ fn blend_edges(
                 Some(&size) => s.prepare_variable_radius_edges(k, edges, size, law, 1, 1),
                 None => return Ok(Err(Err(Error::Argument))),
             },
+            (Section::Curvature, _) => s.prepare_per_edge_constant_radius(k, edges, sizes, &[FilletSurfaceGeneratorType::BlendCurve], 2, 1.0),
             (Section::Chord, _) => s.prepare_per_edge_constant_distance(k, edges, sizes, &[FilletSurfaceGeneratorType::Circular], 1, 1.0),
             (Section::Chamfer(second), _) => chamfer_parameters(k, &mut s, edges, sizes, second),
         };
-        let mut step = prepared.and_then(|()| s.create_corners(k, None)).map(|()| Ok(()));
-        if let Ok(Ok(())) = step {
+        let mut step = prepared.and_then(|()| s.create_corners(k, None)).map(|()| Ok(Vec::new()));
+        if let Ok(Ok(_)) = step {
             step = corners(&mut s, section, setbacks);
         }
+        s.set_mark_corner_patches(patches.is_some());
         match step {
-            Ok(Ok(())) => match s.do_filleting(k, None) {
-                Ok(()) => Ok(Ok(())),
+            // The marks go with the session: read them before it drops.
+            Ok(Ok(set_back)) => match s.do_filleting(k, None) {
+                Ok(()) => s.corner_patch_faces().map(|marked| Ok((set_back, marked))),
                 Err(e) => Ok(Err(Err(blend_failure(&s, e)))),
             },
             Ok(Err(refusal)) => Ok(Err(refusal)),
             Err(e) => Ok(Err(Err(blend_failure(&s, e)))),
         }
     };
-    let done: solidcore::Result<std::result::Result<(), std::result::Result<usize, Error>>> = done;
-    let stitched = match done? {
-        Ok(()) => stitch_and_orient(k, b, &StitchAndOrientOptions::default()).map_err(status),
+    let done: solidcore::Result<std::result::Result<(Vec<usize>, Vec<(usize, FaceId)>), std::result::Result<usize, Error>>> = done;
+    let (set_back, marked) = match done? {
+        Ok(d) => d,
         Err(refusal) => {
             b.refresh_cached_topology();
             return Ok(Err(refusal));
         }
     };
+    let stitched = stitch_and_orient(k, b, &StitchAndOrientOptions::default()).map_err(status);
     // The port's cached topology, true again for what reads the body next (as solidcore's own
     // fillet entry points do).
     b.refresh_cached_topology();
@@ -317,7 +336,33 @@ fn blend_edges(
         return Ok(Err(Err(e)));
     }
     let made = face_set(b)?.difference(&before).count();
-    Ok(if made > 0 { Ok(()) } else { Err(Err(Error::NoEffect)) })
+    if made == 0 {
+        return Ok(Err(Err(Error::NoEffect)));
+    }
+    if let Some(patches) = patches {
+        // The stitch keeps the faces filleting made: a corner's patch is the faces marked with
+        // its index.
+        let live = brep_p1::faces(b, None)?;
+        let marked: HashMap<FaceId, usize> = marked.into_iter().map(|(i, f)| (f, i)).collect();
+        for &index in &set_back {
+            let patch: Vec<FaceId> = live.iter().copied().filter(|f| marked.get(f) == Some(&index)).collect();
+            if patch.is_empty() {
+                return Ok(Err(Err(Error::Unsupported)));
+            }
+            patches.push(patch);
+        }
+        // `RemoveAttributeFromTopology(SM_AI_FILLET_CORNER_FACE)`: the marks are the session's,
+        // and none is left on the body's own faces.
+        for f in live {
+            let at = EntityRef::Face(f);
+            let marks: Vec<_> =
+                b.entity_attributes(at).into_iter().filter(|(_, a)| a.attribute_id() == attribute_ids::FILLET_CORNER_FACE).map(|(h, _)| h).collect();
+            for h in marks {
+                b.remove_attribute(at, h)?;
+            }
+        }
+    }
+    Ok(Ok(()))
 }
 
 /// `chamfer_offsets`' `SetFilletParameters(b, es, kinds, solvers, first, NULL, -1, -1, -1, -1,
@@ -357,36 +402,39 @@ fn chamfer_parameters(k: &mut Kernel, s: &mut FilletSession<'_>, edges: &[EdgeId
 
 /// The corners' part of `round_edges` / `chamfer_offsets`: a chamfer's corners bevelled; each
 /// setback set on its vertex's corner (`GetFilletCornerOfVertex`), which must be an
-/// `SM_FCR_N_x_N_CONVEX` corner.
+/// `SM_FCR_N_x_N_CONVEX` corner. Each set-back corner's index in the session's corners, in
+/// `setbacks`' order.
 fn corners(
     s: &mut FilletSession<'_>,
     section: Section<'_>,
     setbacks: &[SetBack],
-) -> solidcore::Result<std::result::Result<(), std::result::Result<usize, Error>>> {
+) -> solidcore::Result<std::result::Result<Vec<usize>, std::result::Result<usize, Error>>> {
     let ids = s.fillet_corners()?;
     if matches!(section, Section::Chamfer(_)) {
         for id in ids {
             s.set_corner_bevel(id, true)?;
         }
-        return Ok(Ok(()));
+        return Ok(Ok(Vec::new()));
     }
+    let mut set_back = Vec::with_capacity(setbacks.len());
     for (j, sb) in setbacks.iter().enumerate() {
         let mut found = None;
-        for &id in &ids {
+        for (i, &id) in ids.iter().enumerate() {
             if s.corner(id)?.vertex == Some(sb.vertex) {
-                found = Some(id);
+                found = Some((i, id));
                 break;
             }
         }
-        let Some(id) = found else {
+        let Some((i, id)) = found else {
             return Ok(Err(Err(Error::Argument)));
         };
         if s.corner(id)?.corner_type() != FilletCornerType::NByNConvex {
             return Ok(Err(Ok(j)));
         }
         s.set_corner_setback(id, sb.distance)?;
+        set_back.push(i);
     }
-    Ok(Ok(()))
+    Ok(Ok(set_back))
 }
 
 /// `finish`: the result must have faces, and a solid input must give a closed manifold solid.
@@ -419,13 +467,11 @@ pub(super) fn on_copy(call: &'static str, body: &Body, f: impl FnOnce(&mut Kerne
 pub(crate) enum Corners {
     /// Filled, as SMLib builds them (`smlib_blend`, `smlib_blend_setback`).
     Filled,
-    /// Removed, the holes listed (`smlib_blend_setback_open`): not supported on solidcore.
+    /// Removed, the holes listed (`smlib_blend_setback_open`).
     Open,
 }
 
-/// `blend_call` (as `smlib_fillet`, `smlib_chamfer`, `smlib_blend`, `smlib_blend_setback` and
-/// `smlib_blend_setback_open` call it): `sizes` one per point, or one for all; `corners` and
-/// `setbacks` the corner setbacks.
+/// [`blend_holes`] without its holes.
 #[allow(clippy::too_many_arguments)] // the capi's blend_call
 pub(crate) fn blend(
     body: &Body,
@@ -437,6 +483,24 @@ pub(crate) fn blend(
     setbacks: &[f64],
     open: Corners,
 ) -> Result<Body> {
+    blend_holes(body, kind, points, sizes, tolerance, corners, setbacks, open).map(|(b, _)| b)
+}
+
+/// `blend_call` (as `smlib_fillet`, `smlib_chamfer`, `smlib_blend`, `smlib_blend_setback` and
+/// `smlib_blend_setback_open` call it): `sizes` one per point, or one for all; `corners` and
+/// `setbacks` the corner setbacks. With [`Corners::Open`], the holes, one per point of
+/// `corners` (none otherwise).
+#[allow(clippy::too_many_arguments)] // the capi's blend_call
+pub(crate) fn blend_holes(
+    body: &Body,
+    kind: Blend,
+    points: &[[f64; 3]],
+    sizes: &[f64],
+    tolerance: f64,
+    corners: &[[f64; 3]],
+    setbacks: &[f64],
+    open: Corners,
+) -> Result<(Body, Vec<Hole>)> {
     let one_size = sizes.len() == 1;
     if !points_ok(points, false)
         || !tolerance_ok(tolerance)
@@ -453,7 +517,8 @@ pub(crate) fn blend(
     if !corners.is_empty() && kind == Blend::Chamfer {
         return Err(Error::Unsupported);
     }
-    on_copy("blend_call", body, |k, mut w| {
+    let mut holes = Vec::new();
+    let made = on_copy("blend_call", body, |k, mut w| {
         let (picked, first) = match pick_edges(k, &w, points, tolerance)? {
             Ok(p) => p,
             Err(m) => return Ok(Err(edge_miss(m))),
@@ -472,6 +537,7 @@ pub(crate) fn blend(
         let solid_in = brep_p2::is_manifold_solid(&w)?;
         let section = match kind {
             Blend::Round => Section::Round,
+            Blend::Curvature => Section::Curvature,
             Blend::Chord => Section::Chord,
             // `chamfer_edges`: each edge's offsets from its setback at its midpoint.
             Blend::Chamfer => {
@@ -482,27 +548,169 @@ pub(crate) fn blend(
                         None => return Ok(Err(Error::Status(INVALID_INPUT))),
                     }
                 }
-                return Ok(match blend_edges(k, &mut w, &picked, &radii, Section::Chamfer(&radii), None, &[])? {
+                return Ok(match blend_edges(k, &mut w, &picked, &radii, Section::Chamfer(&radii), None, &[], None)? {
                     Ok(()) => finish(w, solid_in)?,
                     Err(Ok(_)) => Err(Error::Unsupported),
                     Err(Err(e)) => Err(e),
                 });
             }
-            // The curvature-continuous section sits at thirds (`SetBlendCurveAtThirds`, fork
-            // fd3b6a7), which solidcore does not have.
-            Blend::Curvature => return Ok(Err(Error::Unsupported)),
         };
-        // The corners' patches marked to be opened (`SetMarkCornerPatches`, fork 60af574),
-        // which solidcore does not have.
-        if open == Corners::Open {
+        // The corners' places, read now: filleting deletes the vertices.
+        let at_points = at.iter().map(|&v| vertex::point(&w, v)).collect::<solidcore::Result<Vec<Point3>>>()?;
+        let mut patches = Vec::new();
+        match blend_edges(k, &mut w, &picked, &each, section, None, &back, (open == Corners::Open).then_some(&mut patches))? {
+            Ok(()) => {}
+            // A corner SMLib does not set back: the first of the caller's points that picked it.
+            Err(Ok(j)) => return Ok(Err(first_corner.get(j).map_or(Error::Unsupported, |&corner| Error::CornerRefused { corner }))),
+            Err(Err(e)) => return Ok(Err(e)),
+        }
+        if open == Corners::Filled {
+            return finish(w, solid_in);
+        }
+        // Each corner opened: its patch removed, the edges round its hole in the result's
+        // orders, once per corner point (a vertex picked twice gives its hole twice).
+        if !brep_p2::is_manifold_solid(&w)? {
+            return Ok(Err(Error::NotSolid));
+        }
+        let rims = match open_corners(k, &mut w, &patches)? {
+            Ok(r) => r,
+            Err(e) => return Ok(Err(e)),
+        };
+        let edge_index: HashMap<EdgeId, usize> = brep_p1::edges(&w, None)?.into_iter().enumerate().map(|(i, e)| (e, i)).collect();
+        let face_index: HashMap<FaceId, usize> = brep_p1::faces(&w, None)?.into_iter().enumerate().map(|(i, f)| (f, i)).collect();
+        for c in corners {
+            let p = Point3::new(c[0], c[1], c[2]);
+            let mut which = None;
+            let mut best = f64::INFINITY;
+            for (j, q) in at_points.iter().enumerate() {
+                let d = (*q - p).length();
+                if d < best {
+                    best = d;
+                    which = Some(j);
+                }
+            }
+            let Some(rim) = which.and_then(|j| rims.get(j)) else { return Ok(Err(Error::Argument)) };
+            let mut edges = Vec::with_capacity(rim.len());
+            for h in rim {
+                let (Some(&edge), Some(&face)) = (edge_index.get(&h.edge), face_index.get(&h.face)) else { return Ok(Err(Error::Unsupported)) };
+                edges.push(HoleEdge { edge, face, forward: h.forward });
+            }
+            holes.push(Hole { edges });
+        }
+        finish(w, false)
+    })?;
+    Ok((made, holes))
+}
+
+/// One edge round an opened corner's hole (`HoleEdge`): the face beside it, and whether that
+/// face's boundary, run counter-clockwise about its outward normal (the solid's), runs the edge
+/// from its start vertex to its end.
+#[derive(Clone, Copy)]
+struct RimEdge {
+    edge: EdgeId,
+    face: FaceId,
+    forward: bool,
+}
+
+/// `open_corners`: the faces of each patch in `patches` removed from the solid `b`, with the edges
+/// and vertices only they used, and the edges round each patch's hole, as the faces beside it run
+/// them, each edge's start the previous one's end. Read on the solid before anything is removed,
+/// where each face's outward side is known. Each edge round a hole must lie between a face of its
+/// patch and one other face, outside every patch, and the edges must close one loop (a patch that
+/// is a disc), else [`Error::Unsupported`].
+fn open_corners(k: &mut Kernel, b: &mut Brep, patches: &[Vec<FaceId>]) -> solidcore::Result<Out<Vec<Vec<RimEdge>>>> {
+    let any: HashSet<FaceId> = patches.iter().flatten().copied().collect();
+    let mut holes = Vec::with_capacity(patches.len());
+    for patch in patches {
+        let mine: HashSet<FaceId> = patch.iter().copied().collect();
+        let mut seen = HashSet::new();
+        let mut rim: Vec<RimEdge> = Vec::new();
+        for &f in patch {
+            for e in face_p4::edges(b, f, None, false, None)? {
+                if !seen.insert(e) {
+                    continue;
+                }
+                let beside = edge::faces(b, e, None)?;
+                let mut outside = beside.iter().copied().filter(|g| !mine.contains(g));
+                let (Some(other), more) = (outside.next(), outside.next()) else { continue };
+                if more.is_some() || beside.len() != 2 || any.contains(&other) {
+                    return Ok(Err(Error::Unsupported));
+                }
+                let Some(fu) = outer_faceuse(b, other)? else { return Ok(Err(Error::Unsupported)) };
+                let mut used = None;
+                for u in edge::edgeuses(b, e, None, None)? {
+                    if eu_p1::faceuse(b, u)? == Some(fu) {
+                        used = Some(u);
+                    }
+                }
+                let Some(u) = used else { return Ok(Err(Error::Unsupported)) };
+                rim.push(RimEdge { edge: e, face: other, forward: b.edgeuse(u)?.orientation == OrientType::Same });
+            }
+        }
+        let ends = |h: &RimEdge| -> solidcore::Result<(Option<VertexId>, Option<VertexId>)> {
+            let (s, t) = edge::start_end_vertices(b, h.edge)?;
+            Ok(if h.forward { (s, t) } else { (t, s) })
+        };
+        let Some(&front) = rim.first() else { return Ok(Err(Error::Unsupported)) };
+        let start = ends(&front)?.0;
+        let mut used = vec![false; rim.len()];
+        if let Some(u) = used.first_mut() {
+            *u = true;
+        }
+        let mut hole = vec![front];
+        let mut end = ends(&front)?.1;
+        // Each turn takes a rim edge not yet in the hole, so it ends within the rim's length.
+        while end != start {
+            let mut next = None;
+            for (i, h) in rim.iter().enumerate() {
+                if !used.get(i).copied().unwrap_or(true) && ends(h)?.0 == end {
+                    if next.is_some() {
+                        return Ok(Err(Error::Unsupported));
+                    }
+                    next = Some((i, *h));
+                }
+            }
+            let Some((i, h)) = next else { return Ok(Err(Error::Unsupported)) };
+            if let Some(u) = used.get_mut(i) {
+                *u = true;
+            }
+            hole.push(h);
+            end = ends(&h)?.1;
+        }
+        if hole.len() != rim.len() {
             return Ok(Err(Error::Unsupported));
         }
-        Ok(match blend_edges(k, &mut w, &picked, &each, section, None, &back)? {
-            Ok(()) => finish(w, solid_in)?,
-            // A corner SMLib does not set back: the first of the caller's points that picked it.
-            Err(Ok(j)) => Err(first_corner.get(j).map_or(Error::Unsupported, |&corner| Error::CornerRefused { corner })),
-            Err(Err(e)) => Err(e),
-        })
+        holes.push(hole);
+    }
+    // `DeleteFace(f, TRUE)` with the B-rep open for editing, each face once, in the patches'
+    // order.
+    let mut order = Vec::with_capacity(any.len());
+    let mut taken = HashSet::new();
+    for &f in patches.iter().flatten() {
+        if taken.insert(f) {
+            order.push(f);
+        }
+    }
+    let editing = b.editing_enabled();
+    b.set_editing_enabled(true);
+    let mut deleted = Ok(());
+    {
+        let mut state = ArenaNotifyState::new(b);
+        let mut env = state.env(None);
+        let mut marks = Marks::default();
+        for f in order {
+            let options = DeleteFaceOptions { delete_edges_vertices: true, ..DeleteFaceOptions::default() };
+            if let Err(e) = delete_face(k, b, &mut env, &mut marks, f, options) {
+                deleted = Err(e);
+                break;
+            }
+        }
+    }
+    b.set_editing_enabled(editing);
+    b.refresh_cached_topology();
+    Ok(match deleted {
+        Ok(()) => Ok(holes),
+        Err(e) => Err(status(e)),
     })
 }
 
@@ -610,7 +818,7 @@ pub(crate) fn chamfer_sides(body: &Body, points: &[[f64; 3]], tolerance: f64, di
                 None => return Ok(Err(Error::Status(INVALID_INPUT))),
             }
         }
-        Ok(match blend_edges(k, &mut w, &picked, &r0, Section::Chamfer(&r1), None, &[])? {
+        Ok(match blend_edges(k, &mut w, &picked, &r0, Section::Chamfer(&r1), None, &[], None)? {
             Ok(()) => finish(w, solid_in)?,
             Err(Ok(_)) => Err(Error::Unsupported),
             Err(Err(e)) => Err(e),
@@ -788,7 +996,7 @@ pub(crate) fn fillet_variable(
         }
         let solid_in = brep_p2::is_manifold_solid(&w)?;
         let (r0, r1) = (radii.first().copied().unwrap_or(0.0), radii.last().copied().unwrap_or(0.0));
-        Ok(match blend_edges(k, &mut w, &[e], &[r0.max(r1)], Section::Round, Some(law), &[])? {
+        Ok(match blend_edges(k, &mut w, &[e], &[r0.max(r1)], Section::Round, Some(law), &[], None)? {
             Ok(()) => finish(w, solid_in)?,
             Err(Ok(_)) => Err(Error::Unsupported),
             Err(Err(e)) => Err(e),

@@ -279,7 +279,8 @@ impl Brep {
             return Err(Error::Argument);
         }
         if route::Op::Blend.backend() == route::Backend::Solidcore {
-            return self.core_blend(kind, edges, sizes, tolerance, corners, setbacks, core::blend::Corners::Open).map(|b| (b, Vec::new()));
+            return core::blend::blend_holes(self.core()?, kind, edges, sizes, tolerance, corners, setbacks, core::blend::Corners::Open)
+                .map(|(b, holes)| (Brep::made_core(b), holes));
         }
         init()?;
         let kind = match kind {

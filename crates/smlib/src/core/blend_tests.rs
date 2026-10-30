@@ -10,7 +10,7 @@ use std::f64::consts::PI;
 use std::sync::mpsc;
 use std::time::Duration;
 
-use super::blend::{Corners, blend, chamfer_sides, fillet_variable};
+use super::blend::{Corners, blend, blend_holes, chamfer_sides, fillet_variable};
 use super::{Body, counts, make_box, make_cylinder, to_arrays, volume};
 use crate::export::native;
 use crate::{Blend, ChamferSecond, Error};
@@ -101,6 +101,11 @@ fn case(name: &str) -> Case {
             }
             c(Op::Blend(BLOCK, Blend::Round, edges, r), Expect::Volume(v))
         }
+        // Each section of a curvature-continuous round is the quintic from contact to contact
+        // whose inner control points lie a third and two thirds of the way to the corner the
+        // contacts' tangents make (fork fd3b6a7). On the unit square's sides it takes
+        // ½∮(x dy - y dx) = 113/756 from the corner: abc - 113/756 r² L.
+        "fillet_curvature_one_edge" => c(Op::Blend(BLOCK, Blend::Curvature, vec![TOP_FRONT], r), Expect::Volume(ABC - 113.0 / 756.0 * r * r * 30.0)),
         // abc - d² L / 2.
         "chamfer_one_edge" => c(Op::Blend(BLOCK, Blend::Chamfer, vec![TOP_FRONT], r), Expect::Volume(ABC - r * r * 30.0 / 2.0)),
         // abc - d1 d2 L / 2: 2 back along the top (the face leaning most along +z), 3 down the
@@ -353,6 +358,7 @@ macro_rules! cases {
 cases!(
     fillet_one_edge,
     fillet_all_edges,
+    fillet_curvature_one_edge,
     chamfer_one_edge,
     chamfer_two_distances,
     chamfer_distance_angle,
@@ -370,9 +376,6 @@ cases!(
 fn fork_only_blends_are_not_supported_yet() {
     let r = timed("unsupported", || {
         let b = BLOCK.core();
-        let curvature = blend(&b, Blend::Curvature, &[TOP_FRONT], &[2.0], TOL, &[], &[], Corners::Filled).err();
-        let corner = [[15.0, 20.0, 10.0], [30.0, 10.0, 10.0], [30.0, 20.0, 5.0]];
-        let open = blend(&b, Blend::Round, &corner, &[2.0; 3], TOL, &[[30.0, 20.0, 10.0]], &[4.0], Corners::Open).err();
         // 1 to 2 and back to 1: a corner at the middle.
         let bent = fillet_variable(&b, TOP_FRONT, TOL, [0.0, 0.0, 10.0], 1, &[0.0, 0.0, 0.5, 1.0, 1.0], &[1.0, 2.0, 1.0]).err();
         // A round over a cliff (fork 8ba4667): solidcore refuses every rail leaving its face.
@@ -380,12 +383,62 @@ fn fork_only_blends_are_not_supported_yet() {
         assert_eq!(cliff, Some(Error::Unsupported));
         // A pick that fails still says so first.
         let far = chamfer_sides(&b, &[[100.0; 3]], TOL, 2.0, ChamferSecond::Distance(3.0), [0.0, 0.0, 1.0]).err();
-        (curvature, open, bent, far)
+        (bent, far)
     });
     assert_eq!(r.0, Some(Error::Unsupported));
-    assert_eq!(r.1, Some(Error::Unsupported));
-    assert_eq!(r.2, Some(Error::Unsupported));
-    assert_eq!(r.3, Some(Error::NoMatch { point: 0 }));
+    assert_eq!(r.1, Some(Error::NoMatch { point: 0 }));
+}
+
+/// The corner of r5 rounds at (60, 40, 20) on a 60 x 40 x 20 box, set back 8 and left open: the
+/// box's six faces and the three rounds (9 faces, 30 edges, 22 vertices), a sheet, and one hole
+/// of twelve edges (each section and face curve in two), chained end to start, each beside a face
+/// of the sheet. With SMLib built, the C++ kernel gives the same counts and the same hole.
+#[test]
+fn a_setback_corner_left_open_returns_its_hole() {
+    let edges = [[30.0, 40.0, 20.0], [60.0, 20.0, 20.0], [60.0, 40.0, 10.0]];
+    let (open, holes) = timed("setback_open", move || {
+        let b = Shape::Box([0.0; 3], [60.0, 40.0, 20.0]).core();
+        blend_holes(&b, Blend::Round, &edges, &[5.0; 3], 0.1, &[[60.0, 40.0, 20.0]], &[8.0], Corners::Open).unwrap()
+    });
+    assert_eq!(counts(&open).unwrap(), [9, 30, 22]);
+    assert!(!super::is_manifold_solid(&open).unwrap());
+    let [hole] = holes.as_slice() else { panic!("one corner: {holes:?}") };
+    assert_eq!(hole.edges.len(), 12);
+    let flat = to_arrays(&open).unwrap();
+    let (rec, _) = native(&flat).unwrap();
+    rec.validate().unwrap();
+    let ends = &flat.ints[&crate::flat::EDGE_VERTICES];
+    let end = |h: &crate::HoleEdge, last: bool| ends[2 * h.edge + usize::from(h.forward == last)];
+    for (k, h) in hole.edges.iter().enumerate() {
+        let next = &hole.edges[(k + 1) % 12];
+        assert_eq!(end(h, true), end(next, false), "edge {k} ends where the next starts");
+        assert!(h.face < 9);
+    }
+    #[cfg(feature = "native")]
+    {
+        crate::init().unwrap();
+        let b = crate::ffi::make_box(&[0.0; 3], &[60.0, 40.0, 20.0]).map(crate::Brep::made).unwrap();
+        let (h, values) = crate::ffi::ops::blend_setback_open(
+            crate::ffi::ops::BLEND_ROUND,
+            b.cpp().unwrap(),
+            &edges,
+            &[5.0; 3],
+            &[[60.0, 40.0, 20.0]],
+            &[8.0],
+            0.1,
+        )
+        .unwrap();
+        assert_eq!(crate::ffi::counts(&h).unwrap(), [9, 30, 22], "C++ counts");
+        let ours: Vec<i64> =
+            std::iter::once(12).chain(hole.edges.iter().flat_map(|h| [h.edge as i64, h.face as i64, i64::from(h.forward)])).collect();
+        assert_eq!(values, ours, "the hole (C++ vs solidcore)");
+    }
+    // A corner where an edge is not rounded builds no setback, and the refusal names it.
+    let refused = timed("setback_open_refused", move || {
+        let b = Shape::Box([0.0; 3], [60.0, 40.0, 20.0]).core();
+        blend_holes(&b, Blend::Round, &edges[..2], &[5.0; 2], 0.1, &[[60.0, 40.0, 20.0]], &[8.0], Corners::Open).err()
+    });
+    assert_eq!(refused, Some(Error::CornerRefused { corner: 0 }));
 }
 
 /// The capi's argument checks, before any kernel call.
