@@ -538,11 +538,15 @@ impl SavedModel {
             };
             out_features.push(f);
         }
-        let records = json!({
+        let mut records = json!({
             "features": out_features, "states": out_states, "model_bodies": out_bodies, "names": kept_of(names.as_slice(), &names_used),
             "sketches": kept_of(sketches.as_slice(), &sketches_used), "sheets": sheets,
-            "validation": self.records.get("validation").cloned().unwrap_or(Json::Null),
         });
+        // The check mode the results were evaluated under, as the model records it (a model
+        // that records none stays without one: adopting it is refused either way).
+        if let (Some(validation), Some(out)) = (self.records.get("validation"), records.as_object_mut()) {
+            out.insert("validation".into(), validation.clone());
+        }
         let kept: Vec<usize> = (0..self.bodies.len()).filter(|i| kernel_used.get(*i) == Some(&true)).collect();
         let bodies = kept.iter().filter_map(|i| self.bodies.get(*i).cloned()).collect();
         Some((SavedModel { records, bodies }, kept, used))
