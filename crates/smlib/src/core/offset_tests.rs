@@ -443,7 +443,7 @@ cases!(
     draft_one_side,
     draft_one_side_out,
     draft_one_side_hinged_at_the_top,
-    draft_a_curved_face: ignore = "solidcore#1606: Cone::lean_cylinder keeps its cylinder flag, so under cylinder_rebuild_mean_radius the rebuild refuses the cone",
+    draft_a_curved_face,
     draft_a_face_across_the_pull,
 );
 
