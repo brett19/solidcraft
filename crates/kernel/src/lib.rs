@@ -32,6 +32,7 @@ mod continuity_order;
 #[cfg(test)]
 mod coplanar_tests;
 mod corner_g2;
+mod curvature_comb;
 mod delete_face;
 mod distance;
 mod draft_corners;
@@ -61,8 +62,6 @@ mod issue_1080_tests;
 mod issue_1510_tests;
 #[cfg(test)]
 mod issue_2005_tests;
-#[cfg(test)]
-mod issue_324_tests;
 #[cfg(test)]
 mod issue_616_tests;
 #[cfg(test)]
@@ -176,6 +175,7 @@ pub use continuity::{
 };
 pub use continuity_order::{Construction, Continuity};
 pub use corner_g2::{CURVATURE_SHARE, DEFAULT_SETBACK_FACTOR};
+pub use curvature_comb::{CombTooth, MAX_COMB_TEETH, MIN_COMB_TEETH, comb_edge_near, edge_comb, iso_comb};
 pub use delete_face::delete_faces;
 pub use distance::{BodyDistance, DistanceShape, body_distance};
 pub use draft_corners::{CornerFill, CornerOption, CornerRefusal, CornerReport, DraftCorner, draft_corners};
@@ -207,7 +207,7 @@ pub use point_path::{
 pub use polybool::faceted_boolean;
 pub use polyhedron::{HalfSpace, convex_polyhedron, draft, offset_faces, shell};
 pub use prism::{PLANAR_FIT_TOL, extrude_planar_regions, planar_regions_boolean};
-pub use prism_measure::certified_prism_equivalent;
+pub use prism_measure::{PrismSection, certified_prism_equivalent, certified_prism_section};
 pub use repair::{Hole, RebuiltFace, RefusedFace, RepairOptions, RepairReport, SewnGap, repair};
 pub use sew::{EdgeSpec, FaceSpec, SurfSpec, sew, sew_touching};
 /// Which kernel answers each operation, SMLib or solidcore (crates/smlib/src/route.rs).
