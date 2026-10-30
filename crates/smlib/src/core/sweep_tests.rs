@@ -40,6 +40,26 @@ fn circle(center: [f64; 3], axis: [f64; 3], reference: [f64; 3], radius: f64) ->
     Curve::Arc { center, axis, reference, radius, start: 0.0, end: TAU }
 }
 
+/// An arc of radius 5 about the z axis from `reference`, from `start` to `end`.
+fn arc5(reference: [f64; 3], start: f64, end: f64) -> Curve {
+    Curve::Arc { center: [0.0; 3], axis: Z, reference, radius: 5.0, start, end }
+}
+
+/// The circle of radius 5 about the z axis as two half arcs in one frame.
+fn halves() -> Vec<Curve> {
+    vec![arc5([1.0, 0.0, 0.0], 0.0, PI), arc5([1.0, 0.0, 0.0], PI, TAU)]
+}
+
+/// The circle of radius 5 about the z axis as a quarter from +x and three quarters from +y.
+fn two_frames() -> Vec<Curve> {
+    vec![arc5([1.0, 0.0, 0.0], 0.0, FRAC_PI_2), arc5([0.0, 1.0, 0.0], 0.0, 3.0 * FRAC_PI_2)]
+}
+
+/// The upper half disc of radius 5 about the z axis, its arc in two quarters.
+fn half_disc() -> Vec<Curve> {
+    vec![arc5([1.0, 0.0, 0.0], 0.0, FRAC_PI_2), arc5([1.0, 0.0, 0.0], FRAC_PI_2, PI), line([-5.0, 0.0, 0.0], [5.0, 0.0, 0.0])]
+}
+
 /// The rectangle from x = 5 to 8 and z = 0 to 4 in the plane y = 0: area 12, centroid at x 6.5.
 fn ring_section() -> Vec<Curve> {
     polygon(&[[5.0, 0.0, 0.0], [8.0, 0.0, 0.0], [8.0, 0.0, 4.0], [5.0, 0.0, 4.0]])
@@ -106,6 +126,15 @@ fn case(name: &str) -> Case {
         "extrude_rectangle" => c(Op::Extrude(rect, Z, 10.0, 0.0, DraftCorner::default(), true), Expect::Volume(6000.0)),
         // V = π r² h.
         "extrude_circle" => c(Op::Extrude(disc(), Z, 10.0, 0.0, DraftCorner::default(), true), Expect::Volume(250.0 * PI)),
+        // A circle drawn in two halves (split where another sketch curve ends on it), the
+        // pieces in the circle's own frame: one wall, as the whole circle sweeps (smlib 7dee48f).
+        "extrude_circle_in_two_halves" => c(Op::Extrude(halves(), Z, 10.0, 0.0, DraftCorner::default(), true), Expect::Volume(250.0 * PI)),
+        // The same circle as a quarter and three quarters each in its own frame: one wall still,
+        // its seam in the middle of the longer piece.
+        "extrude_circle_in_two_frames" => c(Op::Extrude(two_frames(), Z, 10.0, 0.0, DraftCorner::default(), true), Expect::Volume(250.0 * PI)),
+        // A half disc whose arc is drawn in two quarters, closed by its diameter: the quarters
+        // sweep one wall. V = π r² h / 2.
+        "extrude_half_disc_split_arc" => c(Op::Extrude(half_disc(), Z, 10.0, 0.0, DraftCorner::default(), true), Expect::Volume(125.0 * PI)),
         // Leaning in by θ, the walls' offsets overlap at the corners and are trimmed where they
         // cross, under every rule: the frustum from side 20 to 20 - 2 h tanθ.
         "extrude_square_drafted_round" => {
@@ -404,6 +433,9 @@ cases!(
     planar_faces_with_a_hole,
     extrude_rectangle,
     extrude_circle,
+    extrude_circle_in_two_halves,
+    extrude_circle_in_two_frames,
+    extrude_half_disc_split_arc[ignore = "solidcore sweeps a partial arc to a surface of extrusion (exported as a rational spline), the C++ kernel to a cylinder; a single half arc does the same"],
     extrude_square_drafted_round,
     extrude_square_drafted_curvature,
     extrude_circle_drafted,
@@ -422,6 +454,55 @@ cases!(
     screw_sweep_square_thread,
     screw_sweep_radial_taper,
 );
+
+/// Arcs of a profile on one circle sweep one wall face (tangency-labs/smlib 7dee48f): a circle
+/// in two pieces extrudes to the faces, edges and vertices of the whole circle (two caps and one
+/// cylinder: 3 faces, 3 edges with the seam, 2 vertices) and the area 2πr² + 2πrh; a half disc
+/// whose arc is in two quarters to its diameter's plane wall and one cylinder (4 faces, 6 edges,
+/// 4 vertices) and the area πr² + πrh + 2rh. On solidcore, and with SMLib built on the C++ kernel.
+#[test]
+fn arcs_on_one_circle_sweep_one_wall() {
+    let cases = [
+        ("extrude_circle_in_two_halves", [3, 3, 2], 50.0 * PI + 100.0 * PI, true),
+        ("extrude_circle_in_two_frames", [3, 3, 2], 50.0 * PI + 100.0 * PI, true),
+        // solidcore sweeps a partial arc, merged or drawn whole, to a surface of extrusion (a
+        // rational spline in the record) where the C++ kernel makes a cylinder: one wall still.
+        ("extrude_half_disc_split_arc", [4, 6, 4], 25.0 * PI + 50.0 * PI + 100.0, false),
+    ];
+    let walls = |kinds: &BTreeMap<String, usize>| kinds.iter().filter(|(k, _)| !k.starts_with("plane")).map(|(_, n)| *n).sum::<usize>();
+    for (name, want_counts, want_area, cylinder_on_core) in cases {
+        let (counts_got, kinds_got, area_got) = timed(name, move || {
+            let body = on_core(&case(name).op).unwrap_or_else(|e| panic!("{name}: {e}"));
+            let (rec, _) = native(&to_arrays(&body).unwrap()).unwrap();
+            (counts(&body).unwrap(), kinds(&rec), area(&body, 1e-8).unwrap())
+        });
+        assert_eq!(counts_got, want_counts, "{name}: solidcore faces, edges, vertices");
+        assert_eq!(walls(&kinds_got), 1, "{name}: solidcore curved walls {kinds_got:?}");
+        if cylinder_on_core {
+            assert_eq!(kinds_got.get("cylinder"), Some(&1), "{name}: solidcore walls {kinds_got:?}");
+        }
+        assert!(rel(area_got, want_area) < 1e-9, "{name}: solidcore area {area_got} vs analytic {want_area}");
+        #[cfg(feature = "native")]
+        {
+            use crate::{Brep, ffi};
+            crate::sweeps::ON_CPP.with(|c| c.set(true));
+            let r = match case(name).op {
+                Op::Extrude(p, d, dist, draft, corner, cap) => Brep::extrude(&p, d, dist, draft, corner, cap),
+                op => panic!("{name}: {op:?}"),
+            };
+            crate::sweeps::ON_CPP.with(|c| c.set(false));
+            let b = r.unwrap_or_else(|e| panic!("{name}: C++: {e}"));
+            let h = b.cpp().unwrap();
+            let n = ffi::counts(h).unwrap().map(|x| usize::try_from(x).unwrap());
+            let (rec, _) = native(&b.cpp_arrays().unwrap()).unwrap();
+            assert_eq!(n, want_counts, "{name}: C++ faces, edges, vertices");
+            assert_eq!(walls(&kinds(&rec)), 1, "{name}: C++ curved walls {:?}", kinds(&rec));
+            assert_eq!(kinds(&rec).get("cylinder"), Some(&1), "{name}: C++ walls {:?}", kinds(&rec));
+            let a = ffi::measure::area(h, 1e-8).unwrap();
+            assert!(rel(a, want_area) < 1e-9, "{name}: C++ area {a} vs analytic {want_area}");
+        }
+    }
+}
 
 fn near(a: [f64; 3], b: [f64; 3]) -> bool {
     a.iter().zip(&b).all(|(x, y)| (x - y).abs() < 1e-9)

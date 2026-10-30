@@ -1,6 +1,7 @@
 //! Extrusions, revolutions, sweeps, lofts and planar faces on solidcore: the C API's logic round
 //! SM_API's sweeps, ported from the fork's `capi/src/smlib_sweeps.cpp` (`coord_ok`, `unit`,
-//! `line`, `arc`, `nurbs`, `parse`, `finish`, `one_loop`, `straight`, `circular`, `joined`,
+//! `line`, `arc`, `nurbs`, `parse`, `finish`, `one_loop`, `FlatArc`, `one_circle`, `angle_on`,
+//! `one_wall_per_circle`, `straight`, `circular`, `joined`,
 //! `put_motion`, `turned`, `Rigid`, `Segment`, `segmented`, `carried`, `piecewise`, `maps_ok`, `placed`, `put_curve`, and the entry points
 //! `smlib_planar_faces`, `smlib_extrude`, `smlib_revolve`, `smlib_sweep_placed`, `smlib_loft`,
 //! `smlib_loft_to_point`, `smlib_sweep_stations`, `smlib_project_curves`, `smlib_face_section`,
@@ -26,7 +27,7 @@ use solidcore::curve::ellipse::Ellipse;
 use solidcore::curve::line::Line;
 use solidcore::geom::axis2_placement::Axis2Placement;
 use solidcore::geom::extent1d::Extent1d;
-use solidcore::geom::tol::USE_DEFAULT;
+use solidcore::geom::tol::{SmallTopoType, USE_DEFAULT, context_zone_tol_3d};
 use solidcore::geom::vector3d::{Point3, Vec3};
 use solidcore::heal::stitch::p1::api_stitch_into_solid;
 use solidcore::kernel::Kernel;
@@ -262,6 +263,174 @@ fn one_loop(k: &Kernel, curves: &[Curve], tol: f64) -> solidcore::Result<bool> {
     Ok(matches!((first, prev), (Some(f), Some(p)) if (p - f).length() <= tol))
 }
 
+/// `FlatArc`: an arc of a curve list as numbers, its frame, radius and angles.
+#[derive(Clone, Copy)]
+struct FlatArc {
+    centre: Vec3,
+    axis: Vec3,
+    reference: Vec3,
+    radius: f64,
+    start: f64,
+    sweep: f64,
+}
+
+impl FlatArc {
+    /// `flat_arc`: the arc's numbers, its axis and reference made unit (`parse` has checked
+    /// that they can be); `None` for a curve that is no arc.
+    fn of(c: &Profile) -> Option<FlatArc> {
+        let Profile::Arc { center, axis, reference, radius, start, end } = c else { return None };
+        Some(FlatArc {
+            centre: v3(*center),
+            axis: unit(*axis).unwrap_or_else(|| v3(*axis)),
+            reference: unit(*reference).unwrap_or_else(|| v3(*reference)),
+            radius: *radius,
+            start: *start,
+            sweep: end - start,
+        })
+    }
+
+    /// The point at angle `t` (radians from the reference, counter-clockwise about the axis).
+    fn at(&self, t: f64) -> Point3 {
+        let y = self.axis.cross(self.reference);
+        self.centre + self.reference * (self.radius * t.cos()) + y * (self.radius * t.sin())
+    }
+
+    /// `angle_on`: the angle of `p` on this arc's circle, in its frame (radians, in [0, 2π)).
+    fn angle_on(&self, p: Point3) -> f64 {
+        let d = p - self.centre;
+        let y = self.axis.cross(self.reference);
+        let t = d.dot(y).atan2(d.dot(self.reference));
+        if t < 0.0 { t + TAU } else { t }
+    }
+}
+
+/// `one_circle`: whether arcs `a` and `b` lie on one circle to `tol`: centres and radii within
+/// it, and the axes alike (the same way round) to within it at the rim.
+fn one_circle(a: &FlatArc, b: &FlatArc, tol: f64) -> bool {
+    (a.centre - b.centre).length() <= tol
+        && (a.radius - b.radius).abs() <= tol
+        && a.axis.dot(b.axis) > 0.0
+        && a.axis.cross(b.axis).length() * a.radius.max(b.radius) <= tol
+}
+
+/// `one_wall_per_circle` (tangency-labs/smlib 7dee48f): the profile `curves` (parsed from
+/// `given`) with each run of consecutive arcs on one circle within a loop made one arc, so that
+/// the run's wall is one face as a single arc's is: a circle drawn in pieces (split where another
+/// sketch curve ends on it) sweeps the one cylinder it lies on, not a face per piece meeting the
+/// next along a line that is no edge of the shape. A run that is its whole loop is the full
+/// circle, swept as a plain circle is: one periodic face, its seam the one edge it uses twice.
+/// The seam goes where a plain circle has it: when the arcs are pieces of one drawn circle (they
+/// share its frame, the reference direction their angles are measured from), at that circle's
+/// own start, angle 0 of that frame; otherwise at the middle of the run's longest arc (the first
+/// of equal ones, in profile order). `tol` is the model's zone tolerance, within which
+/// consecutive curves already meet.
+fn one_wall_per_circle(k: &Kernel, given: &[Profile], curves: Vec<Curve>, tol: f64) -> solidcore::Result<Out<Vec<Curve>>> {
+    let n = curves.len();
+    if given.len() != n {
+        return Ok(Err(Error::Argument));
+    }
+    let arcs: Vec<Option<FlatArc>> = given.iter().map(FlatArc::of).collect();
+    let (mut head, mut tail) = (Vec::with_capacity(n), Vec::with_capacity(n));
+    for c in &curves {
+        let (a, b) = ends(k, c)?;
+        head.push(a);
+        tail.push(b);
+    }
+    // Whether the end of curve `i` meets the start of curve `j`; whether arc `j` goes on from
+    // arc `i`, on its circle.
+    let meets = |i: usize, j: usize| matches!((tail.get(i), head.get(j)), (Some(t), Some(h)) if (*t - *h).length() <= tol);
+    let arc_of = |i: usize| arcs.get(i).copied().flatten();
+    let joins = |i: usize, j: usize| match (arc_of(i), arc_of(j)) {
+        (Some(a), Some(b)) => meets(i, j) && one_circle(&a, &b, tol),
+        _ => false,
+    };
+    let mut taken: Vec<Option<Curve>> = curves.into_iter().map(Some).collect();
+    let mut take = |i: usize| taken.get_mut(i).and_then(Option::take).ok_or(Error::Argument);
+    let mut out = Vec::with_capacity(n);
+    let mut first = 0;
+    while first < n {
+        // The loop from `first`: its curves run end to end until one ends at its start.
+        let mut last = first;
+        while last + 1 < n && !meets(last, first) && meets(last, last + 1) {
+            last += 1;
+        }
+        let len = last - first + 1;
+        let closed = meets(last, first);
+        // Whether two of the loop's arcs go on on one circle.
+        let mut any = false;
+        let mut j = 0;
+        while j + 1 < len || (closed && len > 1 && j < len) {
+            any = any || joins(first + j, first + (j + 1) % len);
+            j += 1;
+        }
+        if !any {
+            for i in first..=last {
+                match take(i) {
+                    Ok(c) => out.push(c),
+                    Err(e) => return Ok(Err(e)),
+                }
+            }
+            first = last + 1;
+            continue;
+        }
+        // A run starts where its curve does not go on from the one before it round the loop.
+        let mut begin = 0;
+        if closed {
+            while begin < len && joins(first + (begin + len - 1) % len, first + begin) {
+                begin += 1;
+            }
+        }
+        if begin == len {
+            // The whole loop is arcs of one circle: the full circle, its seam at the drawn
+            // circle's start when the arcs share its frame, else at the middle of the longest arc.
+            let Some(a) = arc_of(first) else { return Ok(Err(Error::Argument)) };
+            let mut one_frame = true;
+            let mut longest = a;
+            for i in first..=last {
+                let Some(b) = arc_of(i) else { return Ok(Err(Error::Argument)) };
+                one_frame = one_frame && (b.reference - a.reference).length() * a.radius <= tol;
+                if b.sweep > longest.sweep {
+                    longest = b;
+                }
+            }
+            let seam = if one_frame { 0.0 } else { a.angle_on(longest.at(longest.start + 0.5 * longest.sweep)) };
+            let p = |v: Vec3| [v.x, v.y, v.z];
+            match arc(k, p(a.centre), p(a.axis), p(a.reference), a.radius, seam, seam + TAU) {
+                Ok(c) => out.push(c),
+                Err(e) => return Ok(Err(e)),
+            }
+        } else {
+            let mut kk = 0;
+            while kk < len {
+                let i = first + (begin + kk) % len;
+                // The arcs i, i + 1, ... round the loop that go on on its circle.
+                let mut m = 1;
+                while kk + m < len && joins(first + (begin + kk + m - 1) % len, first + (begin + kk + m) % len) {
+                    m += 1;
+                }
+                if m == 1 {
+                    match take(i) {
+                        Ok(c) => out.push(c),
+                        Err(e) => return Ok(Err(e)),
+                    }
+                } else {
+                    let (Some(a), Some(&h)) = (arc_of(i), head.get(i)) else { return Ok(Err(Error::Argument)) };
+                    let sweep: f64 = (0..m).filter_map(|j| arc_of(first + (begin + kk + j) % len)).map(|b| b.sweep).sum();
+                    let start = a.angle_on(h);
+                    let p = |v: Vec3| [v.x, v.y, v.z];
+                    match arc(k, p(a.centre), p(a.axis), p(a.reference), a.radius, start, start + sweep) {
+                        Ok(c) => out.push(c),
+                        Err(e) => return Ok(Err(e)),
+                    }
+                }
+                kk += m;
+            }
+        }
+        first = last + 1;
+    }
+    Ok(Ok(out))
+}
+
 /// Runs a call that makes a new body: the kernel locked, its own status as the capi passes it.
 fn making(call: &'static str, f: impl FnOnce(&mut Kernel) -> solidcore::Result<Out<Brep>>) -> Result<Body> {
     run(call, f)?.map(Body::new)
@@ -307,13 +476,20 @@ pub(crate) fn extrude(profile: &[Profile], direction: [f64; 3], distance: f64, d
             Ok(c) => c,
             Err(e) => return Ok(Err(e)),
         };
-        let refs: Vec<Option<&Curve>> = curves.iter().map(Some).collect();
         if draft == 0.0 {
+            // The fork's capi (7dee48f): arcs of a loop on one circle sweep one wall.
+            let tol = context_zone_tol_3d(k, None, SmallTopoType::NormalSize);
+            let walls = match one_wall_per_circle(k, profile, curves, tol)? {
+                Ok(w) => w,
+                Err(e) => return Ok(Err(e)),
+            };
+            let refs: Vec<Option<&Curve>> = walls.iter().map(Some).collect();
             return match create_linear_sweep(k, &refs, dir, distance, cap) {
                 Ok(r) => finish(r, cap),
                 Err(e) => Ok(Err(status(e))),
             };
         }
+        let refs: Vec<Option<&Curve>> = curves.iter().map(Some).collect();
         // SMLib's draft extrusion takes a single chain of curves, square to the extrusion: the
         // height's sign picks the side, matched to `direction` here.
         if !one_loop(k, &curves, 1e-6)? {
