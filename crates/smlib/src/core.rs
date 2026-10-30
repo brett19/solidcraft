@@ -49,8 +49,8 @@ impl Body {
 
 /// The fixes this backend runs with: every one of solidcore's opt-in fixes of upstream SMLib
 /// defects (`UpstreamFixes`, each naming its record and issue). They are all fixes; the C++ fork
-/// carries most of them in its own sources. A test checks none is left off, so moving the
-/// solidcore pin to a rev with a new flag fails until it is added here.
+/// carries most of them in its own sources. A test checks none is left off but those in
+/// `HELD_BACK`, so moving the solidcore pin to a rev with a new flag fails until it is added here.
 pub(crate) fn fixes() -> UpstreamFixes {
     let mut f = UpstreamFixes::default();
     f.fillet_retry_radius_as_first = true;
@@ -178,8 +178,16 @@ pub(crate) fn fixes() -> UpstreamFixes {
     f.torus_check_reads_v_interval = true;
     f.torus_check_spindle_apex = true;
     f.local_operation_step_walls = true;
+    f.edge_check_orders_tangent_faces = true;
+    f.revolve_arc_touching_axis_is_horn_torus = true;
     f
 }
+
+/// Opt-in fixes left off because the C++ fork (`SMLIB_REV`) does not carry them yet, so turning
+/// them on would part this backend from the C++ one. `precise_properties_trim_base_v`
+/// (solidcore#1664, WR-563) has no fork commit.
+#[cfg(test)]
+const HELD_BACK: &[&str] = &["precise_properties_trim_base_v"];
 
 fn fresh() -> Kernel {
     let mut k = Kernel::new(&KernelOptions::default());
@@ -315,7 +323,12 @@ mod tests {
     #[test]
     fn every_upstream_fix_is_on() {
         let f = format!("{:?}", fixes());
-        assert!(!f.contains(": false"), "an UpstreamFixes flag is off: {f}");
+        let off: Vec<&str> =
+            f.split([',', '{', '}']).filter_map(|kv| kv.trim().strip_suffix(": false")).filter(|name| !HELD_BACK.contains(name)).collect();
+        assert!(off.is_empty(), "UpstreamFixes flags are off: {off:?}");
+        for name in HELD_BACK {
+            assert!(f.contains(&format!("{name}: false")), "{name} is on or gone: drop it from HELD_BACK");
+        }
     }
 
     #[test]
