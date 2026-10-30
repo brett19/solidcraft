@@ -555,7 +555,6 @@ fn a_lofted_wall_section_is_the_line_across_it() {
 /// The plane z = 3 through the side of a cylinder of radius 5 and height 10 on the xy plane: the
 /// circle of radius 5 at z = 3, 2π·5 long.
 #[test]
-#[ignore = "smlib_face_section calls CreatePlanarSectionCurves with bForceUVClassify left FALSE, so an analytic face's section (no UV curve) is trimmed away and the capi reports SMLIB_ERR_EMPTY, on the C++ kernel too (the_cpp_kernel_sections_a_face_alike)"]
 fn a_cylinder_side_section_is_its_circle() {
     let got = timed("section", || {
         let b = make_cylinder([0.0; 3], 5.0, 10.0).unwrap();
@@ -570,9 +569,24 @@ fn a_cylinder_side_section_is_its_circle() {
     assert!((len - TAU * 5.0).abs() < 1e-4, "{len} against {}", TAU * 5.0);
 }
 
-/// The same sections on the C++ kernel: the lofted wall's line along the same points, and on a
-/// box's top and a cylinder's side, whose analytic intersectors make no UV curves, the same
-/// [`Error::Empty`].
+/// The plane x = 5 through the top of a 10 mm box: the line (5, 0, 10)-(5, 10, 10) across it.
+#[test]
+fn a_box_top_section_is_the_line_across_it() {
+    let got = timed("section", || {
+        let b = make_box([0.0; 3], [10.0; 3]).unwrap();
+        face_section(&b, [5.0, 5.0, 10.0], 0.01, [5.0, 5.0, 5.0], [1.0, 0.0, 0.0], 1e-7)
+    })
+    .unwrap();
+    let p = samples(&got, 8);
+    assert!(p.iter().flatten().all(|q| (q[0] - 5.0).abs() < 1e-9 && (q[2] - 10.0).abs() < 1e-9), "{p:?}");
+    let len = length(&p);
+    assert!((len - 10.0).abs() < 1e-6, "{len} against 10");
+}
+
+/// The same sections on the C++ kernel: the lofted wall's line along the same points. On a box's
+/// top and a cylinder's side, whose analytic intersectors make no UV curves, the capi leaves
+/// `bForceUVClassify` FALSE and answers [`Error::Empty`] (solidcore#1769), where the port has the
+/// section.
 #[cfg(feature = "native")]
 #[test]
 fn the_cpp_kernel_sections_a_face_alike() {
@@ -610,11 +624,11 @@ fn the_cpp_kernel_sections_a_face_alike() {
         let got = face_section(&core(), face, 0.01, through, n, 1e-6);
         let (got, want) = match (got, want) {
             (Ok(g), Ok(w)) => (g, w),
-            (g, w) => {
-                assert_eq!(g.err(), w.err(), "{name}");
-                assert!(name != "loft", "the loft's wall has its section");
+            (Ok(g), Err(Error::Empty)) if name != "loft" => {
+                assert!(!g.is_empty(), "{name}: the port has the section the capi drops");
                 continue;
             }
+            (g, w) => panic!("{name}: {:?} against {:?}", g.err(), w.err()),
         };
         assert_eq!(got.len(), want.len(), "{name}: {got:?} against {want:?}");
         let (g, w) = (samples(&got, 64), samples(&want, 64));

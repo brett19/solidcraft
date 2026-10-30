@@ -1516,9 +1516,14 @@ pub(crate) fn face_section(
             Ok(f) => f,
             Err(e) => return Ok(Err(e)),
         };
+        // UV curves are asked for, so the classify is forced: an analytic face's intersector
+        // makes none, and without it the trim drops the whole section (SmBrep.h documents the
+        // flag for this). The capi leaves it FALSE, so the C++ kernel answers Empty on planes,
+        // cylinders, cones and spheres (solidcore#1769).
         let opts = PlanarSectionOptions {
             approx_tol_3d: Some(tolerance),
             outputs: SectionOutputs { curves_3d: true, uv_curves: true, faces: true },
+            force_uv_classify: true,
             ..PlanarSectionOptions::default()
         };
         let made = match create_planar_section_curves(k, b, v3(plane_point), normal, &opts) {
