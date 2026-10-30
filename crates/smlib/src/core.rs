@@ -198,6 +198,10 @@ pub(crate) fn fixes() -> UpstreamFixes {
     f.linear_sweep_arc_is_cylinder = true;
     f.offset_closes_loop_gaps = true;
     f.cylinder_plane_tangent_within_tolerance = true;
+    f.boolean_wire_edge_keeps_faceuse_shell = true;
+    f.fillet_nx1_tangent_corner_edge = true;
+    f.fillet_torus_rail_on_axis = true;
+    f.loops_go_on_round_the_vertex = true;
     f
 }
 
@@ -206,13 +210,15 @@ pub(crate) fn fixes() -> UpstreamFixes {
 /// (solidcore#1664, WR-563), `bspline_trim_keeps_rational_end_spans` (solidcore#1711, WR-575) and
 /// `fillet_blend_curve_revolved_on_arc` (solidcore#1759, WR-581, an own design waiting for the
 /// fork's fix) have no fork commit. `face_tight_box_searches_trim` (solidcore#1811, WR-588) is the
-/// fork's beb6061, which landed after `SMLIB_REV` (tangency-labs/smlib#68).
+/// fork's beb6061, which landed after `SMLIB_REV` (tangency-labs/smlib#68). `fillet_trim_status`
+/// (solidcore#674, WR-604) has no fork commit.
 #[cfg(test)]
 const HELD_BACK: &[&str] = &[
     "precise_properties_trim_base_v",
     "bspline_trim_keeps_rational_end_spans",
     "fillet_blend_curve_revolved_on_arc",
     "face_tight_box_searches_trim",
+    "fillet_trim_status",
 ];
 
 fn fresh() -> Kernel {
