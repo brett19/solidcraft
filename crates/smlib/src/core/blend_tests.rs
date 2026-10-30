@@ -510,19 +510,54 @@ fn the_first_distance_goes_on_the_face_along_first() {
 /// the two results' histories must be the same.
 #[cfg(feature = "native")]
 mod history {
+    use solidcraft_geom::brep::history::Change;
+
+    use crate::history::Raw;
     use crate::{Blend, Brep, ffi};
+
+    /// A 20 x 30 x 10 box, tagged as operand 0, with `kind` of `size` on its top front edge
+    /// (y = 0, z = 10), on both kernels: solidcore's history, then the C++ kernel's.
+    fn one_edge(kind: Blend, size: f64) -> (Raw, Raw) {
+        crate::init().unwrap();
+        let a = Brep::made(ffi::make_box(&[0.0; 3], &[20.0, 30.0, 10.0]).unwrap()).tagged(0).unwrap();
+        let edge = [[10.0, 0.0, 10.0]];
+        let code = match kind {
+            Blend::Round => ffi::ops::BLEND_ROUND,
+            Blend::Curvature => ffi::ops::BLEND_CURVATURE,
+            Blend::Chord => ffi::ops::BLEND_CHORD,
+            Blend::Chamfer => ffi::ops::BLEND_CHAMFER,
+        };
+        let cpp = ffi::ops::blend(code, a.cpp().unwrap(), &edge, &[size], super::TOL).unwrap();
+        let cpp = Brep::made(cpp).history().unwrap();
+        let core = super::blend(a.core().unwrap(), kind, &edge, &[size], super::TOL, &[], &[], super::Corners::Filled).unwrap();
+        (Brep::made_core(core).history().unwrap(), cpp)
+    }
+
+    /// The changes of `h`'s faces, sorted: one blend of one box edge leaves the bottom and back
+    /// as they were, trims the top, front and both sides, and makes the blend face.
+    fn changes(h: &Raw) -> Vec<Change> {
+        let mut c: Vec<Change> = h.faces.iter().map(|f| f.change).collect();
+        c.sort_by_key(|c| *c as u8);
+        c
+    }
+
+    fn check(kind: Blend, size: f64) {
+        let (core, cpp) = one_edge(kind, size);
+        let want = [Change::Kept, Change::Kept, Change::Modified, Change::Modified, Change::Modified, Change::Modified, Change::Generated];
+        assert_eq!(changes(&cpp), want, "C++ {kind:?}: {cpp:?}");
+        assert_eq!(core.canonical(), cpp.canonical(), "{kind:?}");
+    }
 
     /// A 2 mm round on the top front edge of a box: the top and front are trimmed, the round is
     /// new.
     #[test]
-    #[ignore = "solidcore#1594: the fillet does not carry the body's attributes onto the faces it rebuilds (the top, front and sides come out Generated)"]
     fn tags_cross_a_fillet() {
-        crate::init().unwrap();
-        let a = Brep::made(ffi::make_box(&[0.0; 3], &[20.0, 30.0, 10.0]).unwrap()).tagged(0).unwrap();
-        let edge = [[10.0, 0.0, 10.0]];
-        let cpp = ffi::ops::blend(ffi::ops::BLEND_ROUND, a.cpp().unwrap(), &edge, &[2.0], super::TOL).unwrap();
-        let cpp = Brep::made(cpp).history().unwrap();
-        let core = super::blend(a.core().unwrap(), Blend::Round, &edge, &[2.0], super::TOL, &[], &[], super::Corners::Filled).unwrap();
-        assert_eq!(Brep::made_core(core).history().unwrap().canonical(), cpp.canonical());
+        check(Blend::Round, 2.0);
+    }
+
+    /// A 2 mm chamfer on the same edge: the same faces kept, trimmed and made as the round.
+    #[test]
+    fn tags_cross_a_chamfer() {
+        check(Blend::Chamfer, 2.0);
     }
 }

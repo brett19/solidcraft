@@ -236,9 +236,6 @@ pub struct Brep {
     /// `Some(k)` for [`Brep::tagged`]`(k)`: its faces and edges stand for their own positions in
     /// operand `k`, so the body converted for the other kernel is tagged the same way there.
     operand: Option<usize>,
-    /// Why [`Brep::history`] cannot be read, for a body made by a solidcore operation that does
-    /// not carry the attributes yet.
-    untracked: Option<&'static str>,
 }
 
 impl std::fmt::Debug for Brep {
@@ -250,18 +247,12 @@ impl std::fmt::Debug for Brep {
 impl Brep {
     /// A body the C++ kernel made.
     fn made(h: ffi::Handle) -> Brep {
-        Brep { cpp: OnceLock::from(Ok(h)), core: OnceLock::new(), maker: route::Backend::Smlib, operand: None, untracked: None }
+        Brep { cpp: OnceLock::from(Ok(h)), core: OnceLock::new(), maker: route::Backend::Smlib, operand: None }
     }
 
     /// A body solidcore made.
     fn made_core(b: core::Body) -> Brep {
-        Brep { cpp: OnceLock::new(), core: OnceLock::from(Ok(b)), maker: route::Backend::Solidcore, operand: None, untracked: None }
-    }
-
-    /// A body a solidcore blend made: solidcore's fillets do not carry the body's attributes onto
-    /// the faces they rebuild yet (solidcore#1594), so its history is not read.
-    fn made_core_blend(b: core::Body) -> Brep {
-        Brep { untracked: Some("the history of a blend on solidcore (solidcore#1594)"), ..Brep::made_core(b) }
+        Brep { cpp: OnceLock::new(), core: OnceLock::from(Ok(b)), maker: route::Backend::Solidcore, operand: None }
     }
 
     /// The C++ kernel's body: converted from solidcore's the first time it is asked for (and

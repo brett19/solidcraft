@@ -280,7 +280,7 @@ impl Brep {
         }
         if route::Op::Blend.backend() == route::Backend::Solidcore {
             return core::blend::blend_holes(self.core()?, kind, edges, sizes, tolerance, corners, setbacks, core::blend::Corners::Open)
-                .map(|(b, holes)| (Brep::made_core_blend(b), holes));
+                .map(|(b, holes)| (Brep::made_core(b), holes));
         }
         init()?;
         let kind = match kind {
@@ -301,7 +301,7 @@ impl Brep {
     /// (the edge curve's parameter scaled to 0..1).
     pub fn fillet_variable(&self, edge: [f64; 3], tolerance: f64, start: [f64; 3], degree: usize, knots: &[f64], radii: &[f64]) -> Result<Brep> {
         if route::Op::Blend.backend() == route::Backend::Solidcore {
-            return core::blend::fillet_variable(self.core()?, edge, tolerance, start, degree, knots, radii).map(Brep::made_core_blend);
+            return core::blend::fillet_variable(self.core()?, edge, tolerance, start, degree, knots, radii).map(Brep::made_core);
         }
         init()?;
         let degree = i32::try_from(degree).map_err(|_| Error::Argument)?;
@@ -321,7 +321,7 @@ impl Brep {
             return Err(Error::Argument);
         }
         if route::Op::Blend.backend() == route::Backend::Solidcore {
-            return core::blend::chamfer_sides(self.core()?, edges, tolerance, distance, second, first).map(Brep::made_core_blend);
+            return core::blend::chamfer_sides(self.core()?, edges, tolerance, distance, second, first).map(Brep::made_core);
         }
         init()?;
         let (value, angle) = match second {
@@ -417,7 +417,7 @@ impl Brep {
         if edges.len() > MAX_POINTS || edges.is_empty() {
             return Err(Error::Argument);
         }
-        core::blend::blend(self.core()?, kind, edges, sizes, tolerance, corners, setbacks, open).map(Brep::made_core_blend)
+        core::blend::blend(self.core()?, kind, edges, sizes, tolerance, corners, setbacks, open).map(Brep::made_core)
     }
 
     fn pick_op(&self, kind: ffi::ops::Pick, points: &[[f64; 3]], tolerance: f64, size: f64, allow_none: bool) -> Result<Brep> {

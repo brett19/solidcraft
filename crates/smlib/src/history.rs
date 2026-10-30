@@ -87,9 +87,6 @@ impl Brep {
     /// that made the body: the tags never cross between them.
     pub fn history(&self) -> Result<Raw> {
         if self.maker == route::Backend::Solidcore {
-            if let Some(what) = self.untracked {
-                return Err(Error::Solidcore(format!("smlib_history_read: not supported yet: {what}")));
-            }
             return core::history::read(self.core()?);
         }
         let v = ffi::history::read(self.cpp()?).map_err(error)?;
