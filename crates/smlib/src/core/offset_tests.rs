@@ -612,7 +612,6 @@ mod history {
     /// A 5 degree draft of the front about the bottom plane: the front tilts, its neighbours'
     /// edges move with it.
     #[test]
-    #[ignore = "solidcore's draft (its local operation) does not carry the body's attributes yet: every face comes out untagged"]
     fn tags_cross_a_draft() {
         let a = tagged_box();
         let front = [[10.0, 0.0, 5.0]];

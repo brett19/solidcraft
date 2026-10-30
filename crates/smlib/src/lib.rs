@@ -264,12 +264,6 @@ impl Brep {
         Brep { untracked: Some("the history of a blend on solidcore (solidcore#1594)"), ..Brep::made_core(b) }
     }
 
-    /// A body a solidcore draft made: its local operation does not carry the body's attributes
-    /// yet (every face comes out with none), so its history is not read.
-    fn made_core_draft(b: core::Body) -> Brep {
-        Brep { untracked: Some("the history of a draft on solidcore, whose local operation does not carry attributes yet"), ..Brep::made_core(b) }
-    }
-
     /// The C++ kernel's body: converted from solidcore's the first time it is asked for (and
     /// tagged as solidcore's is, for a [`Brep::tagged`] body).
     fn cpp(&self) -> Result<&ffi::Handle> {

@@ -396,7 +396,7 @@ impl Brep {
             return Err(Error::Argument);
         }
         if route::Op::Split.backend() == route::Backend::Solidcore {
-            return core::offset::draft(self.core()?, faces, tolerance, neutral_origin, neutral_normal, pull, angle).map(Brep::made_core_draft);
+            return core::offset::draft(self.core()?, faces, tolerance, neutral_origin, neutral_normal, pull, angle).map(Brep::made_core);
         }
         init()?;
         ffi::ops::draft(self.cpp()?, faces, tolerance, &neutral_origin, &neutral_normal, &pull, angle).map(Brep::made).map_err(pick_error)
