@@ -139,6 +139,7 @@ mod surfaces;
 mod sweep_path;
 #[cfg(test)]
 mod sweep_rails_tests;
+mod tangent_edge;
 mod tess;
 #[cfg(test)]
 mod thin_face_tests;
@@ -154,8 +155,8 @@ mod validity;
 pub mod watch;
 
 pub use blend::{
-    ChamferSide, blend_edges, chamfer, chamfer_max, chamfer_sides, fillet, fillet_each, fillet_g2, fillet_g2_corners, fillet_least_setback,
-    fillet_max, fillet_max_each, fillet_setback, tangent_chain,
+    ChamferSide, blend_edges, chamfer, chamfer_max, chamfer_sides, fillet, fillet_each, fillet_g2, fillet_g2_corners, fillet_g2_with_g2_corners,
+    fillet_least_setback, fillet_max, fillet_max_each, fillet_setback, tangent_chain,
 };
 pub use blend_corner::fillet_radii;
 pub use blend_variable::{RadiusSpline, Taper, fillet_chord, fillet_tapered, fillet_variable, fillet_variable_points, fillet_variable_spline, taper};
