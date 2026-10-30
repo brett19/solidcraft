@@ -1127,7 +1127,8 @@ fn surface_of_revolution_sense_follows_iso() {
 
 /// A tube revolved about a line it touches (a horn torus, as a tight sweep makes) is written as
 /// one rational B-spline face whose loop passes the pole twice, with no zero-length edge there:
-/// no TOROIDAL_SURFACE (it would be degenerate) and no surface of revolution.
+/// no TOROIDAL_SURFACE (it would be degenerate) and no surface of revolution. (Its volume, built
+/// and read back, is the rig's import/cov-step-horn-torus-quarter-round-trip.)
 #[test]
 fn horn_torus_written_as_one_spline_face() {
     let prof = Region2 { outer: Loop2::circle(Vec2::new(5.0, 0.0), 5.0), holes: vec![] };
@@ -1135,9 +1136,6 @@ fn horn_torus_written_as_one_spline_face() {
     let text = step_export(&[&b], "t").unwrap();
     assert!(!text.contains("TOROIDAL_SURFACE") && !text.contains("SURFACE_OF_REVOLUTION"));
     assert_eq!(text.matches("ADVANCED_FACE(").count(), 3, "{text}");
-    let imp = round_trip(&b);
-    let v = std::f64::consts::PI * 25.0 * std::f64::consts::TAU * 5.0 / 4.0;
-    assert!(rel(measure(&imp.bodies[0].body).unwrap().volume, v) < 1e-3);
 }
 
 /// How a torus-capped cylinder ([`torus_capped_cylinder`]) ends.
@@ -1388,10 +1386,10 @@ fn glued_halves_export_as_whole_faces() {
     assert_eq!(imp.bodies[0].file_faces, 8);
 }
 
-/// A slot plate with a round on its top outline (issue #612): the extruded arc ends and the
-/// rounds along the straight edges are lone B-spline sheets, written as cylinders bounded by
-/// their faces. The rounds' sheets reach far past their edges, and a reader bounding the part by
-/// its surfaces saw a 60 mm part as 130 mm long.
+/// A slot plate with a round on its top outline (issue #612): every surface the file writes is
+/// bounded by its face, whatever kind it is written as. The rounds' sheets once reached far past
+/// their edges, and a reader bounding the part by its surfaces saw a 60 mm part as 130 mm long.
+/// Read back, the part has its exact volume.
 #[test]
 fn rounded_slot_exports_cylinders() {
     use solidcraft_geom::Seg2;
@@ -1408,10 +1406,7 @@ fn rounded_slot_exports_cylinders() {
     let edges = [Vec3::new(30.0, -10.0, 4.0), Vec3::new(30.0, 10.0, 4.0), Vec3::new(0.0, 0.0, 4.0), Vec3::new(60.0, 0.0, 4.0)];
     let b = fillet(&plate, &edges, 1.0).unwrap();
     let text = step_export(&[&b], "t").unwrap();
-    assert!(!text.contains("B_SPLINE_SURFACE"), "{text}");
-    assert_eq!(text.matches("CYLINDRICAL_SURFACE(").count(), 4);
-    assert_eq!(text.matches("TOROIDAL_SURFACE(").count(), 2);
-    // No point of the file (surface placements included) lies outside the part.
+    // No point of the file (control points and surface placements included) lies outside the part.
     let imp = round_trip(&b);
     for line in text.lines().filter(|l| l.contains("CARTESIAN_POINT")) {
         let Some(xyz) = line.split("((").nth(1).and_then(|r| r.split("))").next()) else { continue };
@@ -1427,10 +1422,9 @@ fn rounded_slot_exports_cylinders() {
 }
 
 /// A slot plate rounded along its top and bottom outlines, with a ramp cut across one end
-/// (issue #1198). The other end's half turn is still written as a cylinder (its corners alone
-/// point both ways: the seam comes from points along its edges). The faces the ramp crosses keep
-/// their B-spline sheets, cut down to the faces: the rounds' sheets reached 35 mm past both ends,
-/// and readers bounding the part by its surfaces saw a 60 mm part as 130 mm long.
+/// (issue #1198): every surface the file writes is cut down to its face, so nothing reaches past
+/// the part's ends (the rounds' sheets once reached 35 mm past both, and readers bounding the part
+/// by its surfaces saw a 60 mm part as 130 mm long), and the part reads back whole.
 #[test]
 fn ramp_cut_slot_exports_sheets_bounded_by_their_faces() {
     use solidcraft_geom::Seg2;
@@ -1453,10 +1447,6 @@ fn ramp_cut_slot_exports_sheets_bounded_by_their_faces() {
     let tool = extrude(&side, &[ramp], -12.0, 0.0).unwrap().pop().unwrap();
     let b = boolean(&rounded, &tool, BoolOp::Cut).unwrap().unwrap();
     let text = step_export(&[&b], "t").unwrap();
-    // Both ends' walls and the three rounds along the sides it leaves whole; the two the ramp
-    // crosses stay sheets.
-    assert_eq!(text.matches("CYLINDRICAL_SURFACE(").count(), 5, "{text}");
-    assert_eq!(text.matches("B_SPLINE_SURFACE(").count(), 2, "{text}");
     // No point of the file (control points and placements included) lies past the part's ends.
     for line in text.lines().filter(|l| l.contains("CARTESIAN_POINT")) {
         let Some(xyz) = line.split("((").nth(1).and_then(|r| r.split("))").next()) else { continue };

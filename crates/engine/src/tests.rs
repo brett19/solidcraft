@@ -427,6 +427,111 @@ fn fillet_the_edges_between_two_overlapping_cylinders() {
     assert!(rel(v, expect) < 2e-4, "{v} vs {expect}");
 }
 
+/// A bar 40 long, 16 wide and 10 tall whose far end is a half disc of radius 8 about (40, 8),
+/// with a disc of radius 8 about the same centre sketched on its top (the top's outline
+/// projected) and extruded 10 up, joined: the bar's sides run tangent into the cylinder.
+/// V0 = 40·16·10 + π·8²·10/2 + π·8²·10.
+fn peg(s: &mut Session) -> f64 {
+    run(s, "sketch.create", json!({"plane": "XY", "name": "Peg"}));
+    run(s, "sketch.line", json!({"points": [[0, 0], [40, 0]]}));
+    run(s, "sketch.arc.center_point", json!({"center": [40, 8], "start": [40, 0], "end": [40, 16]}));
+    run(s, "sketch.line", json!({"points": [[40, 16], [0, 16]]}));
+    run(s, "sketch.line", json!({"points": [[0, 16], [0, 0]]}));
+    run(s, "sketch.finish", json!({}));
+    run(s, "solid.extrude", json!({"sketch": "Peg", "distance": 10, "body_name": "Peg"}));
+    run(s, "sketch.create", json!({"plane": {"origin": [0, 0, 10], "x_dir": [1, 0, 0], "y_dir": [0, 1, 0]}, "name": "Top"}));
+    run(s, "sketch.project", json!({"refs": [{"face": [2, 8, 10]}]}));
+    run(s, "sketch.circle.center", json!({"center": [40, 8], "radius": 8}));
+    run(s, "sketch.finish", json!({}));
+    run(
+        s,
+        "solid.extrude",
+        json!({"sketch": "Top", "distance": 10, "operation": "join", "targets": ["Peg"], "profiles": [{"point": [40, 8]}], "exact_regions": true}),
+    );
+    6400.0 + 960.0 * PI
+}
+
+/// Simpson's rule over [a, b] with `n` (even) intervals.
+fn simpson(f: impl Fn(f64) -> f64, a: f64, b: f64, n: usize) -> f64 {
+    let h = (b - a) / n as f64;
+    let inner: f64 = (1..n).map(|i| if i % 2 == 1 { 4.0 } else { 2.0 } * f(a + h * i as f64)).sum();
+    (f(a) + f(b) + inner) * h / 3.0
+}
+
+/// The material an r2 round of the peg's front top edge (y = 0, z = 10) takes off: the spandrel
+/// (height 2 - sqrt(4 - (2 - y)²) above the round at y) from x = `from` to where the cylinder's
+/// wall, x = 40 - sqrt(64 - (8 - y)²), takes over (the round runs into the wall there).
+fn peg_front_round(from: f64) -> f64 {
+    let spandrel = |y: f64| 2.0 - (4.0 - (2.0 - y) * (2.0 - y)).max(0.0).sqrt();
+    let wall = |y: f64| 40.0 - (64.0 - (8.0 - y) * (8.0 - y)).max(0.0).sqrt();
+    simpson(|y| spandrel(y) * (wall(y) - from), 0.0, 2.0, 20_000)
+}
+
+/// The peg's front top edge rounded r2: SMLib's result holds the upper half of the cylinder's
+/// wall as a rational spline whose parameter range runs more than a turn round, past the face's
+/// trims (half a turn). Taken as a cylinder over the spline's range (past 360°) SMLib refused it
+/// on the way back (SM_ERR_INVALID_INPUT), so the round seemed to build and the body could not
+/// be measured or changed. It goes back as the cylinder over the face's own range: the body
+/// measures, a round of the three edges at the bar's other top corner builds on it, and that
+/// wall comes back from SMLib a cylinder of radius 8.
+#[test]
+fn rounds_on_a_bar_running_tangent_into_a_cylinder() {
+    let mut s = Session::default();
+    let v0 = peg(&mut s);
+    run(&mut s, "solid.fillet", json!({"edges": [[20, 0, 10]], "radius": 2}));
+    let (v, expect) = (volume(&mut s), v0 - peg_front_round(0.0));
+    assert!(rel(v, expect) < 1e-7, "{v} vs {expect}");
+    // The vertical edge, the left top edge and the round's end arc on the left face: each
+    // spandrel (1 - π/4)·r² along the edge outside the corner cube of side 2, the cube less the
+    // rolling ball's eighth, 8 - 4π/3.
+    run(&mut s, "solid.fillet", json!({"edges": [[0, 0, 4], [0, 9, 10], [0, 0.5858, 9.4142]], "radius": 2}));
+    let strip = (1.0 - PI / 4.0) * 4.0;
+    let expect = v0 - peg_front_round(2.0) - strip * (8.0 + 14.0) - (8.0 - 4.0 * PI / 3.0);
+    let v = volume(&mut s);
+    assert!(rel(v, expect) < 1e-7, "{v} vs {expect}");
+    for b in &s.model.state().bodies {
+        let bad = b.body.validity();
+        assert!(bad.is_empty(), "{}: {bad:?}", b.name);
+    }
+    // The wall's upper half (x < 40, z in [10, 20], round (40, 8)): every face on the surface
+    // through (32, 8, 15) is a cylinder of radius 8.
+    let state = s.model.state();
+    let rec = state.bodies[0].body.record();
+    let p0 = solidcraft_geom::Vec3::new(32.0, 8.0, 15.0);
+    let on: Vec<&solidcraft_geom::brep::Surface> = rec
+        .faces
+        .iter()
+        .map(|f| &f.surface)
+        .filter(|s| {
+            let e = solidcraft_geom::brep::eval::SurfaceEval::new(s).ok();
+            e.and_then(|e| e.project(p0, None, 1e-6).and_then(|uv| e.point(uv))).is_some_and(|q| q.dist(p0) < 1e-6)
+        })
+        .collect();
+    let kinds: Vec<String> = on.iter().map(|s| format!("{s:?}").chars().take(48).collect()).collect();
+    assert!(
+        !on.is_empty() && on.iter().all(|s| matches!(s, solidcraft_geom::brep::Surface::Cylinder { radius, .. } if (radius - 8.0).abs() < 1e-9)),
+        "{kinds:?}"
+    );
+}
+
+/// After the peg's front top round, the edge where that round runs into the cylinder's wall: its
+/// faces are tangent at its lower end (40, 0, 8), where the round's contact with the front face
+/// meets the wall's tangent line with it, and meet at a crease everywhere else. It is no smooth
+/// edge (it was refused as one, judged at that end alone); the wall's seam with the front face,
+/// tangent all along, still is.
+#[test]
+fn an_edge_tangent_at_one_end_only_is_not_smooth() {
+    let mut s = Session::default();
+    peg(&mut s);
+    run(&mut s, "solid.fillet", json!({"edges": [[20, 0, 10]], "radius": 2}));
+    let fillet = |s: &mut Session, at: [f64; 3]| s.execute("solid.fillet", &json!({"edges": [at], "radius": 1, "tangent_chain": false}));
+    if let Err(e) = fillet(&mut s, [37.2641, 0.4827, 9.3025]) {
+        assert!(!e.to_string().contains("is smooth"), "{e}");
+    }
+    let seam = fillet(&mut s, [40.0, 0.0, 4.0]).unwrap_err().to_string();
+    assert!(seam.contains("is smooth: its faces meet tangentially"), "{seam}");
+}
+
 /// The top outline of two overlapping cylinders whose concave edges were rounded: the walls of
 /// the rounds meet the cylinders along the rolling-ball contact lines, straight but not lines.
 #[test]
@@ -736,6 +841,36 @@ pub(crate) fn hostile_values() -> Vec<Value> {
     ]
 }
 
+/// A copy of `s` as it stands: its design and model (sharing their bodies, as undo does), its
+/// undo and redo, its open sketch and the design it was entered from, and its log.
+fn copy_with_history(s: &Session) -> Session {
+    Session { undo: s.undo.clone(), redo: s.redo.clone(), sketch_entry: s.sketch_entry.clone(), log: s.log.clone(), ..s.scratch() }
+}
+
+/// The hostile-parameter test's copy starts where a session built afresh stands: cancelling its
+/// sketch and undoing step for step give the same designs, and the copied session is untouched.
+#[test]
+fn a_copy_with_history_undoes_like_the_session_it_copies() {
+    let start = |s: &mut Session| {
+        run(s, "solid.box", json!({"length": 10, "width": 10, "height": 10}));
+        run(s, "sketch.create", json!({"plane": "XY"}));
+        run(s, "sketch.rectangle.two_point", json!({"p0": [0, 0], "p1": [5, 5]}));
+    };
+    let mut fresh = Session::default();
+    start(&mut fresh);
+    let mut original = Session::default();
+    start(&mut original);
+    let before = original.doc.clone();
+    let mut copy = copy_with_history(&original);
+    for (command, params) in [("sketch.cancel", json!({})), ("edit.undo", json!({})), ("edit.undo", json!({})), ("edit.redo", json!({}))] {
+        run(&mut fresh, command, params.clone());
+        run(&mut copy, command, params);
+        assert_eq!(*fresh.doc, *copy.doc, "{command}");
+        assert_eq!(fresh.active_sketch, copy.active_sketch, "{command}");
+    }
+    assert!(std::sync::Arc::ptr_eq(&original.doc, &before) && original.active_sketch.is_some(), "the copied session is untouched");
+}
+
 /// Every command, every parameter name it documents, every hostile value: no panic escapes and
 /// no command panics internally.
 #[test]
@@ -880,16 +1015,20 @@ fn hostile_params_never_panic() {
                 scope.spawn(|| {
                     let mut internal = Vec::new();
                     while let Some(&id) = ids.get(next.fetch_add(1, std::sync::atomic::Ordering::Relaxed)) {
+                        // A model with a sketch, a body and an active sketch, so most commands get far.
+                        // Built once per command and copied for each call: SMLib serialises every
+                        // call behind one lock, so building the box for each of the ~3000 calls
+                        // ran one after another on every thread (over half an hour in CI).
+                        let mut start = Session::default();
+                        let _ = start.execute("solid.box", &json!({"length": 10, "width": 10, "height": 10}));
+                        let _ = start.execute("sketch.create", &json!({"plane": "XY"}));
+                        let _ = start.execute("sketch.rectangle.two_point", &json!({"p0": [0, 0], "p1": [5, 5]}));
                         for v in hostile_values() {
                             for k in keys {
                                 if k == "path" && (id.starts_with("parameters.") || id == "timeline.export_script") {
                                     continue; // parameter and script files: covered by their own tests (no stray files)
                                 }
-                                let mut s = Session::default();
-                                // A model with a sketch, a body and an active sketch, so most commands get far.
-                                let _ = s.execute("solid.box", &json!({"length": 10, "width": 10, "height": 10}));
-                                let _ = s.execute("sketch.create", &json!({"plane": "XY"}));
-                                let _ = s.execute("sketch.rectangle.two_point", &json!({"p0": [0, 0], "p1": [5, 5]}));
+                                let mut s = copy_with_history(&start);
                                 let p = json!({ k: v.clone() });
                                 if let Err(EngineError::Internal(id, msg)) = s.execute(id, &p) {
                                     internal.push(format!("{id} {p}: {msg}"));

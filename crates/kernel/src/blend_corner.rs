@@ -168,28 +168,40 @@ mod tests {
         assert!(fillet_radii(&rounded, &[(seam, 2.0)]).is_err());
     }
 
+    /// A 40 x 80 x 27 box (and the same shelled 1 mm, open at the top) with its bottom edges
+    /// rounded R2 as four separate fillets (mitred at the bottom corners), then one vertical
+    /// edge R2: the same solid whichever of its picks comes first. Horizontal sections: below
+    /// z = r above the bottom, s up, the rectangle moved in by d = r − ρ, ρ = √(r² − (r − s)²),
+    /// with the rounded corner a quarter disc of radius ρ less than its square (the sphere octant
+    /// where the three rounds meet); above, the rectangle less that corner at r. With
+    /// ∫ ρ = π r² / 4, ∫ ρ² = 2 r³ / 3, ∫ d = r² (1 − π/4) and ∫ d² = r³ (5/3 − π/2) over the
+    /// bottom r. The shell's cavity, 38 x 78 x 26, lies clear of both rounds (the bottom round's
+    /// arc passes 2 − √2 from the outer corner along the diagonal, the cavity's corner 1).
     #[test]
     fn issue2422_vertical_after_separate_bottom_rounds() {
+        use std::f64::consts::{FRAC_PI_2, FRAC_PI_4};
         let origin = Vec3::new(-5.0, 7.2, -2.0);
-        let b = box_solid(origin, origin + Vec3::new(40.0, 80.0, 27.0)).unwrap();
+        let (l, w, h, r) = (40.0, 80.0, 27.0, 2.0);
+        let b = box_solid(origin, origin + Vec3::new(l, w, h)).unwrap();
         let bottom = [Vec3::new(15.0, 7.2, -2.0), Vec3::new(35.0, 47.2, -2.0), Vec3::new(15.0, 87.2, -2.0), Vec3::new(-5.0, 47.2, -2.0)];
+        let spandrel = 1.0 - FRAC_PI_4;
+        let solid = l * w * r - 2.0 * (l + w) * r * r * spandrel + 4.0 * r * r * r * (5.0 / 3.0 - FRAC_PI_2) - spandrel * 2.0 * r * r * r / 3.0
+            + (h - r) * (l * w - spandrel * r * r);
+        let cavity = (l - 2.0) * (w - 2.0) * (h - 1.0);
         // The issue has no design attached. Reconstruct its outside corner and bottom mitre,
         // using the reported picks, with and without the open cavity visible in the screenshot.
         let picks = [Vec3::new(-5.0, 87.2, 12.5), Vec3::new(-4.283446394180081, 86.48344639418008, -1.5001085324947512)];
-        for base in [b.clone(), crate::shell(&b, &[Vec3::new(15.0, 47.2, 25.0)], 1.0).unwrap()] {
+        for (base, want) in [(b.clone(), solid), (crate::shell(&b, &[Vec3::new(15.0, 47.2, 25.0)], 1.0).unwrap(), solid - cavity)] {
             // Each fillet with its tangent chain, as the Fillet feature asks for it by default
             // (tangent propagation).
             let mut rounded = base;
             for edge in bottom {
                 rounded = fillet(&rounded, &crate::tangent_chain(&rounded, &[edge]).unwrap(), 2.0).unwrap();
             }
-            let reference = fillet(&rounded, &crate::tangent_chain(&rounded, &picks[..1]).unwrap(), 2.0).unwrap();
-            for selection in [picks, [picks[1], picks[0]]] {
-                let result = fillet(&rounded, &crate::tangent_chain(&rounded, &selection).unwrap(), 2.0).unwrap();
-                assert_eq!(result.face_count(), reference.face_count());
-                assert_eq!(result.unmeshed_faces(), 0);
+            for selection in [&picks[..1], &picks[..], &[picks[1], picks[0]][..]] {
+                let result = fillet(&rounded, &crate::tangent_chain(&rounded, selection).unwrap(), 2.0).unwrap();
                 assert!(result.validity().is_empty(), "{:?}", result.validity());
-                assert!((vol(&result) - vol(&reference)).abs() < 0.05);
+                assert!((vol(&result) - want).abs() < 1e-6 * want, "{selection:?}: {} vs {want}", vol(&result));
                 assert!(!result.contains(Vec3::new(-4.9, 87.1, 10.0)));
                 assert!(result.contains(Vec3::new(-4.1, 86.3, 10.0)));
             }
@@ -223,12 +235,17 @@ mod tests {
     #[test]
     fn three_rounds_at_a_corner() {
         let (bx, a, b, c) = setup();
-        // Two rounds meeting in a mitre, then the third edge: a sphere octant.
+        // Two rounds meeting in a mitre, then the third edge with its tangent chain, as the Fillet
+        // feature asks for it (84bd2daad): the mitre's seam leaves c's end along c, so the chain
+        // is c and the seam, and the corner is a sphere octant. The cube less its three rounds
+        // (each (1 − π/4) r² over its 18 mm straight part) and the corner's 2 mm cube less the
+        // octant (r³ (1 − π/6)).
         let ab = fillet(&bx, &[a, b], 2.0).unwrap();
-        let r = fillet(&ab, &[c], 2.0).unwrap();
+        let r = fillet(&ab, &crate::tangent_chain(&ab, &[c]).unwrap(), 2.0).unwrap();
         let sphere = 8000.0 - 3.0 * (1.0 - std::f64::consts::FRAC_PI_4) * 4.0 * 18.0 - 8.0 * (1.0 - std::f64::consts::PI / 6.0);
         assert_eq!(r.face_count(), 10);
-        assert!((vol(&r) - sphere).abs() < 0.05, "{} vs {sphere}", vol(&r));
+        assert!(r.validity().is_empty(), "{:?}", r.validity());
+        assert!((vol(&r) - sphere).abs() < 1e-11 * sphere, "{} vs {sphere}", vol(&r));
         assert!(kink(&r) < 0.01);
         // Different radii: a smooth patch over the corner, slightly more than the strips take.
         for (rs, sel) in [((2.0, 2.0, 3.0), fillet(&ab, &[c], 3.0)), ((2.0, 3.0, 4.0), fillet_radii(&bx, &[(a, 2.0), (b, 3.0), (c, 4.0)]))] {
@@ -281,81 +298,12 @@ mod tests {
         }
     }
 
+    /// A chamfer of a basin's rim loop whose leg would run off the 1 mm rim over the slab's front
+    /// edge is refused as too large, the kind a fit can reduce. (The largest size that fits is
+    /// the doc layer's to name; it and the loop's blends that fit, with their exact mitred
+    /// volumes, are graded by the rig's fillets/1080-*-equal-slope-basin-* cases.)
     #[test]
-    fn sloped_rim_fillets_stay_inside_the_material() {
-        use solidcraft_geom::{Loop2, Plane, Vec2};
-        for margin in [0.5, 1.0] {
-            let rectangle = |x0, y0, x1, y1| Loop2::polygon(&[Vec2::new(x0, y0), Vec2::new(x1, y0), Vec2::new(x1, y1), Vec2::new(x0, y1)]);
-            let slab = box_solid(Vec3::ZERO, Vec3::new(100.0, 60.0, 30.0)).unwrap();
-            let pocket = crate::loft(&[
-                (Plane::XY.offset(30.0), rectangle(20.0, margin, 80.0, 50.0)),
-                (Plane::XY.offset(10.0), rectangle(30.0, 20.0, 70.0, 40.0)),
-            ])
-            .unwrap();
-            let basin = crate::boolean(&slab, &pocket, crate::BoolOp::Cut).unwrap().unwrap();
-            let picks = [Vec3::new(50.0, margin, 30.0), Vec3::new(80.0, 27.0, 30.0), Vec3::new(50.0, 50.0, 30.0), Vec3::new(20.0, 27.0, 30.0)];
-            // R4 runs over the thin rim's top past the slab's front edge (a cliff): it is built
-            // as if the top went on and cut from the slab (the blend-overflow decision,
-            // 237f0ae74), so nothing of it lies outside the slab.
-            for count in [1, 2, 4] {
-                for r in [4.0, margin * 0.5] {
-                    let result = fillet(&basin, &picks[..count], r).unwrap_or_else(|e| panic!("{margin}, {count}, {r}: {e}"));
-                    assert!(result.validity().is_empty(), "{margin}, {count}, {r}: {:?}", result.validity());
-                    assert!(vol(&result) < vol(&basin));
-                    for p in vertices(&result) {
-                        assert!(
-                            p.x >= 0.0 && p.x <= 100.0 && p.y >= 0.0 && p.y <= 60.0 && p.z >= 0.0 && p.z <= 30.0 + 1e-8,
-                            "{margin}, {count}, {r}: {p:?}"
-                        );
-                    }
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn chamfers_meet_on_unequal_sloped_rim_walls() {
-        use solidcraft_geom::{Loop2, Plane, Vec2};
-        for margin in [1.0, 4.0] {
-            let rectangle = |x0, y0, x1, y1| Loop2::polygon(&[Vec2::new(x0, y0), Vec2::new(x1, y0), Vec2::new(x1, y1), Vec2::new(x0, y1)]);
-            let slab = box_solid(Vec3::ZERO, Vec3::new(100.0, 60.0, 30.0)).unwrap();
-            let pocket = crate::loft(&[
-                (Plane::XY.offset(30.0), rectangle(20.0, margin, 80.0, 50.0)),
-                (Plane::XY.offset(10.0), rectangle(30.0, 20.0, 70.0, 40.0)),
-            ])
-            .unwrap();
-            let basin = crate::boolean(&slab, &pocket, crate::BoolOp::Cut).unwrap().unwrap();
-            let picks = [Vec3::new(50.0, margin, 30.0), Vec3::new(80.0, 27.0, 30.0), Vec3::new(50.0, 50.0, 30.0), Vec3::new(20.0, 27.0, 30.0)];
-            for count in [2, 3, 4] {
-                if margin == 1.0 {
-                    assert!(crate::chamfer(&basin, &picks[..count], 2.0).is_err());
-                    assert!(crate::chamfer(&basin, &picks[..count], 1.0).is_err());
-                }
-                let distance = if margin == 1.0 { 0.5 } else { 2.0 };
-                let result = crate::chamfer(&basin, &picks[..count], distance).unwrap();
-                assert!(result.validity().is_empty());
-                assert_eq!(result.unmeshed_faces(), 0);
-                assert!(vol(&result) < vol(&basin));
-                assert!(vol(&basin) - vol(&result) < distance.powi(2) * (60.0 + 50.0 - margin));
-                let reverse: Vec<_> = picks[..count].iter().copied().rev().collect();
-                let reversed = crate::chamfer(&basin, &reverse, distance).unwrap();
-                assert!((vol(&result) - vol(&reversed)).abs() < 1e-6);
-                // These are exact planes, with every boundary on its owning face.
-                let rec = Faces::of(&result).unwrap();
-                for f in 0..rec.rec.faces.len() {
-                    let Some(n) = rec.plane_normal(f) else { continue };
-                    let points: Vec<Vec3> = rec.uses(f).filter_map(|u| rec.ends(u.edge as usize)).flat_map(|(a, b)| [a, b]).collect();
-                    let origin = points[0];
-                    for p in points {
-                        assert!((p - origin).dot(n).abs() < 1e-7);
-                    }
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn equal_slope_rim_loops_stay_inside_the_material() {
+    fn a_rim_loop_chamfer_running_off_its_rim_is_refused() {
         use solidcraft_geom::{Loop2, Plane, Vec2};
         let rectangle = |x0, y0, x1, y1| Loop2::polygon(&[Vec2::new(x0, y0), Vec2::new(x1, y0), Vec2::new(x1, y1), Vec2::new(x0, y1)]);
         let slab = box_solid(Vec3::ZERO, Vec3::new(100.0, 60.0, 30.0)).unwrap();
@@ -364,16 +312,10 @@ mod tests {
                 .unwrap();
         let basin = crate::boolean(&slab, &pocket, crate::BoolOp::Cut).unwrap().unwrap();
         let picks = [Vec3::new(50.0, 1.0, 30.0), Vec3::new(80.0, 27.0, 30.0), Vec3::new(50.0, 50.0, 30.0), Vec3::new(20.0, 27.0, 30.0)];
-        // Past the 1 mm rim the blends run over the slab's front edge (a cliff) and are cut from
-        // the slab (the blend-overflow decision, 237f0ae74): nothing escapes it.
-        for (round, size) in [(false, 2.0), (true, 4.0), (false, 0.5), (true, 0.5)] {
-            let result = if round { fillet(&basin, &picks, size) } else { crate::chamfer(&basin, &picks, size) };
-            let result = result.unwrap_or_else(|e| panic!("round={round}, {size}: {e}"));
-            assert!(result.validity().is_empty(), "round={round}, {size}: {:?}", result.validity());
-            assert!(vol(&result) < vol(&basin));
-            for p in vertices(&result) {
-                assert!(p.x >= 0.0 && p.x <= 100.0 && p.y >= 0.0 && p.y <= 60.0 && p.z >= 0.0 && p.z <= 30.0 + 1e-8, "round={round}, {size}: {p:?}");
-            }
+        match crate::chamfer(&basin, &picks, 2.0) {
+            Err(KernelError::TooLarge(_)) => {}
+            Err(e) => panic!("refused, but not as too large: {e}"),
+            Ok(_) => panic!("a chamfer whose leg runs off the rim was built"),
         }
     }
 }
