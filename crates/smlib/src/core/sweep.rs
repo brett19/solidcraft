@@ -1,7 +1,7 @@
 //! Extrusions, revolutions, sweeps, lofts and planar faces on solidcore: the C API's logic round
 //! SM_API's sweeps, ported from the fork's `capi/src/smlib_sweeps.cpp` (`coord_ok`, `unit`,
 //! `line`, `arc`, `nurbs`, `parse`, `finish`, `one_loop`, `straight`, `circular`, `joined`,
-//! `put_motion`, `turned`, `maps_ok`, `placed`, `put_curve`, and the entry points
+//! `put_motion`, `turned`, `Rigid`, `Segment`, `segmented`, `carried`, `piecewise`, `maps_ok`, `placed`, `put_curve`, and the entry points
 //! `smlib_planar_faces`, `smlib_extrude`, `smlib_revolve`, `smlib_sweep_placed`, `smlib_loft`,
 //! `smlib_loft_to_point`, `smlib_sweep_stations`, `smlib_project_curves`, `smlib_face_section`,
 //! and `smlib_screw_sweep` and `smlib_screw_sweep_radial` with `Screw`, `Stations`,
@@ -24,7 +24,6 @@
 
 use std::f64::consts::{PI, TAU};
 
-use solidcore::EntityRef;
 use solidcore::curve::curve::p3::compute_crvs_normal;
 use solidcore::curve::curve::{Curve, CurveKind};
 use solidcore::curve::ellipse::Ellipse;
@@ -46,16 +45,19 @@ use solidcore::sweep::api_brep::{
     create_rotational_sweep, create_taper_extrude_with_corner,
 };
 use solidcore::sweep::api_surfaces::create_skin_primitive;
+use solidcore::topology::brep::p1 as brep_p1;
 use solidcore::topology::brep::p1::{ParallelProjectionOptions, create_parallel_projection_curves};
 use solidcore::topology::brep::p2::{ArenaNotifyState, is_manifold_solid};
 use solidcore::topology::brep::p3::new_brep;
 use solidcore::topology::brep::p4::stitch_faces;
 use solidcore::topology::brep::p5::{StitchAndOrientOptions, stitch_and_orient};
+use solidcore::topology::brep::p7::copy_faces;
 use solidcore::topology::brep::p8::{
     FaceBuildEnv, create_face_from_surface, create_faces_with_curves, create_planar_face_with_3d_curves, create_planar_faces_with_3d_curves,
 };
 use solidcore::topology::topology_traverser::Marks;
 use solidcore::topology::{Brep, FaceId};
+use solidcore::{EntityRef, SolidError};
 
 use super::blend::status;
 use super::offset::{face_miss, pick_faces};
@@ -470,9 +472,186 @@ fn motion(x: Vec3, y: Vec3, z: Vec3, t: Vec3) -> Affine {
     Affine { m: [[x.x, x.y, x.z], [y.x, y.y, y.z], [z.x, z.y, z.z]], t: [t.x, t.y, t.z] }
 }
 
+/// A rigid motion p -> R p + t, R by its columns (`Rigid`).
+#[derive(Clone, Copy)]
+struct Rigid {
+    x: Vec3,
+    y: Vec3,
+    z: Vec3,
+    t: Vec3,
+}
+
+impl Rigid {
+    const IDENTITY: Rigid =
+        Rigid { x: Vec3::new(1.0, 0.0, 0.0), y: Vec3::new(0.0, 1.0, 0.0), z: Vec3::new(0.0, 0.0, 1.0), t: Vec3::new(0.0, 0.0, 0.0) };
+
+    /// This motion, then a turn of `angle` right-handed about the unit `k` through `c`.
+    fn turned_by(&self, c: Vec3, k: Vec3, angle: f64) -> Rigid {
+        Rigid { x: turned(self.x, k, angle), y: turned(self.y, k, angle), z: turned(self.z, k, angle), t: c + turned(self.t - c, k, angle) }
+    }
+
+    /// This motion, then a move by `d`.
+    fn moved_by(&self, d: Vec3) -> Rigid {
+        Rigid { t: self.t + d, ..*self }
+    }
+
+    /// As the placement `SmCurve::Transform` takes: the world frame's image.
+    fn placement(&self) -> Axis2Placement {
+        Axis2Placement::new(self.t, self.x, self.y)
+    }
+
+    fn motion(&self) -> Affine {
+        motion(self.x, self.y, self.z, self.t)
+    }
+}
+
+/// One segment of a path of lines and arcs (`Segment`): a line from `a` along the unit `dir` for
+/// `length`, or an arc turning `angle` (radians) right-handed about the unit `k` through `c`,
+/// `length` along.
+#[derive(Clone, Copy)]
+struct Segment {
+    arc: bool,
+    dir: Vec3,
+    c: Vec3,
+    k: Vec3,
+    angle: f64,
+    length: f64,
+}
+
+impl Segment {
+    /// The motion `m` carried `s` of the way along (0 <= s <= length).
+    fn carry(&self, m: &Rigid, s: f64) -> Rigid {
+        if self.arc { m.turned_by(self.c, self.k, self.angle * s / self.length) } else { m.moved_by(self.dir * s) }
+    }
+}
+
+/// `segmented`: whether `path` (parsed from `given`) is two or more lines and arcs end to end,
+/// each leaving in the direction the one before arrives in, and not closed: then its segments.
+fn segmented(k: &Kernel, given: &[Profile], path: &[Curve]) -> solidcore::Result<Option<Vec<Segment>>> {
+    if given.len() != path.len() || path.len() < 2 {
+        return Ok(None);
+    }
+    let unit = |v: Vec3| v * (1.0 / v.length());
+    let mut out = Vec::with_capacity(path.len());
+    // The direction the path arrives in at the end of the segment before, and where it ends.
+    let (mut before, mut first, mut prev) = (None::<Vec3>, None::<Point3>, None::<Point3>);
+    for (g, c) in given.iter().zip(path) {
+        let (a, b) = ends(k, c)?;
+        let (seg, leaving, arriving) = match g {
+            Profile::Line { .. } => {
+                let length = (b - a).length();
+                if !(length > 1e-12) {
+                    return Ok(None);
+                }
+                let dir = (b - a) * (1.0 / length);
+                (Segment { arc: false, dir, c: Vec3::new(0.0, 0.0, 0.0), k: Vec3::new(0.0, 0.0, 0.0), angle: 0.0, length }, dir, dir)
+            }
+            Profile::Arc { center, axis, radius, start, end, .. } => {
+                let (ctr, kv) = (v3(*center), unit(v3(*axis)));
+                let angle = end - start;
+                let seg = Segment { arc: true, dir: Vec3::new(0.0, 0.0, 0.0), c: ctr, k: kv, angle, length: radius * angle };
+                (seg, unit(kv.cross(a - ctr)), unit(kv.cross(b - ctr)))
+            }
+            _ => return Ok(None),
+        };
+        match (first, prev, before) {
+            (None, ..) => first = Some(a),
+            (Some(_), Some(p), Some(d)) => {
+                if (a - p).length() > 1e-9 || leaving.dot(d) < 1.0 - 1e-12 {
+                    return Ok(None);
+                }
+            }
+            _ => return Ok(None),
+        }
+        prev = Some(b);
+        before = Some(arriving);
+        out.push(seg);
+    }
+    match (first, prev) {
+        (Some(f), Some(p)) if (f - p).length() > 1e-6 => Ok(Some(out)),
+        _ => Ok(None),
+    }
+}
+
+/// `carried`: copies of the profile's curves carried by `m`.
+fn carried(k: &Kernel, profile: &[Curve], m: &Rigid) -> solidcore::Result<Vec<Curve>> {
+    let at = m.placement();
+    let mut out = Vec::with_capacity(profile.len());
+    for c in profile {
+        let mut copy = c.clone();
+        copy.transform(k, &at, None).map_err(|_| SolidError::sm_err("SmCurve::Transform"))?;
+        out.push(copy);
+    }
+    Ok(out)
+}
+
+/// `piecewise`: the profile swept along a path of lines and arcs, turning with it: each segment
+/// swept on its own, exactly (a line by SM_API's linear sweep, an arc by its rotational sweep), the
+/// profile carried from each to the next, and the walls sewn along the sections they share; with
+/// the motions to the first section, the one half-way along and the last.
+fn piecewise(k: &mut Kernel, profile: &[Curve], segs: &[Segment], cap: bool) -> solidcore::Result<Out<(Brep, [Affine; 3])>> {
+    let mut b = new_brep(k, USE_DEFAULT, USE_DEFAULT)?;
+    let mut m = Rigid::IDENTITY;
+    let mut starts = Vec::with_capacity(segs.len());
+    let mut total = 0.0;
+    for g in segs {
+        starts.push(m);
+        total += g.length;
+        let section = carried(k, profile, &m)?;
+        let refs: Vec<Option<&Curve>> = section.iter().map(Some).collect();
+        let piece = if g.arc {
+            create_rotational_sweep(k, &refs, g.c, g.k, g.angle * 180.0 / PI, false)
+        } else {
+            create_linear_sweep(k, &refs, g.dir, g.length, false)
+        };
+        let mut piece = match piece {
+            Ok(p) => p,
+            Err(e) => return Ok(Err(status(e))),
+        };
+        let faces = brep_p1::faces(&piece, None)?;
+        let mut state = ArenaNotifyState::new(&piece);
+        state.seed(&b);
+        let mut env = state.env(None);
+        let key_of = env.key_of;
+        let this_face = |f: FaceId| key_of(EntityRef::Face(f));
+        match copy_faces(k, &mut piece, &faces, &mut b, false, &this_face, &mut env) {
+            Ok((_, true)) => {}
+            Ok((_, false)) => return Ok(Err(status(SolidError::sm_err("CopyFaces")))),
+            Err(e) => return Ok(Err(status(e))),
+        }
+        m = g.carry(&m, g.length);
+    }
+    let Some(&start) = starts.first() else { return Ok(Err(Error::Argument)) };
+    if cap {
+        // The caps: the profile where the path starts and where it ends.
+        for at in [start, m] {
+            let section = carried(k, profile, &at)?;
+            let (region, tol) = (b.infinite_region(), b.tolerance());
+            if let Err(e) = build_faces(&mut b, |b, fenv| create_planar_faces_with_3d_curves(k, b, region, &section, tol, fenv)) {
+                return Ok(Err(status(e)));
+            }
+        }
+    }
+    if let Err(e) = stitch_and_orient(k, &mut b, &StitchAndOrientOptions::default()) {
+        return Ok(Err(status(e)));
+    }
+    b.refresh_cached_topology();
+    let mut half = 0.5 * total;
+    let mut middle = m;
+    for (i, (g, from)) in segs.iter().zip(&starts).enumerate() {
+        if half <= g.length || i + 1 == segs.len() {
+            middle = g.carry(from, half.min(g.length));
+            break;
+        }
+        half -= g.length;
+    }
+    Ok(Ok((b, [start.motion(), middle.motion(), m.motion()])))
+}
+
 /// `smlib_sweep_placed`: `profile` swept along `path`, with the rigid motions that placed it at
 /// the start, half way and the end. Along a straight path the sweep is SM_API's linear sweep, and
-/// turning with arcs about one axis its rotational sweep: both build the walls exactly.
+/// turning with arcs about one axis its rotational sweep: both build the walls exactly, as the
+/// sweep piece by piece does along lines and arcs that turn with the path ([`piecewise`]).
 pub(crate) fn sweep_placed(profile: &[Profile], path: &[Profile], frame: SweepFrame, cap: bool) -> Result<(Body, [Affine; 3])> {
     let mut placed = [motion(Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.0, 0.0, 1.0), Vec3::new(0.0, 0.0, 0.0)); 3];
     let body = making("smlib_sweep", |k| {
@@ -513,6 +692,18 @@ pub(crate) fn sweep_placed(profile: &[Profile], path: &[Profile], frame: SweepFr
                 *m = motion(x, y, z, t);
             }
             return finish(r, cap);
+        }
+        // Along lines and arcs, turning with the path, the sweep is exact piece by piece.
+        if frame == SweepFrame::Follow
+            && let Some(segs) = segmented(k, path, &along)?
+        {
+            return Ok(match piecewise(k, &curves, &segs, cap)? {
+                Ok((b, motions)) => {
+                    placed = motions;
+                    finish(b, cap)?
+                }
+                Err(e) => Err(e),
+            });
         }
         let path_curve = match joined(&along)? {
             Ok(b) => Curve::from(b),
