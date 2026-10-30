@@ -412,7 +412,7 @@ cases!(
     revolve_rectangle_quarter,
     sweep_circle_straight,
     sweep_circle_along_an_arc,
-    sweep_along_a_bent_path: ignore = "solidcore#1628: copy_faces (no merge) into a B-rep that already has faces fails, notify finding no record for the copy (the second piece of the piecewise sweep)",
+    sweep_along_a_bent_path,
     sweep_round_a_closed_path,
     loft_two_squares,
     loft_two_circles,
