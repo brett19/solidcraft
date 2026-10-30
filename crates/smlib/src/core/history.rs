@@ -1,33 +1,21 @@
 //! Face and edge history on solidcore: a port of the fork's `capi/src/smlib_history.cpp`
 //! (`smlib_history_tag`, `smlib_history_read`) onto solidcore's B-rep-owned attribute store
-//! ([`Brep::add_attribute`]), which solidcore's operations carry through their edits with SMLib's
-//! handlers: Split when a face or edge is cut in two (both children get it), Merge when two become
-//! one (the survivor gets it), Copy when an object is copied (a boolean copies the second operand
-//! into the first), Coincident where a boolean finds one operand's entity lying on the other's.
-//! New topology (a boolean's intersection edges) is made without any.
+//! ([`Brep::add_attribute`]), which solidcore's operations carry through their edits as SMLib's
+//! `SmAObject::Notify` does: Split when a face or edge is cut in two, Merge when two become one,
+//! Copy when an object is copied (a boolean copies the second operand into the first), Coincident
+//! where a boolean finds one operand's entity lying on the other's. New topology (a boolean's
+//! intersection edges) is made without any.
 //!
-//! The capi's Tag is one attribute holding a set of (operand, index) origins, with its own Split,
-//! Merge and Coincident handlers joining the sets where SMLib's defaults keep only one. solidcore
-//! runs SMLib's default handlers alone (no application attribute class can override them), so each
-//! origin here is an attribute of its own, its id naming the origin ([`id`]): the default
-//! handlers give an object every attribute it has no attribute of that id for, which on a set of
-//! distinct ids is the union the capi's handlers make. The face's boundary edges then (`edges`)
-//! and the edge's points then (`at`) ride on the origin's attribute.
-//!
-//! Deviations from the capi, each where its own handlers differ from the default ones:
-//! - An object that already stands for something and is copied onto (`SmAttribute::Copy`, not
-//!   overridden there) keeps only its own origins in the capi, here takes the copy's too. No
-//!   operation copies onto an object it did not just make.
-//! - An untagged object a coincidence or merge lands on gets the capi's Tag without `at` (so it
-//!   never counts as moved); here the origin's attribute carries its `at` along. A split child
-//!   gets the split edge's `at` in both (the capi's Split handler sets it on an untagged child),
-//!   so either piece of a split edge can tell where the edge lay.
-//!
-//! The rest is as there: the same origins, boundary records, samples and classification.
+//! The capi's `Tag` is one application attribute ([`Attribute::application`]) per face or edge,
+//! with the capi's own handlers ([`AttributeHandlers`]): a split child, a merge's result and the
+//! entity a coincidence lands on join the origins in, where SMLib's defaults keep only one; a copy
+//! is SMLib's default. The data, the handlers and the reading are the capi's.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use solidcore::geom::attribute::{Attribute, AttributeValue, Behavior};
+use solidcore::geom::attribute::{
+    ApplicationValue, Attribute, AttributeHandle, AttributeHandlers, AttributeValue, AttributeView, Behavior, ObjectKey, Placement, ids,
+};
 use solidcore::kernel::Kernel;
 use solidcore::query::api_queries::edge_closest_point;
 use solidcore::topology::face::p4 as face4;
@@ -40,67 +28,116 @@ use super::{Body, answer, with_body};
 use crate::history::{Raw, RawEdge, RawFace};
 use crate::{Error, Result};
 
+/// `TAG_ID`: above SMLib's own ids (all below `SM_AI_USER_1`).
+const TAG_ID: u64 = ids::USER_1 + 7;
+
 /// Operand numbers and indices a tag accepts (`TAG_MAX`: keeps every value inside 30 bits).
 const TAG_MAX: usize = 1 << 30;
-
-/// The first id of a tag's attributes: above SMLib's own ids and the applications' (all below
-/// `SM_AI_USER_3 + 10000`), so a tag is told apart by its id alone.
-const TAG_BASE: u64 = 1 << 62;
-
-/// An edge's tag ids set this bit; a face's don't.
-const EDGE_BIT: u64 = 1 << 60;
 
 /// One (operand, index) pair a face or edge stands for.
 type Origin = (usize, usize);
 
-/// The attribute id of origin `o` on a face or (`edge`) an edge.
-fn id(o: Origin, edge: bool) -> u64 {
-    TAG_BASE | if edge { EDGE_BIT } else { 0 } | ((o.0 as u64) << 30) | o.1 as u64
-}
-
-/// The origin an attribute id names on a face or (`edge`) an edge, if it is a tag's.
-fn origin_of(id: u64, edge: bool) -> Option<Origin> {
-    if id & !(EDGE_BIT | ((1 << 60) - 1)) != TAG_BASE || (id & EDGE_BIT != 0) != edge {
-        return None;
-    }
-    let mask = (1u64 << 30) - 1;
-    Some((usize::try_from((id >> 30) & mask).ok()?, usize::try_from(id & mask).ok()?))
-}
-
-/// What one of a face's or edge's tag attributes says: its origin, for a face the boundary edges
-/// that origin had, for an edge the points it ran through then.
-struct Said {
-    origin: Origin,
-    edges: Vec<usize>,
+/// The capi's `Tag`: what a face or edge stands for, the operand entities it came from, for a face
+/// tagged directly its own boundary edges then (to tell a face that is still whole), and for an
+/// edge tagged directly where it lay then (points along it, ends first: to tell an edge that
+/// moved). Copy behaviour (`SM_AB_COPY`); a copy (`MakeCopy`) is the same data.
+#[derive(Debug, Clone, PartialEq, Default)]
+struct Tag {
+    origins: BTreeSet<Origin>,
+    edges: BTreeSet<i64>,
     at: Vec<Point3>,
 }
 
-/// The tag attributes on `e` (`Tag::on`), each read; none where it has no tag.
-fn tags(b: &Brep, e: EntityRef) -> Vec<Said> {
-    let edge = matches!(e, EntityRef::Edge(_));
-    b.entity_attributes(e)
-        .into_iter()
-        .filter_map(|(_, a)| {
-            let origin = origin_of(a.attribute_id(), edge)?;
-            let AttributeValue::Generic { longs, doubles, .. } = a.value() else { return None };
-            let edges = longs.iter().filter_map(|x| usize::try_from(*x).ok()).collect();
-            let at = doubles.as_chunks::<3>().0.iter().map(|[x, y, z]| Point3::new(*x, *y, *z)).collect();
-            Some(Said { origin, edges, at })
-        })
-        .collect()
+impl Tag {
+    fn attribute(self) -> Attribute {
+        Attribute::application(TAG_ID, Behavior::Copy, self)
+    }
 }
 
-/// `Tag::set`: replaces whatever tag `e` has with exactly origin `o`, the boundary edges `edges`
-/// (a face's) and the points `at` (an edge's).
-fn set(b: &mut Brep, e: EntityRef, o: Origin, edges: &[usize], at: &[Point3]) -> std::result::Result<(), SolidError> {
-    let edge = matches!(e, EntityRef::Edge(_));
-    let old: Vec<_> = b.entity_attributes(e).into_iter().filter(|(_, a)| origin_of(a.attribute_id(), edge).is_some()).map(|(h, _)| h).collect();
-    for h in old {
+/// `Tag::on`: the tag on `x`, if the attribute of its id there is a [`Tag`].
+fn on<'a>(view: &AttributeView<'a>, x: ObjectKey) -> Option<(AttributeHandle, &'a Tag)> {
+    let (h, a) = view.find_attribute(x, TAG_ID)?;
+    a.application_value::<Tag>().map(|t| (h, t))
+}
+
+/// `Tag::join`: adds `o` and `e` to `x`'s tag (its `at` as it was), giving it one with no `at` if
+/// it has none (an attribute of the tag's id that is no tag is replaced). Nothing for no `o`.
+fn join(view: &AttributeView<'_>, x: ObjectKey, o: &BTreeSet<Origin>, e: &BTreeSet<i64>) -> Vec<Placement> {
+    if o.is_empty() {
+        return Vec::new();
+    }
+    if let Some((handle, t)) = on(view, x) {
+        let mut t = t.clone();
+        t.origins.extend(o.iter().copied());
+        t.edges.extend(e.iter().copied());
+        return vec![Placement::Edit { handle, value: AttributeValue::Application(ApplicationValue::new(t)) }];
+    }
+    set(view, x, o.clone(), e.clone(), Vec::new())
+}
+
+/// `Tag::set`: replaces whatever tag `x` has (the attribute of the tag's id) with exactly `o`, `e`
+/// and `p`.
+fn set(view: &AttributeView<'_>, x: ObjectKey, o: BTreeSet<Origin>, e: BTreeSet<i64>, p: Vec<Point3>) -> Vec<Placement> {
+    let mut out = Vec::with_capacity(2);
+    if let Some((handle, _)) = view.find_attribute(x, TAG_ID) {
+        out.push(Placement::Remove { on: x, handle });
+    }
+    out.push(Placement::Add { on: x, attribute: Tag { origins: o, edges: e, at: p }.attribute() });
+    out
+}
+
+impl AttributeHandlers for Tag {
+    /// A split: both children stand for what the split object stood for, and lie where it lay
+    /// (each a piece of it): a child with no tag gets this one's `at` too.
+    fn split(&self, view: &AttributeView<'_>, split: ObjectKey, a: ObjectKey, b: ObjectKey) -> solidcore::Result<Vec<Placement>> {
+        let mut out = Vec::new();
+        for x in [a, b] {
+            if x == split {
+                continue;
+            }
+            if on(view, x).is_none() && !self.origins.is_empty() {
+                out.extend(set(view, x, self.origins.clone(), self.edges.clone(), self.at.clone()));
+            } else {
+                out.extend(join(view, x, &self.origins, &self.edges));
+            }
+        }
+        Ok(out)
+    }
+
+    /// A merge: the result stands for both (the tags on the sources other than the result).
+    fn merge(&self, view: &AttributeView<'_>, a: ObjectKey, b: ObjectKey, result: ObjectKey) -> solidcore::Result<Vec<Placement>> {
+        let (mut o, mut e) = (BTreeSet::new(), BTreeSet::new());
+        for x in [a, b] {
+            if x != result
+                && let Some((_, t)) = on(view, x)
+            {
+                o.extend(t.origins.iter().copied());
+                e.extend(t.edges.iter().copied());
+            }
+        }
+        Ok(join(view, result, &o, &e))
+    }
+
+    /// One operand's entity found lying on the other's, which survives: it stands for both.
+    fn coincident(&self, view: &AttributeView<'_>, _from: ObjectKey, to: ObjectKey) -> solidcore::Result<Vec<Placement>> {
+        Ok(join(view, to, &self.origins, &self.edges))
+    }
+}
+
+/// `read`: what `e`'s tag says (the attribute of the tag's id, if it is a [`Tag`]).
+fn tag_on(b: &Brep, e: EntityRef) -> Option<&Tag> {
+    let (_, a) = b.entity_attributes(e).into_iter().find(|(_, a)| a.attribute_id() == TAG_ID)?;
+    a.application_value::<Tag>()
+}
+
+/// `Tag::set` at tagging: replaces whatever tag `e` has with exactly origin `o`, the boundary
+/// edges `edges` (a face's) and the points `at` (an edge's).
+fn set_on(b: &mut Brep, e: EntityRef, o: Origin, edges: BTreeSet<i64>, at: Vec<Point3>) -> std::result::Result<(), SolidError> {
+    let old = b.entity_attributes(e).into_iter().find(|(_, a)| a.attribute_id() == TAG_ID).map(|(h, _)| h);
+    if let Some(h) = old {
         b.remove_attribute(e, h)?;
     }
-    let longs: Vec<i64> = edges.iter().filter_map(|x| i64::try_from(*x).ok()).collect();
-    let doubles: Vec<f64> = at.iter().flat_map(|p| [p.x, p.y, p.z]).collect();
-    b.add_attribute(e, Attribute::generic(id(o, edge), Behavior::Copy, &longs, &doubles, &[]))?;
+    b.add_attribute(e, Tag { origins: BTreeSet::from([o]), edges, at }.attribute())?;
     Ok(())
 }
 
@@ -189,12 +226,13 @@ pub(crate) fn tag(body: &Body, operand: usize) -> Result<Body> {
         }
         let edge_at: HashMap<EdgeId, usize> = edges.iter().enumerate().map(|(i, e)| (*e, i)).collect();
         for (i, f) in faces.iter().enumerate() {
-            let own: BTreeSet<usize> = face4::edges(&r, *f, None, false, None)?.iter().filter_map(|e| edge_at.get(e).copied()).collect();
-            set(&mut r, EntityRef::Face(*f), (operand, i), &own.into_iter().collect::<Vec<_>>(), &[])?;
+            let own: BTreeSet<i64> =
+                face4::edges(&r, *f, None, false, None)?.iter().filter_map(|e| edge_at.get(e).and_then(|j| i64::try_from(*j).ok())).collect();
+            set_on(&mut r, EntityRef::Face(*f), (operand, i), own, Vec::new())?;
         }
         for (i, e) in edges.iter().enumerate() {
             let at = samples(k, &r, *e)?;
-            set(&mut r, EntityRef::Edge(*e), (operand, i), &[], &at)?;
+            set_on(&mut r, EntityRef::Edge(*e), (operand, i), BTreeSet::new(), at)?;
         }
         Ok(Ok(r))
     })?
@@ -220,22 +258,19 @@ pub(crate) fn read(result: &Body) -> Result<Raw> {
         let mut face_uses: BTreeMap<Origin, usize> = BTreeMap::new();
         let mut edge_uses: BTreeMap<Origin, usize> = BTreeMap::new();
         for f in &faces {
-            let said = tags(b, EntityRef::Face(*f));
-            let o: BTreeSet<Origin> = said.iter().map(|s| s.origin).collect();
+            let (o, e) = tag_on(b, EntityRef::Face(*f)).map(|t| (t.origins.clone(), t.edges.clone())).unwrap_or_default();
             for x in &o {
                 *face_uses.entry(*x).or_default() += 1;
             }
-            fe.push(said.iter().flat_map(|s| s.edges.iter().copied()).collect());
+            fe.push(e.into_iter().filter_map(|x| usize::try_from(x).ok()).collect());
             fo.push(o);
         }
         for e in &edges {
-            let said = tags(b, EntityRef::Edge(*e));
-            let o: BTreeSet<Origin> = said.iter().map(|s| s.origin).collect();
+            let (o, p) = tag_on(b, EntityRef::Edge(*e)).map(|t| (t.origins.clone(), t.at.clone())).unwrap_or_default();
             for x in &o {
                 *edge_uses.entry(*x).or_default() += 1;
             }
-            // The capi's Tag has one `at`; an edge with one origin has one attribute.
-            at.push(said.into_iter().next().map(|s| s.at).unwrap_or_default());
+            at.push(p);
             eo.push(o);
         }
 

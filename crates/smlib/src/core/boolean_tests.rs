@@ -461,4 +461,47 @@ mod history {
             assert_eq!(of_a(h, Change::Modified), 0, "{h:?}");
         }
     }
+
+    /// A 10 mm post standing on a 20 mm cube's top against its x = 0 side, imprinted on it: the
+    /// post's foot cuts the top's edge along x = 0 by two vertices. Each piece of that edge is a
+    /// split child, standing for the edge and lying where it lay (the capi's Split gives an untagged
+    /// child the split edge's `at`), so the side x = 0 is still all of itself and Kept.
+    #[test]
+    fn an_imprint_split_edge_lies_where_the_edge_lay() {
+        use solidcraft_geom::brep::history::Change;
+        let (a, b) = (tagged_box([0.0; 3], [20.0; 3], 0), tagged_box([0.0, 5.0, 20.0], [10.0; 3], 1));
+        let cpp = Brep::made(ffi::ops::imprint(a.cpp().unwrap(), b.cpp().unwrap()).unwrap()).history().unwrap();
+        let core = Brep::made_core(super::imprint(a.core().unwrap(), b.core().unwrap()).unwrap().unwrap()).history().unwrap();
+        assert_eq!(core.canonical(), cpp.canonical());
+        let of_a = |h: &Raw, c: Change| h.faces.iter().filter(|f| f.origins.iter().all(|o| o.0 == 0) && f.change == c).count();
+        for h in [&core, &cpp] {
+            // The top's edge along x = 0 is in three pieces, each standing for it alone.
+            let pieces = |e: usize| h.edges.iter().filter(|x| x.origins == [(0, e)]).count();
+            assert!((0..12).any(|e| pieces(e) == 3), "{h:?}");
+            assert_eq!(of_a(h, Change::Kept), 5, "{h:?}");
+            assert_eq!(of_a(h, Change::Modified), 0, "{h:?}");
+            assert_eq!(of_a(h, Change::Split), 2, "{h:?}");
+        }
+    }
+
+    /// A 10 mm post standing on a 20 mm cube's top, subtracted from it: the post only touches the
+    /// top, which the boolean copies the post's foot onto (`SmAttribute::Copy`). SMLib's Copy
+    /// leaves a target that already has a tag alone, so the top stands for the cube's top only.
+    #[test]
+    fn a_copy_onto_a_tagged_face_keeps_its_own_tag() {
+        use solidcraft_geom::brep::history::Change;
+        let (a, b) = (tagged_box([0.0; 3], [20.0; 3], 0), tagged_box([5.0, 5.0, 20.0], [10.0; 3], 1));
+        parity(&a, &b, BooleanOp::Subtract);
+        let core = Brep::made_core(super::boolean(a.core().unwrap(), b.core().unwrap(), BooleanOp::Subtract).unwrap().unwrap()).history().unwrap();
+        assert_eq!(core.faces.len(), 6, "{core:?}");
+        assert!(core.faces.iter().all(|f| f.change == Change::Kept && f.origins.len() == 1 && f.origins[0].0 == 0), "{core:?}");
+    }
+
+    /// Two 10 mm cubes side by side sharing the face x = 10, the second subtracted from the first:
+    /// the second's edge on that face is copied onto the first's edge it lies on, which keeps its
+    /// own tag (SMLib's Copy), as on C++.
+    #[test]
+    fn a_copy_onto_a_tagged_edge_has_the_cpp_history() {
+        parity(&tagged_box([0.0; 3], [10.0; 3], 0), &tagged_box([10.0, 0.0, 0.0], [10.0; 3], 1), BooleanOp::Subtract);
+    }
 }
