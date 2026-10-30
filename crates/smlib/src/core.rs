@@ -198,6 +198,7 @@ pub(crate) fn fixes() -> UpstreamFixes {
     f.linear_sweep_arc_is_cylinder = true;
     f.offset_closes_loop_gaps = true;
     f.cylinder_plane_tangent_within_tolerance = true;
+    f.boolean_wire_edge_keeps_faceuse_shell = true;
     f
 }
 
