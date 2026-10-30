@@ -194,6 +194,10 @@ pub(crate) fn fixes() -> UpstreamFixes {
     f.local_operation_closes_walls_to_nothing = true;
     f.linear_sweep_arc_to_cylinder_zero = true;
     f.imprint_reuses_coincident_face_edge = true;
+    f.boolean_new_face_closure_both_sides = true;
+    f.linear_sweep_arc_is_cylinder = true;
+    f.offset_closes_loop_gaps = true;
+    f.cylinder_plane_tangent_within_tolerance = true;
     f
 }
 
@@ -201,9 +205,15 @@ pub(crate) fn fixes() -> UpstreamFixes {
 /// them on would part this backend from the C++ one. `precise_properties_trim_base_v`
 /// (solidcore#1664, WR-563), `bspline_trim_keeps_rational_end_spans` (solidcore#1711, WR-575) and
 /// `fillet_blend_curve_revolved_on_arc` (solidcore#1759, WR-581, an own design waiting for the
-/// fork's fix) have no fork commit.
+/// fork's fix) have no fork commit. `face_tight_box_searches_trim` (solidcore#1811, WR-588) is the
+/// fork's beb6061, which landed after `SMLIB_REV` (tangency-labs/smlib#68).
 #[cfg(test)]
-const HELD_BACK: &[&str] = &["precise_properties_trim_base_v", "bspline_trim_keeps_rational_end_spans", "fillet_blend_curve_revolved_on_arc"];
+const HELD_BACK: &[&str] = &[
+    "precise_properties_trim_base_v",
+    "bspline_trim_keeps_rational_end_spans",
+    "fillet_blend_curve_revolved_on_arc",
+    "face_tight_box_searches_trim",
+];
 
 fn fresh() -> Kernel {
     let mut k = Kernel::new(&KernelOptions::default());
