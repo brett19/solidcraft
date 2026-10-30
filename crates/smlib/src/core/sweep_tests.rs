@@ -171,6 +171,27 @@ fn case(name: &str) -> Case {
             ),
             Expect::About(PI * (10.0 + 10.0 * FRAC_PI_2), 1e-4),
         ),
+        // A 4 x 3 rectangle round a closed 60 x 40 rounded rectangle (corner radius 8), from the
+        // middle of its bottom line: no caps, the walls closing on each other. Pappus: A L, with
+        // A = 12 and L = 2 (44 + 24) + 4 (π/2) 8.
+        "sweep_round_a_closed_path" => {
+            let arc = |c: [f64; 3], r: [f64; 3]| Curve::Arc { center: c, axis: Z, reference: r, radius: 8.0, start: 0.0, end: FRAC_PI_2 };
+            let path = vec![
+                line([0.0, -20.0, 0.0], [22.0, -20.0, 0.0]),
+                arc([22.0, -12.0, 0.0], [0.0, -1.0, 0.0]),
+                line([30.0, -12.0, 0.0], [30.0, 12.0, 0.0]),
+                arc([22.0, 12.0, 0.0], [1.0, 0.0, 0.0]),
+                line([22.0, 20.0, 0.0], [-22.0, 20.0, 0.0]),
+                arc([-22.0, 12.0, 0.0], [0.0, 1.0, 0.0]),
+                line([-30.0, 12.0, 0.0], [-30.0, -12.0, 0.0]),
+                arc([-22.0, -12.0, 0.0], [-1.0, 0.0, 0.0]),
+                line([-22.0, -20.0, 0.0], [0.0, -20.0, 0.0]),
+            ];
+            c(
+                Op::Sweep(polygon(&[[0.0, -22.0, -1.5], [0.0, -18.0, -1.5], [0.0, -18.0, 1.5], [0.0, -22.0, 1.5]]), path, SweepFrame::Follow, true),
+                Expect::About(12.0 * (2.0 * (44.0 + 24.0) + 16.0 * PI), 1e-4),
+            )
+        }
         // The frustum of a square pyramid: side 20 to 10 over 10.
         "loft_two_squares" => {
             c(Op::Loft(vec![square(0.0, 0.0, 20.0, 0.0), square(5.0, 5.0, 10.0, 10.0)], 1, true), Expect::Volume(frustum(400.0, 100.0, 10.0)))
@@ -384,14 +405,15 @@ cases!(
     extrude_rectangle,
     extrude_circle,
     extrude_square_drafted_round,
-    extrude_square_drafted_curvature: ignore = "solidcore#1449: no curvature-keeping draft corners, fork 54148db",
+    extrude_square_drafted_curvature,
     extrude_circle_drafted,
-    extrude_draft_wall_closes: ignore = "solidcore#1449: no curvature-keeping draft corners nor SmTaperCornerRefusal, fork 54148db",
+    extrude_draft_wall_closes,
     revolve_rectangle_full,
     revolve_rectangle_quarter,
     sweep_circle_straight,
     sweep_circle_along_an_arc,
-    sweep_along_a_bent_path: ignore = "solidcore#1450: no curve sweep keeping the profile at the path's start, fork 2dd71a0 / 5d3939e",
+    sweep_along_a_bent_path,
+    sweep_round_a_closed_path,
     loft_two_squares,
     loft_two_circles,
     loft_to_point_pyramid,

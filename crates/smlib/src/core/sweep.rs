@@ -15,12 +15,6 @@
 //!
 //! What the capi asks of SMLib code that solidcore does not have is [`Error::Unsupported`],
 //! refused where the capi would first reach it, so every error before it is the C++ path's:
-//! - a drafted extrusion with a sharp corner under [`DraftCorner::Curvature`] (fork 54148db), or
-//!   under [`DraftCorner::Tangent`] with a profile of lines and arcs only (fork e8f23e0): the
-//!   fork's `sm_CreateCurvatureKeepingWalls` and its `SmTaperCornerRefusal`;
-//! - a sweep along a path that is neither straight nor (turning with it) arcs about one axis:
-//!   SM_API's curve sweep with `bProfileAtPathStart` (fork 2dd71a0) and its placements (fork
-//!   5d3939e);
 //! - a planar section of a face (`SmBrep::CreatePlanarSectionCurves`).
 //!
 //! The screw sweeps are the capi's own: it builds their walls from SMLib's B-spline surfaces,
@@ -41,17 +35,21 @@ use solidcore::geom::tol::USE_DEFAULT;
 use solidcore::geom::vector3d::{Point3, Vec3};
 use solidcore::heal::stitch::p1::api_stitch_into_solid;
 use solidcore::kernel::Kernel;
-use solidcore::math::EFF_ZERO_SQRT;
 use solidcore::nurbs::b_spline_curve::{BSplineCurve, BSplineCurveForm, CanonicalData, CurveCanonical, KnotType};
 use solidcore::nurbs::b_spline_surface::{BSplineSurface, BSplineSurfaceForm, CanonicalSurfaceData};
 use solidcore::nurbs::b_spline_surface_n_lib::p2::OrientType;
+use solidcore::primitive::primitive_creation::SweepOptions;
 use solidcore::surface::cone::Cone;
 use solidcore::surface::surface::Surface;
-use solidcore::sweep::api_brep::{create_linear_sweep, create_rotational_sweep, create_taper_extrude};
+use solidcore::sweep::api_brep::{
+    CornerRefusal, OffsetCornerType, TaperCornerRefusal, TaperExtrude, create_curve_sweep_with_placements, create_linear_sweep,
+    create_rotational_sweep, create_taper_extrude_with_corner,
+};
 use solidcore::sweep::api_surfaces::create_skin_primitive;
 use solidcore::topology::brep::p1::{ParallelProjectionOptions, create_parallel_projection_curves};
 use solidcore::topology::brep::p2::{ArenaNotifyState, is_manifold_solid};
 use solidcore::topology::brep::p3::new_brep;
+use solidcore::topology::brep::p4::stitch_faces;
 use solidcore::topology::brep::p5::{StitchAndOrientOptions, stitch_and_orient};
 use solidcore::topology::brep::p8::{
     FaceBuildEnv, create_face_from_surface, create_faces_with_curves, create_planar_face_with_3d_curves, create_planar_faces_with_3d_curves,
@@ -61,7 +59,7 @@ use solidcore::topology::{Brep, FaceId};
 
 use super::blend::status;
 use super::offset::{face_miss, pick_faces};
-use super::{Body, answer, run, with_body};
+use super::{Body, run, with_body};
 use crate::sweeps::{Affine, Curve as Profile, DraftCorner, Ends, MAX_CURVES, MAX_STATION_CURVES, MAX_STATIONS, SweepFrame};
 use crate::{Error, Result, ffi};
 
@@ -298,44 +296,6 @@ pub(crate) fn planar_faces(loops: &[Profile]) -> Result<Body> {
     })
 }
 
-/// The tangent of `c` at `t`, from the left or the right.
-fn tangent(k: &Kernel, c: &Curve, t: f64, from_left: bool) -> solidcore::Result<Option<Vec3>> {
-    Ok(c.evaluate(k, t, 1, from_left, true)?.get(1).copied())
-}
-
-/// Whether the angle about `n` from `a` to `b` is a sharp corner (`sm_DraftHasCorner`: more than
-/// `SM_EFF_ZERO_SQRT`); an angle whose measure returns a status is none, as there ([`answer`]).
-fn sharp(n: Vec3, a: Option<Vec3>, b: Option<Vec3>) -> solidcore::Result<bool> {
-    Ok(match (a, b) {
-        (Some(a), Some(b)) => answer(n.ccw_angle_between(a, b))?.is_some_and(|x| x.abs() > EFF_ZERO_SQRT),
-        _ => false,
-    })
-}
-
-/// `sm_DraftHasCorner`, on the profile as given (one closed loop, in order): whether it has a
-/// sharp corner, where one curve meets the next or (a NURBS curve's own) at an inner knot of full
-/// multiplicity, where SMLib's composite curve splits it.
-fn has_corner(k: &Kernel, curves: &[Curve], n: Vec3) -> solidcore::Result<bool> {
-    let count = curves.len();
-    for (i, b) in curves.iter().enumerate() {
-        let Some(a) = curves.get((i + count - 1) % count) else { continue };
-        let (ia, ib) = (a.natural_interval(), b.natural_interval());
-        if sharp(n, tangent(k, a, ia.max(), true)?, tangent(k, b, ib.min(), false)?)? {
-            return Ok(true);
-        }
-        if let CurveKind::BSpline(s) = b.kind() {
-            let c = s.canonical()?;
-            let inner = c.knots.iter().zip(&c.knot_multiplicities).skip(1).take(c.knots.len().saturating_sub(2));
-            for (&u, &m) in inner {
-                if m >= c.degree && sharp(n, tangent(k, b, u, true)?, tangent(k, b, u, false)?)? {
-                    return Ok(true);
-                }
-            }
-        }
-    }
-    Ok(false)
-}
-
 /// `smlib_extrude`: the planar `profile` extruded `distance` along `direction`, straight
 /// (`SmApiCreateLinearSweep`) or drafted (`SmApiCreateTaperExtrude`).
 pub(crate) fn extrude(profile: &[Profile], direction: [f64; 3], distance: f64, draft: f64, corner: DraftCorner, cap: bool) -> Result<Body> {
@@ -367,25 +327,33 @@ pub(crate) fn extrude(profile: &[Profile], direction: [f64; 3], distance: f64, d
         }
         let height = if along > 0.0 { distance } else { -distance };
         let angle = draft * 180.0 / PI;
-        // In `CreateTaperExtrude`, a profile with a sharp corner keeps its walls' curvature
-        // (the curvature rule) or continues lines' and arcs' walls as their tangent planes (the
-        // tangent rule, lines and arcs only): the fork's `sm_CreateCurvatureKeepingWalls`
-        // (54148db, e8f23e0), which solidcore does not have. Without a sharp corner the three
-        // rules give the same walls, which the offset method builds.
-        let exact = curves.iter().all(|c| matches!(c.kind(), CurveKind::Line(_) | CurveKind::Ellipse(_)));
-        let fork_only = match corner {
-            DraftCorner::Curvature => true,
-            DraftCorner::Tangent => exact,
-            DraftCorner::Round => false,
+        // The fork's corner rules (54148db, e8f23e0): the curvature rule continues each wall as
+        // itself, the tangent rule a profile of lines and arcs as their tangent planes
+        // (`fixes.taper_tangent_corner_planes`), and a corner either cannot close is refused,
+        // with why and where (`SmTaperCornerRefusal`, `pOptRefusedCorner`), as the capi passes it on.
+        let rule = match corner {
+            DraftCorner::Curvature => OffsetCornerType::CurveExtension,
+            DraftCorner::Tangent => OffsetCornerType::LinearExtension,
+            DraftCorner::Round => OffsetCornerType::FilletCorner,
         };
-        if fork_only && has_corner(k, &curves, normal)? {
-            return Ok(Err(Error::Unsupported));
-        }
-        match create_taper_extrude(k, &refs, height, angle, if cap { 3 } else { 0 }, corner == DraftCorner::Round) {
-            Ok(r) => finish(r, cap),
+        match create_taper_extrude_with_corner(k, &refs, height, angle, if cap { 3 } else { 0 }, rule) {
+            Ok(TaperExtrude::Solid(r)) => finish(r, cap),
+            Ok(TaperExtrude::Refused(r)) => Ok(Err(refused(r))),
             Err(e) => Ok(Err(status(e))),
         }
     })
+}
+
+/// A refused draft corner as the capi reports it: the reason's status with the corner's point,
+/// [`Error::Corner`] when the point is finite and the status's own error otherwise.
+fn refused(r: CornerRefusal) -> Error {
+    let (why, code) = match r.reason {
+        TaperCornerRefusal::Apart => (crate::sweeps::CornerRefusal::Apart, ffi::sweeps::ERR_CORNER_APART),
+        TaperCornerRefusal::WallCloses => (crate::sweeps::CornerRefusal::WallCloses, ffi::sweeps::ERR_WALL_CLOSES),
+        TaperCornerRefusal::NotExact => (crate::sweeps::CornerRefusal::NotExact, ffi::trim::ERR_NOT_EXACT),
+    };
+    let at = [r.corner.x, r.corner.y, r.corner.z];
+    if at.iter().all(|x| x.is_finite()) { Error::Corner { why, at } } else { crate::error(code) }
 }
 
 /// `smlib_revolve`: the planar `profile` turned `angle` radians about the axis through `origin`
@@ -546,12 +514,39 @@ pub(crate) fn sweep_placed(profile: &[Profile], path: &[Profile], frame: SweepFr
             }
             return finish(r, cap);
         }
-        if let Err(e) = joined(&along)? {
-            return Ok(Err(e));
+        let path_curve = match joined(&along)? {
+            Ok(b) => Curve::from(b),
+            Err(e) => return Ok(Err(e)),
+        };
+        // Round a closed path the profile comes back onto itself: the walls close on each other
+        // there, where caps would lie on top of each other inside the solid.
+        let (Some(head), Some(tail)) = (along.first(), along.last()) else { return Ok(Err(Error::Argument)) };
+        let closed = (ends(k, head)?.0 - ends(k, tail)?.1).length() <= 1e-6;
+        // `SmApiCreateCurveSweep` with `bProfileAtPathStart` (fork 2dd71a0), so the profile is
+        // swept where it lies, and the placements it reports (fork 5d3939e).
+        let options = SweepOptions {
+            cap_ends: cap && !closed,
+            translational_sweep: frame == SweepFrame::Translate,
+            profile_at_path_start: true,
+            ..SweepOptions::default()
+        };
+        let r = match create_curve_sweep_with_placements(k, &refs, Some(&path_curve), None, None, Some(&options)) {
+            Ok(r) => r,
+            Err(e) => return Ok(Err(status(e))),
+        };
+        for (m, p) in placed.iter_mut().zip(&r.placements) {
+            *m = motion(p.x_axis(), p.y_axis(), p.z_axis(), p.origin());
         }
-        // `SmApiCreateCurveSweep` with `bProfileAtPathStart` (fork 2dd71a0) and the placements it
-        // reports (fork 5d3939e): solidcore's curve sweep has neither.
-        Ok(Err(Error::Unsupported))
+        let mut b = r.sweep.brep;
+        if closed {
+            let tol = b.tolerance();
+            match stitch_faces(k, &mut b, tol, None, false) {
+                Ok(s) if s.lamina_edges != 0 => return Ok(Err(Error::NotSolid)),
+                Ok(_) => b.refresh_cached_topology(),
+                Err(e) => return Ok(Err(status(e))),
+            }
+        }
+        finish(b, cap)
     })?;
     Ok((body, placed))
 }
