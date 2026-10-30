@@ -164,6 +164,17 @@ pub(crate) fn fixes() -> UpstreamFixes {
     f.shell_edges_on_analytics_exact = true;
     f.ssi_no_reverse_of_empty_trace = true;
     f.ssi_pole_point_keeps_its_tangent = true;
+    f.iso_curve_sliver_domain_is_degenerate = true;
+    f.corner_blend_coons_patch_tangent_to_sides = true;
+    f.fillet_patch_keeps_fillet_edges = true;
+    f.fillet_corner_ball_center_from_axes = true;
+    f.seam_point_solutions_are_one = true;
+    f.boolean2d_plane_covers_far_faces = true;
+    f.brep_area_between_solid_and_void = true;
+    f.boolean_splits_definition_across_split = true;
+    f.curve_tight_box_interval_knots = true;
+    f.fillet_refuse_overlapping_bands = true;
+    f.ssi_tangent_curve_tracer = true;
     f
 }
 
