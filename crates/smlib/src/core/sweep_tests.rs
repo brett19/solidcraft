@@ -435,7 +435,7 @@ cases!(
     extrude_circle,
     extrude_circle_in_two_halves,
     extrude_circle_in_two_frames,
-    extrude_half_disc_split_arc[ignore = "solidcore#1477: solidcore sweeps a partial arc to a surface of extrusion (exported as a rational spline), the C++ kernel to a cylinder; a single half arc does the same (fix #1495, behind an UpstreamFixes flag, next pin)"],
+    extrude_half_disc_split_arc,
     extrude_square_drafted_round,
     extrude_square_drafted_curvature,
     extrude_circle_drafted,

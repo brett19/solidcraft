@@ -433,7 +433,7 @@ cases!(
     thicken_plate_symmetric,
     thicken_a_solid,
     offset_sheet_plate,
-    offset_sheet_quarter_cylinder: ignore = "solidcore#1477: the quarter arc sweeps to an SmSurfOfExtrusion, whose offset exports as a spline, where the fork's 12918e9 sweeps an SmCylinder (solidcore#1477)",
+    offset_sheet_quarter_cylinder,
     offset_sheet_a_solid,
     offset_sheet_a_sphere,
     offset_sheet_a_sphere_to_its_centre,
