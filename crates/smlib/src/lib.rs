@@ -231,6 +231,14 @@ pub fn current_call() -> Option<String> {
 pub struct Brep {
     cpp: OnceLock<Result<ffi::Handle>>,
     core: OnceLock<Result<core::Body>>,
+    /// The kernel that made it, whose tags [`Brep::history`] reads (the arrays carry none).
+    maker: route::Backend,
+    /// `Some(k)` for [`Brep::tagged`]`(k)`: its faces and edges stand for their own positions in
+    /// operand `k`, so the body converted for the other kernel is tagged the same way there.
+    operand: Option<usize>,
+    /// Why [`Brep::history`] cannot be read, for a body made by a solidcore operation that does
+    /// not carry the attributes yet.
+    untracked: Option<&'static str>,
 }
 
 impl std::fmt::Debug for Brep {
@@ -242,29 +250,51 @@ impl std::fmt::Debug for Brep {
 impl Brep {
     /// A body the C++ kernel made.
     fn made(h: ffi::Handle) -> Brep {
-        Brep { cpp: OnceLock::from(Ok(h)), core: OnceLock::new() }
+        Brep { cpp: OnceLock::from(Ok(h)), core: OnceLock::new(), maker: route::Backend::Smlib, operand: None, untracked: None }
     }
 
     /// A body solidcore made.
     fn made_core(b: core::Body) -> Brep {
-        Brep { cpp: OnceLock::new(), core: OnceLock::from(Ok(b)) }
+        Brep { cpp: OnceLock::new(), core: OnceLock::from(Ok(b)), maker: route::Backend::Solidcore, operand: None, untracked: None }
     }
 
-    /// The C++ kernel's body: converted from solidcore's the first time it is asked for.
+    /// A body a solidcore blend made: solidcore's fillets do not carry the body's attributes onto
+    /// the faces they rebuild yet (solidcore#1594), so its history is not read.
+    fn made_core_blend(b: core::Body) -> Brep {
+        Brep { untracked: Some("the history of a blend on solidcore (solidcore#1594)"), ..Brep::made_core(b) }
+    }
+
+    /// A body a solidcore draft made: its local operation does not carry the body's attributes
+    /// yet (every face comes out with none), so its history is not read.
+    fn made_core_draft(b: core::Body) -> Brep {
+        Brep { untracked: Some("the history of a draft on solidcore, whose local operation does not carry attributes yet"), ..Brep::made_core(b) }
+    }
+
+    /// The C++ kernel's body: converted from solidcore's the first time it is asked for (and
+    /// tagged as solidcore's is, for a [`Brep::tagged`] body).
     fn cpp(&self) -> Result<&ffi::Handle> {
         let made = self.cpp.get_or_init(|| {
             let core = self.core.get().ok_or(Error::Empty)?.as_ref().map_err(Clone::clone)?;
             let a = core::to_arrays(core)?;
-            flat::Flat::from_arrays(&a)?.import()?.cpp.into_inner().unwrap_or(Err(Error::Empty))
+            let h = flat::Flat::from_arrays(&a)?.import()?.cpp.into_inner().unwrap_or(Err(Error::Empty))?;
+            match self.operand {
+                Some(k) => ffi::history::tag(&h, i32::try_from(k).map_err(|_| Error::Argument)?).map_err(error),
+                None => Ok(h),
+            }
         });
         made.as_ref().map_err(Clone::clone)
     }
 
-    /// solidcore's body: converted from the C++ kernel's the first time it is asked for.
+    /// solidcore's body: converted from the C++ kernel's the first time it is asked for (and
+    /// tagged as the C++ kernel's is, for a [`Brep::tagged`] body).
     fn core(&self) -> Result<&core::Body> {
         let made = self.core.get_or_init(|| {
             self.cpp.get().ok_or(Error::Empty)?.as_ref().map_err(Clone::clone)?;
-            core::from_arrays(&self.cpp_arrays()?)
+            let b = core::from_arrays(&self.cpp_arrays()?)?;
+            match self.operand {
+                Some(k) => core::history::tag(&b, k),
+                None => Ok(b),
+            }
         });
         made.as_ref().map_err(Clone::clone)
     }
