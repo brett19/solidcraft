@@ -180,14 +180,24 @@ pub(crate) fn fixes() -> UpstreamFixes {
     f.local_operation_step_walls = true;
     f.edge_check_orders_tangent_faces = true;
     f.revolve_arc_touching_axis_is_horn_torus = true;
+    f.thicken_planar_side_walls = true;
     f
 }
 
 /// Opt-in fixes left off because the C++ fork (`SMLIB_REV`) does not carry them yet, so turning
 /// them on would part this backend from the C++ one. `precise_properties_trim_base_v`
-/// (solidcore#1664, WR-563) has no fork commit.
+/// (solidcore#1664, WR-563) has no fork commit; the others' fork commits are past `SMLIB_REV`:
+/// `fillet_torus_span_from_start_section` (WR-568, smlib@985faae), `fillet_knife_edge_rounds`
+/// (WR-570, smlib@b7ec55b), `taper_wall_closes_at_apex` (WR-571, smlib@183ea65) and
+/// `revolution_round_offset_collapses` (WR-567, smlib@8b2090f).
 #[cfg(test)]
-const HELD_BACK: &[&str] = &["precise_properties_trim_base_v"];
+const HELD_BACK: &[&str] = &[
+    "precise_properties_trim_base_v",
+    "fillet_torus_span_from_start_section",
+    "fillet_knife_edge_rounds",
+    "taper_wall_closes_at_apex",
+    "revolution_round_offset_collapses",
+];
 
 fn fresh() -> Kernel {
     let mut k = Kernel::new(&KernelOptions::default());
