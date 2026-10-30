@@ -175,6 +175,9 @@ pub(crate) fn fixes() -> UpstreamFixes {
     f.curve_tight_box_interval_knots = true;
     f.fillet_refuse_overlapping_bands = true;
     f.ssi_tangent_curve_tracer = true;
+    f.torus_check_reads_v_interval = true;
+    f.torus_check_spindle_apex = true;
+    f.local_operation_step_walls = true;
     f
 }
 
