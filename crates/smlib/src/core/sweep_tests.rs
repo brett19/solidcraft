@@ -11,7 +11,7 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use super::sweep::{extrude, face_section, loft, loft_to_point, planar_faces, project_curves, revolve, screw_sweep, sweep_placed, sweep_stations};
-use super::{Body, area, bounds, counts, make_box, to_arrays, volume};
+use super::{Body, area, bounds, counts, make_box, make_cylinder, to_arrays, volume};
 use crate::Error;
 use crate::export::native;
 use crate::sweeps::{Affine, CornerRefusal, Curve, DraftCorner, Ends, SweepFrame};
@@ -499,15 +499,129 @@ fn project_a_line_onto_a_face() {
     assert!((near(ends[0], want[0]) && near(ends[1], want[1])) || (near(ends[0], want[1]) && near(ends[1], want[0])), "{ends:?}");
 }
 
-/// A face's planar section needs `SmBrep::CreatePlanarSectionCurves`: not supported, after the
-/// face pick.
+/// A point of a section curve: the rational B-spline at `u` (de Boor on the weighted points).
+fn at(c: &Curve, u: f64) -> [f64; 3] {
+    let Curve::Nurbs { degree, points, knots } = c else { panic!("{c:?}") };
+    let p = *degree;
+    let span = (p..points.len()).rev().find(|&i| knots[i] <= u).unwrap_or(p);
+    let mut d: Vec<[f64; 4]> = (0..=p).map(|j| points[span - p + j]).map(|[x, y, z, w]| [x * w, y * w, z * w, w]).collect();
+    for r in 1..=p {
+        for j in (r..=p).rev() {
+            let i = span - p + j;
+            let den = knots[i + p + 1 - r] - knots[i];
+            let a = if den > 0.0 { (u - knots[i]) / den } else { 0.0 };
+            let prev = d[j - 1];
+            for (x, q) in d[j].iter_mut().zip(prev) {
+                *x = (1.0 - a) * q + a * *x;
+            }
+        }
+    }
+    let [x, y, z, w] = d[p];
+    [x / w, y / w, z / w]
+}
+
+/// `n + 1` points along each section curve over its interval.
+fn samples(got: &[(Curve, [f64; 2])], n: usize) -> Vec<Vec<[f64; 3]>> {
+    got.iter().map(|(c, [a, b])| (0..=n).map(|i| at(c, a + (b - a) * i as f64 / n as f64)).collect()).collect()
+}
+
+/// The length of the section curves, from chords.
+fn length(pts: &[Vec<[f64; 3]>]) -> f64 {
+    pts.iter().flat_map(|p| p.windows(2)).map(|w| (0..3).map(|i| (w[1][i] - w[0][i]).powi(2)).sum::<f64>().sqrt()).sum()
+}
+
+/// A loft from a 10 x 10 square at z = 0 to a 6 x 6 one at z = 10 (degree 1): its front wall
+/// runs from y = 0 up to y = 2, so the plane z = 5 cuts it in the line from (9, 1, 5) to
+/// (1, 1, 5).
+fn square_frustum() -> Vec<Vec<Curve>> {
+    vec![square(0.0, 0.0, 10.0, 0.0), square(2.0, 2.0, 6.0, 10.0)]
+}
+
 #[test]
-fn a_face_section_is_not_supported_yet() {
+fn a_lofted_wall_section_is_the_line_across_it() {
     let got = timed("section", || {
-        let b = make_box([0.0; 3], [10.0; 3]).unwrap();
-        face_section(&b, [5.0, 5.0, 10.0], 0.01, [5.0, 5.0, 5.0], [1.0, 0.0, 0.0], 1e-6)
-    });
-    assert_eq!(got.err(), Some(Error::Unsupported));
+        let b = loft(&square_frustum(), 1, true).unwrap();
+        face_section(&b, [5.0, 1.0, 5.0], 0.01, [0.0, 0.0, 5.0], [0.0, 0.0, 1.0], 1e-6)
+    })
+    .unwrap();
+    assert_eq!(got.len(), 1, "{got:?}");
+    let p = samples(&got, 8);
+    let ends = [p[0][0], p[0][8]];
+    let want = [[9.0, 1.0, 5.0], [1.0, 1.0, 5.0]];
+    assert!((near(ends[0], want[0]) && near(ends[1], want[1])) || (near(ends[0], want[1]) && near(ends[1], want[0])), "{ends:?}");
+    assert!(p[0].iter().all(|q| (q[1] - 1.0).abs() < 1e-9 && (q[2] - 5.0).abs() < 1e-9), "{p:?}");
+}
+
+/// The plane z = 3 through the side of a cylinder of radius 5 and height 10 on the xy plane: the
+/// circle of radius 5 at z = 3, 2π·5 long.
+#[test]
+#[ignore = "smlib_face_section calls CreatePlanarSectionCurves with bForceUVClassify left FALSE, so an analytic face's section (no UV curve) is trimmed away and the capi reports SMLIB_ERR_EMPTY, on the C++ kernel too (the_cpp_kernel_sections_a_face_alike)"]
+fn a_cylinder_side_section_is_its_circle() {
+    let got = timed("section", || {
+        let b = make_cylinder([0.0; 3], 5.0, 10.0).unwrap();
+        face_section(&b, [5.0, 0.0, 5.0], 0.01, [0.0, 0.0, 3.0], [0.0, 0.0, 1.0], 1e-7)
+    })
+    .unwrap();
+    let p = samples(&got, 2000);
+    for q in p.iter().flatten() {
+        assert!(((q[0] * q[0] + q[1] * q[1]).sqrt() - 5.0).abs() < 1e-6 && (q[2] - 3.0).abs() < 1e-9, "{q:?}");
+    }
+    let len = length(&p);
+    assert!((len - TAU * 5.0).abs() < 1e-4, "{len} against {}", TAU * 5.0);
+}
+
+/// The same sections on the C++ kernel: the lofted wall's line along the same points, and on a
+/// box's top and a cylinder's side, whose analytic intersectors make no UV curves, the same
+/// [`Error::Empty`].
+#[cfg(feature = "native")]
+#[test]
+fn the_cpp_kernel_sections_a_face_alike() {
+    use crate::{Brep, ffi};
+    type Case = (&'static str, Box<dyn Fn() -> Body>, Brep, [[f64; 3]; 3]);
+    let cases: [Case; 3] = [
+        (
+            "loft",
+            Box::new(|| loft(&square_frustum(), 1, true).unwrap()),
+            {
+                crate::sweeps::ON_CPP.with(|c| c.set(true));
+                let b = Brep::loft(&square_frustum(), 1, true).unwrap();
+                crate::sweeps::ON_CPP.with(|c| c.set(false));
+                b
+            },
+            [[5.0, 1.0, 5.0], [0.0, 0.0, 5.0], [0.0, 0.0, 1.0]],
+        ),
+        (
+            "box",
+            Box::new(|| make_box([0.0; 3], [10.0; 3]).unwrap()),
+            ffi::make_box(&[0.0; 3], &[10.0; 3]).map(Brep::made).unwrap(),
+            [[5.0, 5.0, 10.0], [5.0, 5.0, 5.0], [1.0, 0.0, 0.0]],
+        ),
+        (
+            "cylinder",
+            Box::new(|| make_cylinder([0.0; 3], 5.0, 10.0).unwrap()),
+            ffi::make_cylinder(&[0.0; 3], 5.0, 10.0).map(Brep::made).unwrap(),
+            [[5.0, 0.0, 5.0], [0.0, 0.0, 3.0], [0.0, 0.0, 1.0]],
+        ),
+    ];
+    for (name, core, cpp, [face, through, n]) in cases {
+        crate::sweeps::ON_CPP.with(|c| c.set(true));
+        let want = cpp.face_section(face, 0.01, through, n, 1e-6);
+        crate::sweeps::ON_CPP.with(|c| c.set(false));
+        let got = face_section(&core(), face, 0.01, through, n, 1e-6);
+        let (got, want) = match (got, want) {
+            (Ok(g), Ok(w)) => (g, w),
+            (g, w) => {
+                assert_eq!(g.err(), w.err(), "{name}");
+                assert!(name != "loft", "the loft's wall has its section");
+                continue;
+            }
+        };
+        assert_eq!(got.len(), want.len(), "{name}: {got:?} against {want:?}");
+        let (g, w) = (samples(&got, 64), samples(&want, 64));
+        for (a, b) in g.iter().flatten().zip(w.iter().flatten()) {
+            assert!(a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-9), "{name}: {a:?} against {b:?}");
+        }
+    }
 }
 
 /// The capi's argument checks, before any kernel call.

@@ -13,10 +13,6 @@
 //! for: a closed manifold solid when the ends are capped ([`Error::NotSolid`] otherwise), never a
 //! body without faces ([`Error::Empty`]).
 //!
-//! What the capi asks of SMLib code that solidcore does not have is [`Error::Unsupported`],
-//! refused where the capi would first reach it, so every error before it is the C++ path's:
-//! - a planar section of a face (`SmBrep::CreatePlanarSectionCurves`).
-//!
 //! The screw sweeps are the capi's own: it builds their walls from SMLib's B-spline surfaces,
 //! cylinders and face builders (`Stations`, `screw_wall`, `cylinder_piece`), with no SM_API
 //! sweep behind them, and solidcore leaves them to the capi (solidcore PR #1326, closed as
@@ -55,6 +51,7 @@ use solidcore::topology::brep::p7::copy_faces;
 use solidcore::topology::brep::p8::{
     FaceBuildEnv, create_face_from_surface, create_faces_with_curves, create_planar_face_with_3d_curves, create_planar_faces_with_3d_curves,
 };
+use solidcore::topology::brep::planar_section::{PlanarSectionOptions, SectionOutputs, create_planar_section_curves};
 use solidcore::topology::topology_traverser::Marks;
 use solidcore::topology::{Brep, FaceId};
 use solidcore::{EntityRef, SolidError};
@@ -1498,8 +1495,10 @@ pub(crate) fn project_curves(
     })?
 }
 
-/// `smlib_face_section`: its checks and the pick, then not supported: the section is
-/// `SmBrep::CreatePlanarSectionCurves`, which solidcore does not have.
+/// `smlib_face_section`: the section of the face nearest `face_point` by the plane through
+/// `plane_point` square to `plane_normal` (`SmBrep::CreatePlanarSectionCurves` over the whole
+/// B-rep, keeping the curves of the picked face), as NURBS with their intervals; none is
+/// [`Error::Empty`].
 pub(crate) fn face_section(
     body: &Body,
     face_point: [f64; 3],
@@ -1511,14 +1510,36 @@ pub(crate) fn face_section(
     if !face_point.iter().chain(&plane_point).chain(&plane_normal).all(|x| x.is_finite()) || !tolerances_ok(pick_tolerance, tolerance) {
         return Err(Error::Argument);
     }
-    if unit(plane_normal).is_none() {
-        return Err(Error::Argument);
-    }
+    let Some(normal) = unit(plane_normal) else { return Err(Error::Argument) };
     with_body("smlib_face_section", body, |k, b| {
-        if let Err(e) = picked_face(k, b, face_point, pick_tolerance)? {
-            return Ok(Err(e));
+        let face = match picked_face(k, b, face_point, pick_tolerance)? {
+            Ok(f) => f,
+            Err(e) => return Ok(Err(e)),
+        };
+        let opts = PlanarSectionOptions {
+            approx_tol_3d: Some(tolerance),
+            outputs: SectionOutputs { curves_3d: true, uv_curves: true, faces: true },
+            ..PlanarSectionOptions::default()
+        };
+        let made = match create_planar_section_curves(k, b, v3(plane_point), normal, &opts) {
+            Ok(m) => m,
+            Err(e) => return Ok(Err(status(e))),
+        };
+        let curves = made.curves_3d.unwrap_or_default();
+        let faces = made.faces.unwrap_or_default();
+        // (each curve's face: without one apiece the picked face's curves are not known)
+        if faces.len() != curves.len() {
+            return Ok(Err(Error::Unsupported));
         }
-        // `CreatePlanarSectionCurves`: not in solidcore.
-        Ok(Err(Error::Unsupported))
+        let mut out = Vec::new();
+        for (c, &f) in curves.iter().zip(&faces) {
+            if f == face {
+                match put_curve(c)? {
+                    Ok(x) => out.push(x),
+                    Err(e) => return Ok(Err(e)),
+                }
+            }
+        }
+        Ok(if out.is_empty() { Err(Error::Empty) } else { Ok(out) })
     })?
 }
