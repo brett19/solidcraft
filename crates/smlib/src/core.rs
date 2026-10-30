@@ -59,6 +59,7 @@ pub(crate) fn fixes() -> UpstreamFixes {
     f.fillet_refuse_face_consuming_blends = true;
     f.fillet_refuse_non_manifold_result = true;
     f.fillet_refuse_crossing_rails = true;
+    f.fillet_vertex_error_diagnostics = true;
     f.fillet_corner_ball_patch = true;
     f.fillet_chamfer_cone_on_arc = true;
     f.fillet_torus_center_on_axis = true;
@@ -138,6 +139,7 @@ pub(crate) fn fixes() -> UpstreamFixes {
     f.corner_blend_stays_inside_neighbours = true;
     f.fillet_cleanup_keeps_target_faces = true;
     f.fillet_nx1_tangent_side_edge = true;
+    f.fillet_3x2_mixed_concave_side_edge = true;
     f.offset_closed_curve_trim_arc = true;
     f.offset_stitch_at_body_tolerance = true;
     f.curve_contacts_at_curve_ends = true;
@@ -147,6 +149,7 @@ pub(crate) fn fixes() -> UpstreamFixes {
     f.sphere_small_circle_not_touching = true;
     f.ssi_tangent_contact_points = true;
     f.ssi_trace_tangent_curves_once = true;
+    f.ssi_singular_start_inside_direction = true;
     f.found_torus_sphere_keep_tested_nurb = true;
     f
 }

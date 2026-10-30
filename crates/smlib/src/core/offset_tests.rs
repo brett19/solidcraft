@@ -409,7 +409,7 @@ cases!(
     thicken_plate_symmetric,
     thicken_a_solid,
     offset_sheet_plate,
-    offset_sheet_quarter_cylinder: ignore = "solidcore#1441: an offset surface does not export, no SmSurface::ApproximateSurface (solidcore#1441)",
+    offset_sheet_quarter_cylinder: ignore = "solidcore#1477: the quarter arc sweeps to an SmSurfOfExtrusion, whose offset exports as a spline, where the fork's 12918e9 sweeps an SmCylinder (solidcore#1477)",
     offset_sheet_a_solid,
     offset_faces_top_out: ignore = "no SmOffsetFacesExecutive, fork a96ce9f (solidcore#1060)",
     offset_faces_through,

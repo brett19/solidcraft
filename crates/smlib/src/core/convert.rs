@@ -11,9 +11,8 @@
 //! from the edges' and vertices' own ([`own_tolerances`]). Each entity keeps its tolerance across
 //! the kernels instead of every one taking the largest at each crossing.
 //!
-//! Where solidcore has no port of an SMLib call the C++ makes, the conversion fails with
-//! "not supported yet" naming the call: `SmSurface::ApproximateSurface` (a face whose surface is
-//! not a B-spline kind).
+//! A face whose surface is not a B-spline kind (an offset) exports its approximation, as
+//! `FlatFromBrep` does (`SmSurface::ApproximateSurface`).
 //!
 //! [`from_arrays`] also runs the capi's `PutEnclosingShellsFirst` ([`put_enclosing_shells_first`],
 //! an addition to SmuConvert): a bounded region of several shells starts its list at the shell
@@ -34,6 +33,7 @@ use solidcore::geom::axis2_placement::Axis2Placement;
 use solidcore::geom::extent1d::Extent1d;
 use solidcore::geom::extent2d::Extent2d;
 use solidcore::geom::object::ObjectRef;
+use solidcore::geom::tol::approx_tol3d;
 use solidcore::nurbs::b_spline_curve::{BSplineCurve, BSplineCurveForm, CanonicalData, KnotType};
 use solidcore::nurbs::b_spline_surface::{BSplineSurface, BSplineSurfaceForm, CanonicalSurfaceData};
 use solidcore::nurbs::crv_basic::Curve as NurbCurve;
@@ -73,11 +73,6 @@ fn sc(call: &'static str) -> impl Fn(SolidError) -> Error {
 /// The arrays (or the body) are not what the conversion can carry: SMLib's `SM_ERR`.
 fn bad(what: &str) -> Error {
     Error::Solidcore(format!("flat arrays: {what}"))
-}
-
-/// A call solidcore has no port of.
-fn unported(call: &str) -> Error {
-    Error::Solidcore(format!("not supported yet: solidcore has no {call}"))
 }
 
 fn get<T: Copy>(v: &[T], i: usize) -> Result<T> {
@@ -975,8 +970,21 @@ fn flat_from_brep(k: &mut Kernel, b: &mut Brep) -> Result<Arrays> {
         }
         if nurbs_form || ty == SURFACE_NURBS_I {
             // Every analytic class is an SmBSplineSurface: its own NURBS, in face order with the
-            // NURBS faces' surfaces. Another surface would be approximated (ApproximateSurface).
-            let part = bspline_surface_part(k, surface)?.ok_or_else(|| unported("SmSurface::ApproximateSurface"))?;
+            // NURBS faces' surfaces. Another surface (an offset) is approximated within the
+            // curves' tolerance, splitting its spans up to 5 times; its status fails the export,
+            // as does no surface, which would leave the arrays without this face's NURBS.
+            let approximated;
+            let part = match bspline_surface_part(k, surface)? {
+                Some(part) => part,
+                None => {
+                    approximated = surface
+                        .approximate_surface(k, approx_tol3d(k, approx_tol), 5, true)
+                        .map_err(sc("SmSurface::ApproximateSurface"))?
+                        .surface
+                        .ok_or_else(|| bad("a face surface SMLib could not convert to a B-spline"))?;
+                    bspline_surface_part(k, &approximated)?.ok_or_else(|| bad("an approximated face surface that is not a B-spline"))?
+                }
+            };
             add_bspline_surface(&mut o, part.gw_nurb().ok_or_else(|| bad("a B-spline surface without its NURB"))?)?;
         }
     }
