@@ -83,7 +83,9 @@ pub(crate) fn fixes() -> UpstreamFixes {
     f.revolve_analytic_profile_faces = true;
     f.revolve_arc_centre_near_axis_is_sphere = true;
     f.taper_pivot_nearest_corner = true;
+    f.taper_tangent_corner_planes = true;
     f.revolve_nested_shells_as_cavities = true;
+    f.revolve_holed_profile_void = true;
     f.curve_sweep_caps_at_sweep_ends = true;
     f.join_touching_loops = true;
     f.uv_trim_reversal_on_surface = true;
@@ -94,6 +96,7 @@ pub(crate) fn fixes() -> UpstreamFixes {
     f.nurb_cylinder_inside_out_frame = true;
     f.shell_inner_shell_of_statuses = true;
     f.local_operation_offset_status = true;
+    f.local_operation_refuses_loose_tangent_edges = true;
     f.torus_major_radius_from_origin = true;
     f.fillet_corner_sphere_from_four_arcs = true;
     f.fillet_nx1_opposite_continuation_side_edge = true;
@@ -101,6 +104,7 @@ pub(crate) fn fixes() -> UpstreamFixes {
     f.torus_iso_circle_axis_from_midpoint = true;
     f.torus_keeps_inside_out = true;
     f.internal_pole_row_through_knot = true;
+    f.extrusion_origin_scaled_zero = true;
     f.transform_scales_each_tolerance = true;
     f.transform_model_size_from_body_box = true;
     f.offset_collapsed_rounds_mated = true;
@@ -151,6 +155,7 @@ pub(crate) fn fixes() -> UpstreamFixes {
     f.ssi_trace_tangent_curves_once = true;
     f.ssi_singular_start_inside_direction = true;
     f.found_torus_sphere_keep_tested_nurb = true;
+    f.boolean_skips_faces_apart = true;
     f
 }
 
