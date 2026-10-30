@@ -32,6 +32,9 @@ mod measure_tests;
 pub(crate) mod offset;
 #[cfg(test)]
 mod offset_tests;
+pub(crate) mod split;
+#[cfg(test)]
+mod split_tests;
 pub(crate) mod sweep;
 #[cfg(test)]
 mod sweep_tests;
