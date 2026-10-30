@@ -19,7 +19,7 @@ use solidcore::primitive::api_curves::create_line_segment;
 use solidcore::sweep::api_brep::create_linear_sweep;
 
 use super::offset::{draft, offset_faces, offset_sheet, shell, thicken};
-use super::{Body, area, bounds, counts, make_box, make_cylinder, run, to_arrays, volume};
+use super::{Body, area, bounds, counts, make_box, make_cylinder, make_sphere, run, to_arrays, volume};
 use crate::export::native;
 use crate::{BooleanOp, Error};
 
@@ -33,6 +33,7 @@ const TOL: f64 = 0.01;
 enum Shape {
     Box([f64; 3], [f64; 3]),
     Cylinder([f64; 3], f64, f64),
+    Sphere([f64; 3], f64),
     /// A sheet: the line from the first point to the second swept along `dir` by `dist`.
     LineSheet([f64; 3], [f64; 3], [f64; 3], f64),
     /// A sheet: the arc about +Z through `center` of `radius` from 0 to `degrees`, swept along
@@ -52,6 +53,7 @@ impl Shape {
         match self {
             Shape::Box(o, s) => make_box(o, s).unwrap(),
             Shape::Cylinder(o, r, h) => make_cylinder(o, r, h).unwrap(),
+            Shape::Sphere(o, r) => make_sphere(o, r).unwrap(),
             Shape::LineSheet(a, b, dir, dist) => run("sheet", |k| {
                 let c = Curve::from(create_line_segment(v3(a), v3(b))?);
                 create_linear_sweep(k, &[Some(&c)], v3(dir), dist, false)
@@ -121,6 +123,8 @@ const FRONT: [f64; 3] = [15.0, 0.0, 5.0];
 const Z: [f64; 3] = [0.0, 0.0, 1.0];
 /// A 30 x 20 sheet in z = 0: the x axis from 0 to 30 swept 20 along y.
 const PLATE: Shape = Shape::LineSheet([0.0; 3], [30.0, 0.0, 0.0], [0.0, 1.0, 0.0], 20.0);
+/// A sphere of radius 10 about the origin.
+const BALL: Shape = Shape::Sphere([0.0; 3], 10.0);
 /// A quarter of a cylinder of radius 5 about the z axis, 10 high.
 const QUARTER: Shape = Shape::ArcSheet([0.0; 3], 5.0, 90.0, 10.0);
 
@@ -153,6 +157,10 @@ fn case(name: &str) -> Case {
         "thicken_a_solid" => c(Op::Thicken(BLOCK, 2.0, false), Expect::Fails(Error::Argument)),
         // The plate moved 3 along its normal (+z: the x axis swept along y): still 600, at z = 3.
         "offset_sheet_plate" => c(Op::OffsetSheet(PLATE, 3.0), Expect::Sheet(600.0, [0.0, 0.0, 3.0], [30.0, 20.0, 3.0])),
+        // A sphere's one face closes on itself (tangency-labs/smlib fix #17): r = 10 moved out 2 is
+        // the ball of radius 12, (4/3) π 12³; moved in 10, to its centre, nothing is left.
+        "offset_sheet_a_sphere" => c(Op::OffsetSheet(BALL, 2.0), Expect::Volume(4.0 / 3.0 * PI * 12.0f64.powi(3))),
+        "offset_sheet_a_sphere_to_its_centre" => c(Op::OffsetSheet(BALL, -10.0), Expect::Fails(Error::Empty)),
         // The quarter cylinder moved 2 along its normal (outward: the arc's tangent swept along
         // z): radius 7, area (π/2) 7 · 10.
         "offset_sheet_quarter_cylinder" => c(Op::OffsetSheet(QUARTER, 2.0), Expect::Sheet(PI / 2.0 * 7.0 * 10.0, [0.0, 0.0, 0.0], [7.0, 7.0, 10.0])),
@@ -328,6 +336,7 @@ fn cpp_case(name: &str) -> Got {
         match s {
             Shape::Box(o, z) => ffi::make_box(&o, &z).map(Brep::made).unwrap(),
             Shape::Cylinder(o, r, h) => ffi::make_cylinder(&o, r, h).map(Brep::made).unwrap(),
+            Shape::Sphere(o, r) => ffi::make_sphere(&o, r).map(Brep::made).unwrap(),
             Shape::LineSheet(a, b, dir, dist) => Brep::extrude(&[line(a, b)], dir, dist, 0.0, DraftCorner::default(), false).unwrap(),
             Shape::ArcSheet(o, r, degrees, h) => {
                 let arc = crate::sweeps::Curve::Arc {
@@ -425,7 +434,9 @@ cases!(
     thicken_a_solid,
     offset_sheet_plate,
     offset_sheet_quarter_cylinder: ignore = "solidcore#1441: an offset surface does not export, no SmSurface::ApproximateSurface (solidcore#1441)",
-    offset_sheet_a_solid: ignore = "the port lags tangency-labs/smlib#17: core/offset.rs still refuses a closed solid (solidcore offsets it exactly once it does not)",
+    offset_sheet_a_solid,
+    offset_sheet_a_sphere,
+    offset_sheet_a_sphere_to_its_centre,
     offset_faces_top_out: ignore = "no SmOffsetFacesExecutive, fork a96ce9f (solidcore#1060)",
     offset_faces_through,
     draft_box_sides,

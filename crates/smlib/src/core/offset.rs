@@ -6,7 +6,8 @@
 //!
 //! As there, every operation works on a copy of its body (`SmApiBrepCopy`) and picks faces by
 //! point; the shell and the offsets are `SmApiShellBrepFull` and `SmApiOffsetBrepFull`, with
-//! convex edges extended and the results merged.
+//! convex edges extended and the results merged. A sheet offset takes faces that close into a
+//! solid as the capi does since tangency-labs/smlib#17.
 //!
 //! What the capi asks of SMLib code that solidcore does not have is [`Error::Unsupported`],
 //! refused where the capi would first reach it, so every error before it is the C++ path's: a
@@ -509,16 +510,18 @@ pub(crate) fn thicken(body: &Body, thickness: f64, symmetric: bool) -> Result<Bo
 }
 
 /// `smlib_offset_sheet`: every face of a sheet moved onto its surface's offset by `distance`
-/// along its normal; a closed solid is [`Error::Argument`].
+/// along its normal; faces that close into a solid (a sphere's one face, a block's six) give the
+/// offset solid (tangency-labs/smlib#17, which dropped the capi's refusal of a closed solid).
 pub(crate) fn offset_sheet(body: &Body, distance: f64) -> Result<Body> {
     if !distance_ok(distance) {
         return Err(Error::Argument);
     }
     on_copy("smlib_offset_sheet", body, |k, mut w| {
-        if brep_p2::is_manifold_solid(&w)? {
-            return Ok(Err(Error::Argument));
+        // `take`: a result without faces (a sphere moved in to its centre) is SMLIB_ERR_EMPTY.
+        match called(offset_brep_full(k, &mut w, distance))? {
+            Ok(r) => finish(r, false),
+            Err(e) => Ok(Err(e)),
         }
-        called(offset_brep_full(k, &mut w, distance))
     })
 }
 
