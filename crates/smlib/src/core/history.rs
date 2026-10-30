@@ -18,10 +18,10 @@
 //! - An object that already stands for something and is copied onto (`SmAttribute::Copy`, not
 //!   overridden there) keeps only its own origins in the capi, here takes the copy's too. No
 //!   operation copies onto an object it did not just make.
-//! - A split child, or an untagged object a coincidence or merge lands on, gets the capi's Tag
-//!   without `at` (so it never counts as moved); here the origin's attribute carries its `at`
-//!   along. `at` is read only for an edge with one origin no other edge shares, which a split
-//!   edge is not unless its sibling is gone, and then the faces beside it have changed anyway.
+//! - An untagged object a coincidence or merge lands on gets the capi's Tag without `at` (so it
+//!   never counts as moved); here the origin's attribute carries its `at` along. A split child
+//!   gets the split edge's `at` in both (the capi's Split handler sets it on an untagged child),
+//!   so either piece of a split edge can tell where the edge lay.
 //!
 //! The rest is as there: the same origins, boundary records, samples and classification.
 
@@ -31,7 +31,7 @@ use solidcore::geom::attribute::{Attribute, AttributeValue, Behavior};
 use solidcore::kernel::Kernel;
 use solidcore::query::api_queries::edge_closest_point;
 use solidcore::topology::face::p4 as face4;
-use solidcore::topology::{Brep, EdgeId, edge};
+use solidcore::topology::{Brep, EdgeId, VertexId, edge};
 use solidcore::{EntityRef, Point3, SolidError};
 use solidcraft_geom::brep::history::Change;
 
@@ -119,22 +119,55 @@ fn samples(k: &Kernel, b: &Brep, e: EdgeId) -> std::result::Result<Vec<Point3>, 
     Ok(p)
 }
 
-/// `moved`: has `e` moved from where its tag says it lay (`at`: its ends elsewhere, or a point
-/// it ran through off it, by more than `tol`)? An edge with no record of where it lay has not.
-fn moved(k: &Kernel, b: &Brep, e: EdgeId, at: &[Point3], tol: f64) -> std::result::Result<bool, SolidError> {
-    let ([a0, a1, ..], true) = (at, at.len() >= 2) else { return Ok(false) };
-    let now = samples(k, b, e)?;
-    let [n0, n1, ..] = now.as_slice() else { return Ok(true) };
+/// `moved`: have `pieces`, the result edges standing for one edge, moved from where its tag says
+/// it lay (`at`, the first piece's record of at least two points)? Together they must run between
+/// its ends (the vertices only one piece ends on; none for an edge closed on itself, whose end some
+/// piece still ends on), and every point it ran through must lie on one of them (within `tol`).
+/// One piece is the edge still whole; more, the edge cut by vertices. Pieces with no record of
+/// where the edge lay have not moved.
+fn moved(k: &Kernel, b: &Brep, pieces: &[(EdgeId, &[Point3])], tol: f64) -> std::result::Result<bool, SolidError> {
+    let Some(at) = pieces.iter().map(|(_, at)| *at).find(|at| at.len() >= 2) else { return Ok(false) };
+    let [a, z, ..] = at else { return Ok(false) };
     let near = |p: &Point3, q: &Point3| p.distance(*q) <= tol;
-    let ends = (near(n0, a0) && near(n1, a1)) || (near(n0, a1) && near(n1, a0));
-    if !ends {
+    let mut ends: BTreeMap<VertexId, usize> = BTreeMap::new();
+    for (e, _) in pieces {
+        let (Some(s), Some(f)) = edge::start_end_vertices(b, *e)? else { return Ok(true) };
+        *ends.entry(s).or_default() += 1;
+        *ends.entry(f).or_default() += 1;
+    }
+    let mut open = Vec::new();
+    for (v, n) in &ends {
+        if n % 2 == 1 {
+            open.push(b.vertex(*v)?.point);
+        }
+    }
+    let span = match open.as_slice() {
+        [p, q] => (near(p, a) && near(q, z)) || (near(p, z) && near(q, a)),
+        [] => {
+            let mut on_end = false;
+            for v in ends.keys() {
+                on_end = on_end || near(&b.vertex(*v)?.point, a);
+            }
+            near(a, z) && on_end
+        }
+        _ => false,
+    };
+    if !span {
         return Ok(true);
     }
     for q in at.iter().skip(2) {
-        // `SmApiEdgeClosestPoint` failing counts as off it, as a distance above `tol` does.
-        match answer(edge_closest_point(k, b, e, *q))? {
-            Some(c) if c.closest.distance <= tol => {}
-            _ => return Ok(true),
+        // `SmApiEdgeClosestPoint` failing counts as off a piece, as a distance above `tol` does.
+        let mut on = false;
+        for (e, _) in pieces {
+            if let Some(c) = answer(edge_closest_point(k, b, *e, *q))?
+                && c.closest.distance <= tol
+            {
+                on = true;
+                break;
+            }
+        }
+        if !on {
+            return Ok(true);
         }
     }
     Ok(false)
@@ -214,11 +247,14 @@ pub(crate) fn read(result: &Body) -> Result<Raw> {
                 Some(_) if o.len() > 1 => Change::Merged,
                 Some(first) if face_uses.get(first).copied().unwrap_or(0) > 1 => Change::Split,
                 Some(first) => {
-                    // Kept when its boundary is still exactly the edges it had, each whole (one
-                    // origin, under no other result edge), its own operand's and where it was (an
+                    // Kept when its boundary is still exactly where the edges it had were: each
+                    // boundary edge one of its own operand's, standing for one edge only, every
+                    // piece of that edge on this face (an edge only cut by a vertex, as splitting
+                    // the face beside it cuts it, is still all there), the pieces where it lay (an
                     // edge an operation moved, as a draft moves a tilted face's neighbours' edges,
-                    // leaves those faces trimmed differently).
-                    let mut now = BTreeSet::new();
+                    // leaves those faces trimmed differently), and those edges exactly the ones it
+                    // had.
+                    let mut pieces: BTreeMap<usize, Vec<(EdgeId, &[Point3])>> = BTreeMap::new();
                     let mut whole = true;
                     for e in face4::edges(b, *f, None, false, None)? {
                         let Some(j) = edge_at.get(&e).copied() else {
@@ -236,11 +272,19 @@ pub(crate) fn read(result: &Body) -> Result<Raw> {
                                 break;
                             }
                         };
-                        whole = only.0 == first.0 && edge_uses.get(&only).copied().unwrap_or(0) == 1 && !moved(k, b, e, points, tol)?;
+                        whole = only.0 == first.0;
                         if !whole {
                             break;
                         }
-                        now.insert(only.1);
+                        let p = pieces.entry(only.1).or_default();
+                        if !p.iter().any(|(x, _)| *x == e) {
+                            p.push((e, points.as_slice()));
+                        }
+                    }
+                    let mut now = BTreeSet::new();
+                    for (edge, p) in &pieces {
+                        whole = whole && p.len() == edge_uses.get(&(first.0, *edge)).copied().unwrap_or(0) && !moved(k, b, p, tol)?;
+                        now.insert(*edge);
                     }
                     if whole && now == *own { Change::Kept } else { Change::Modified }
                 }

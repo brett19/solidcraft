@@ -442,4 +442,23 @@ mod history {
         let core = Brep::made_core(super::imprint(a.core().unwrap(), b.core().unwrap()).unwrap().unwrap()).history().unwrap();
         assert_eq!(core.canonical(), cpp.canonical());
     }
+
+    /// A 10 mm wide bar laid across the top of a 40 x 30 x 20 block, overhanging its front and
+    /// back, imprinted on it: the bar's sides cut the top in three, and cut the top edges of the
+    /// faces y = 0 and y = 30 only by a vertex each (where they cross them at x = 10 and x = 20).
+    /// Those faces are still all of themselves, their boundaries where they were: Kept, as are
+    /// x = 0, x = 40 and the bottom (the fork's 1c7accd; before, y = 0 and y = 30 were Modified).
+    #[test]
+    fn a_face_whose_edge_is_only_cut_by_a_vertex_is_kept() {
+        use solidcraft_geom::brep::history::Change;
+        let (a, b) = (tagged_box([0.0; 3], [40.0, 30.0, 20.0], 0), tagged_box([10.0, -5.0, 20.0], [10.0, 40.0, 10.0], 1));
+        let cpp = Brep::made(ffi::ops::imprint(a.cpp().unwrap(), b.cpp().unwrap()).unwrap()).history().unwrap();
+        let core = Brep::made_core(super::imprint(a.core().unwrap(), b.core().unwrap()).unwrap().unwrap()).history().unwrap();
+        assert_eq!(core.canonical(), cpp.canonical());
+        let of_a = |h: &Raw, c: Change| h.faces.iter().filter(|f| f.origins.iter().all(|o| o.0 == 0) && f.change == c).count();
+        for h in [&core, &cpp] {
+            assert_eq!(of_a(h, Change::Kept), 5, "{h:?}");
+            assert_eq!(of_a(h, Change::Modified), 0, "{h:?}");
+        }
+    }
 }
