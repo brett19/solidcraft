@@ -574,3 +574,52 @@ fn a_solidcore_error_in_a_pick_is_an_error() {
     let unported = pick(&all, &points, 1.0, 1e-6, |i, _| answer(if i == 0 { Err(SolidError::unported("Sm::X", "u")) } else { Ok(0.5) }));
     assert!(matches!(unported, Err(SolidError::Unported { .. })), "{unported:?}");
 }
+
+/// Face and edge tags (`Brep::tagged`) through offsets routed to solidcore, as on C++: the box is
+/// tagged on the C++ kernel, its solidcore body converted from that and tagged the same way, and
+/// the two results' histories must be the same.
+#[cfg(feature = "native")]
+mod history {
+    use crate::{Brep, ffi};
+
+    fn tagged_box() -> Brep {
+        crate::init().unwrap();
+        Brep::made(ffi::make_box(&[0.0; 3], &[20.0, 30.0, 10.0]).unwrap()).tagged(0).unwrap()
+    }
+
+    /// The box hollowed to 2 mm walls, its top open: the five walls offset inward stand for the
+    /// faces they offset.
+    #[test]
+    fn tags_cross_a_shell() {
+        let a = tagged_box();
+        let top = [[10.0, 15.0, 10.0]];
+        let cpp = Brep::made(ffi::ops::pick_op(ffi::ops::Pick::Shell, a.cpp().unwrap(), &top, super::TOL, -2.0).unwrap()).history().unwrap();
+        let core = Brep::made_core(super::shell(a.core().unwrap(), &top, super::TOL, -2.0).unwrap()).history().unwrap();
+        assert_eq!(core.canonical(), cpp.canonical());
+    }
+
+    /// The top moved down 2 mm: it stands for itself, its four neighbours are trimmed to meet it.
+    #[test]
+    #[ignore = "no SmOffsetFacesExecutive, fork a96ce9f (solidcore#1060): solidcore cannot offset the face yet"]
+    fn tags_cross_a_face_offset() {
+        let a = tagged_box();
+        let top = [[10.0, 15.0, 10.0]];
+        let cpp = Brep::made(ffi::ops::pick_op(ffi::ops::Pick::OffsetFaces, a.cpp().unwrap(), &top, super::TOL, -2.0).unwrap()).history().unwrap();
+        let core = Brep::made_core(super::offset_faces(a.core().unwrap(), &top, super::TOL, -2.0).unwrap()).history().unwrap();
+        assert_eq!(core.canonical(), cpp.canonical());
+    }
+
+    /// A 5 degree draft of the front about the bottom plane: the front tilts, its neighbours'
+    /// edges move with it.
+    #[test]
+    #[ignore = "solidcore's draft (its local operation) does not carry the body's attributes yet: every face comes out untagged"]
+    fn tags_cross_a_draft() {
+        let a = tagged_box();
+        let front = [[10.0, 0.0, 5.0]];
+        let (origin, normal, pull, angle) = ([0.0; 3], [0.0, 0.0, 1.0], [0.0, 0.0, 1.0], 5f64.to_radians());
+        let cpp = ffi::ops::draft(a.cpp().unwrap(), &front, super::TOL, &origin, &normal, &pull, angle).unwrap();
+        let cpp = Brep::made(cpp).history().unwrap();
+        let core = Brep::made_core(super::draft(a.core().unwrap(), &front, super::TOL, origin, normal, pull, angle).unwrap()).history().unwrap();
+        assert_eq!(core.canonical(), cpp.canonical());
+    }
+}

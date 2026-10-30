@@ -504,3 +504,25 @@ fn the_first_distance_goes_on_the_face_along_first() {
         assert!((m.centroid[1] - y).abs() < 1e-7 && (m.centroid[2] - z).abs() < 1e-7, "{first:?}: centroid {:?} vs ({y}, {z})", m.centroid);
     }
 }
+
+/// Face and edge tags (`Brep::tagged`) through blends routed to solidcore, as on C++: the box is
+/// tagged on the C++ kernel, its solidcore body converted from that and tagged the same way, and
+/// the two results' histories must be the same.
+#[cfg(feature = "native")]
+mod history {
+    use crate::{Blend, Brep, ffi};
+
+    /// A 2 mm round on the top front edge of a box: the top and front are trimmed, the round is
+    /// new.
+    #[test]
+    #[ignore = "solidcore#1594: the fillet does not carry the body's attributes onto the faces it rebuilds (the top, front and sides come out Generated)"]
+    fn tags_cross_a_fillet() {
+        crate::init().unwrap();
+        let a = Brep::made(ffi::make_box(&[0.0; 3], &[20.0, 30.0, 10.0]).unwrap()).tagged(0).unwrap();
+        let edge = [[10.0, 0.0, 10.0]];
+        let cpp = ffi::ops::blend(ffi::ops::BLEND_ROUND, a.cpp().unwrap(), &edge, &[2.0], super::TOL).unwrap();
+        let cpp = Brep::made(cpp).history().unwrap();
+        let core = super::blend(a.core().unwrap(), Blend::Round, &edge, &[2.0], super::TOL, &[], &[], super::Corners::Filled).unwrap();
+        assert_eq!(Brep::made_core(core).history().unwrap().canonical(), cpp.canonical());
+    }
+}

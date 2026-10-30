@@ -338,15 +338,18 @@ fn operands_stay_as_they_were() {
     assert!(rel(v, 1000.0) < 1e-9, "A ∪ A: {v}");
 }
 
-/// Face and edge tags (`Brep::tagged`) through a boolean routed to solidcore, as on C++.
+/// Face and edge tags (`Brep::tagged`) through operations routed to solidcore, as on C++: each
+/// operand is tagged on the C++ kernel, its solidcore body converted from that and tagged the same
+/// way there, and the two results' histories ([`Raw`], each in its own kernel's face and edge
+/// order) must be the same.
 #[cfg(feature = "native")]
 mod history {
     use crate::history::Raw;
     use crate::{BooleanOp, Brep, ffi};
 
-    fn tagged_box(origin: [f64; 3], operand: usize) -> Brep {
+    fn tagged_box(origin: [f64; 3], size: [f64; 3], operand: usize) -> Brep {
         crate::init().unwrap();
-        Brep::made(ffi::make_box(&origin, &[10.0; 3]).unwrap()).tagged(operand).unwrap()
+        Brep::made(ffi::make_box(&origin, &size).unwrap()).tagged(operand).unwrap()
     }
 
     /// Two 10 mm cubes overlapping in a 5 mm one (the capi's `overlapping_boxes_union`): 12
@@ -361,16 +364,82 @@ mod history {
 
     #[test]
     fn tags_cross_a_cpp_boolean() {
-        let (a, b) = (tagged_box([0.0; 3], 0), tagged_box([5.0; 3], 1));
+        let (a, b) = (tagged_box([0.0; 3], [10.0; 3], 0), tagged_box([5.0; 3], [10.0; 3], 1));
         let r = Brep::made(ffi::ops::boolean(a.cpp().unwrap(), b.cpp().unwrap(), ffi::ops::BOOLEAN_UNION).unwrap());
         check(&r.history().unwrap());
     }
 
     #[test]
-    #[ignore = "the tags do not cross the flat arrays (smlib_flat.cpp carries no attributes), so the operands reach solidcore untagged; solidcore#1568 carries attributes through the boolean itself"]
     fn tags_cross_a_solidcore_boolean() {
-        let (a, b) = (tagged_box([0.0; 3], 0), tagged_box([5.0; 3], 1));
+        let (a, b) = (tagged_box([0.0; 3], [10.0; 3], 0), tagged_box([5.0; 3], [10.0; 3], 1));
         let r = super::boolean(a.core().unwrap(), b.core().unwrap(), BooleanOp::Union).unwrap().unwrap();
         check(&Brep::made_core(r).history().unwrap());
+    }
+
+    /// `a` op `b` on both kernels: the same history.
+    fn parity(a: &Brep, b: &Brep, op: BooleanOp) {
+        let code = match op {
+            BooleanOp::Union => ffi::ops::BOOLEAN_UNION,
+            BooleanOp::Subtract => ffi::ops::BOOLEAN_SUBTRACT,
+            BooleanOp::Intersect => ffi::ops::BOOLEAN_INTERSECT,
+        };
+        let cpp = Brep::made(ffi::ops::boolean(a.cpp().unwrap(), b.cpp().unwrap(), code).unwrap()).history().unwrap();
+        let core = Brep::made_core(super::boolean(a.core().unwrap(), b.core().unwrap(), op).unwrap().unwrap()).history().unwrap();
+        assert_eq!(core.canonical(), cpp.canonical());
+    }
+
+    #[test]
+    fn an_overlapping_union_has_the_cpp_history() {
+        parity(&tagged_box([0.0; 3], [10.0; 3], 0), &tagged_box([5.0; 3], [10.0; 3], 1), BooleanOp::Union);
+    }
+
+    /// A slot across the top of a 20 mm cube: the top is cut in two, the slot's walls and floor
+    /// come from the tool.
+    #[test]
+    fn a_slot_has_the_cpp_history() {
+        let (a, b) = (tagged_box([0.0; 3], [20.0; 3], 0), tagged_box([5.0, -1.0, 10.0], [10.0, 22.0, 15.0], 1));
+        parity(&a, &b, BooleanOp::Subtract);
+    }
+
+    /// Two boxes side by side, sharing the face x = 10 and their top and bottom planes: faces
+    /// found lying on each other's (SMLib's coincidences and merges) stand for both.
+    #[test]
+    fn boxes_side_by_side_have_the_cpp_history() {
+        let (a, b) = (tagged_box([0.0; 3], [10.0; 3], 0), tagged_box([10.0, 0.0, 0.0], [10.0; 3], 1));
+        parity(&a, &b, BooleanOp::Union);
+    }
+
+    /// A box sharing one corner region with another: the intersection keeps three faces of each.
+    #[test]
+    fn an_intersection_has_the_cpp_history() {
+        parity(&tagged_box([0.0; 3], [10.0; 3], 0), &tagged_box([5.0; 3], [10.0; 3], 1), BooleanOp::Intersect);
+    }
+
+    /// `SmApiBrepCopy` (the copy every solidcore operation starts from) keeps every tag: the
+    /// copy's history is the operand's own, every face Kept, as on C++.
+    #[test]
+    fn tags_cross_a_copy() {
+        let a = tagged_box([0.0; 3], [10.0, 20.0, 30.0], 0);
+        // Converted (and tagged) before the kernel's lock is taken: the conversion takes it too.
+        let body = a.core().unwrap();
+        let copy = super::run("copy", |k| {
+            let g = body.0.lock().unwrap();
+            super::super::boolean::copy_of(k, &g, 7)
+        })
+        .unwrap();
+        let core = Brep::made_core(super::Body::new(copy)).history().unwrap();
+        let cpp = Brep::made(ffi::copy(a.cpp().unwrap()).unwrap()).history().unwrap();
+        assert_eq!(core.canonical(), cpp.canonical());
+        assert!(core.faces.iter().all(|f| f.change == solidcraft_geom::brep::history::Change::Kept), "{core:?}");
+    }
+
+    /// A post standing on the top of a cube, imprinted on it: the top is split along the
+    /// post's foot, the other faces are as they were.
+    #[test]
+    fn an_imprint_has_the_cpp_history() {
+        let (a, b) = (tagged_box([0.0; 3], [20.0; 3], 0), tagged_box([5.0, 5.0, 10.0], [10.0, 10.0, 20.0], 1));
+        let cpp = Brep::made(ffi::ops::imprint(a.cpp().unwrap(), b.cpp().unwrap()).unwrap()).history().unwrap();
+        let core = Brep::made_core(super::imprint(a.core().unwrap(), b.core().unwrap()).unwrap().unwrap()).history().unwrap();
+        assert_eq!(core.canonical(), cpp.canonical());
     }
 }

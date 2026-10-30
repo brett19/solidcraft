@@ -25,6 +25,7 @@ mod boolean_tests;
 mod convert;
 #[cfg(test)]
 mod convert_tests;
+pub(crate) mod history;
 mod measure;
 #[cfg(test)]
 mod measure_tests;
