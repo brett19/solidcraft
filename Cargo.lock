@@ -4054,7 +4054,7 @@ dependencies = [
 [[package]]
 name = "solidcore"
 version = "0.0.1"
-source = "git+https://github.com/tangency-labs/solidcore?rev=55748ecf3b631b33fbcc54a06a9913b30fe3b78b#55748ecf3b631b33fbcc54a06a9913b30fe3b78b"
+source = "git+https://github.com/tangency-labs/solidcore?rev=2b81c033d806c82e220f8a93da91161bcab3222f#2b81c033d806c82e220f8a93da91161bcab3222f"
 dependencies = [
  "thiserror 2.0.21",
 ]
