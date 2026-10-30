@@ -443,7 +443,7 @@ cases!(
     draft_one_side,
     draft_one_side_out,
     draft_one_side_hinged_at_the_top,
-    draft_a_curved_face: ignore = "the port lags tangency-labs/smlib#27: core/offset.rs drafts planes only (solidcore has Cone::lean_cylinder, solidcore#1545)",
+    draft_a_curved_face: ignore = "solidcore#TBD: Cone::lean_cylinder keeps its cylinder flag, so under cylinder_rebuild_mean_radius the rebuild refuses the cone",
     draft_a_face_across_the_pull,
 );
 
