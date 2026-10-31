@@ -581,7 +581,7 @@ fn pocket_chamfer_on_a_boolean_body() {
     let cut = create_box(&mut k, p(15.0, 10.0, 5.0), 30.0, 20.0, 6.0).unwrap();
     let mut b = boolean_difference(&mut k, plate, cut).unwrap();
     let c = [p(15.0, 10.0, 10.0), p(45.0, 10.0, 10.0), p(45.0, 30.0, 10.0), p(15.0, 30.0, 10.0)];
-    let on = |x: Point3, a: Point3, q: Point3| (x.distance(a) < 1e-9 || x.distance(q) < 1e-9);
+    let on = |x: Point3, a: Point3, q: Point3| x.distance(a) < 1e-9 || x.distance(q) < 1e-9;
     let ids: Vec<EdgeId> = (0..4)
         .map(|i| {
             let (a, q) = (c[i], c[(i + 1) % 4]);
