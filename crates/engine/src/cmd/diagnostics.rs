@@ -39,9 +39,9 @@ pub static COMMANDS: &[CommandSpec] = &[
              --profile and the app's preference; off, it costs nothing measurable. Read-only",
         ),
     CommandSpec::new("diagnostics.kernel", "Geometry Kernel", kernel).icon("bug_report").noundo().params(
-        "choice?: routed | smlib | solidcore (sets which kernel answers: routed = each operation on the kernel the routing \
-         table gives it, smlib = the C++ SMLib kernel for all, solidcore = its Rust port for all; bodies already computed \
-         keep their results). SOLIDCRAFT_KERNEL, when set, wins over it, and SOLIDCRAFT_KERNEL_ROUTES (op=backend,...) \
+        "choice?: routed | smlib | solidcore (sets which kernel answers: routed, the default = each operation on the kernel \
+         the routing table gives it, solidcore for every one; smlib = the C++ SMLib kernel for all; solidcore = the Rust port \
+         for all; bodies already computed keep their results). SOLIDCRAFT_KERNEL, when set, wins over it, and SOLIDCRAFT_KERNEL_ROUTES (op=backend,...) \
          moves single operations on top of both. Returns {choice, environment, overrides: {op: backend}, routes: [{op, \
          route, backend}]}: route is the table's kernel for the operation, backend the one it runs on now",
     ),
