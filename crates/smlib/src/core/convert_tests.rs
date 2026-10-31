@@ -196,6 +196,97 @@ fn hostile_arrays_are_refused() {
     }
 }
 
+/// `GetOrCreateGwNurbPointer` on a parabola: the one with its NURB gives it; one built over an
+/// interval too small for two end tangents to cross has none and makes none, an error naming
+/// `MakeNurb`.
+#[test]
+fn a_parabola_gives_its_nurb_or_says_it_cannot() {
+    use solidcore::curve::curve::Curve;
+    use solidcore::curve::parabola::Parabola;
+    use solidcore::geom::extent1d::Extent1d;
+    use solidcore::geom::vector3d::{Point3, Vec3};
+    let (x, y) = (Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0));
+    let part = |lo: f64, hi: f64| -> crate::Result<bool> {
+        let c = Curve::from(Parabola::new(Point3::new(0.0, 0.0, 0.0), x, y, Extent1d::from_min_max(lo, hi), 1.0, 3));
+        let k = solidcore::kernel::Kernel::default();
+        Ok(super::convert::bspline_curve_part(&k, &c)?.is_some_and(|b| b.gw_nurb().is_some()))
+    };
+    assert_eq!(part(-1.0, 1.0), Ok(true));
+    let none = part(0.5, 0.5);
+    assert!(matches!(&none, Err(e) if e.to_string().contains("MakeNurb")), "{none:?}");
+}
+
+/// `Validate` against the C++ one: each array of each body grown, emptied and given hostile values.
+/// What ours refuses the C++ kernel does not build, and what the C++ kernel refuses with
+/// `SM_ERR_INVALID_INPUT`, its `Validate`'s answer (its build can answer it too), ours does not build.
+#[cfg(feature = "native")]
+#[test]
+fn validate_refuses_what_the_cpp_kernel_refuses() {
+    /// `SM_ERR_INVALID_INPUT`.
+    const INVALID_INPUT: i32 = 1007;
+    use crate::flat::Flat;
+    use crate::{Brep, Error, ffi};
+    crate::init().unwrap();
+    let plate = ffi::make_box(&[0.0; 3], &[40.0, 30.0, 5.0]).unwrap();
+    let rod = ffi::make_cylinder(&[20.0, 15.0, -1.0], 6.0, 7.0).unwrap();
+    let cone = ffi::make_cone(&[0.0, 1.0, 2.0], 6.0, 2.0, 9.0).unwrap();
+    let bodies = [
+        ("holed plate", Brep::made(ffi::ops::boolean(&plate, &rod, ffi::ops::BOOLEAN_SUBTRACT).unwrap())),
+        ("frustum", Brep::made(cone)),
+        ("sphere", Brep::made(ffi::make_sphere(&[1.0, 2.0, 3.0], 7.0).unwrap())),
+        ("torus", Brep::made(ffi::make_torus(&[1.0, -1.0, 0.5], 10.0, 3.0).unwrap())),
+    ];
+    let (mut compared, mut refusals) = (0usize, 0usize);
+    for (name, body) in &bodies {
+        let good = body.cpp_arrays().unwrap();
+        let mut hostile: Vec<(String, Arrays)> = Vec::new();
+        for (id, v) in &good.ints {
+            let mut grown = good.clone();
+            grown.ints.get_mut(id).unwrap().push(1);
+            hostile.push((format!("int {id} grown"), grown));
+            let mut none = good.clone();
+            none.ints.get_mut(id).unwrap().clear();
+            hostile.push((format!("int {id} emptied"), none));
+            for at in [0, v.len().saturating_sub(1)] {
+                for x in [-1, 0, 1, 2, 7, 1_000_000, i64::MAX, i64::MIN] {
+                    if v.get(at).is_some_and(|y| *y != x) {
+                        let mut a = good.clone();
+                        a.ints.get_mut(id).unwrap()[at] = x;
+                        hostile.push((format!("int {id}[{at}] = {x}"), a));
+                    }
+                }
+            }
+        }
+        for (id, v) in &good.reals {
+            let mut grown = good.clone();
+            grown.reals.get_mut(id).unwrap().push(1.0);
+            hostile.push((format!("real {id} grown"), grown));
+            let mut none = good.clone();
+            none.reals.get_mut(id).unwrap().clear();
+            hostile.push((format!("real {id} emptied"), none));
+            for at in [0, v.len().saturating_sub(1)] {
+                for x in [0.0, -1.0, 2.0, 1e10, -1e-13, f64::NAN, f64::INFINITY] {
+                    if !v.is_empty() {
+                        let mut a = good.clone();
+                        a.reals.get_mut(id).unwrap()[at] = x;
+                        hostile.push((format!("real {id}[{at}] = {x}"), a));
+                    }
+                }
+            }
+        }
+        for (what, a) in hostile {
+            let cpp = Flat::from_arrays(&a).unwrap().import().map(|_| ());
+            let cpp_refused = cpp == Err(Error::Status(INVALID_INPUT));
+            let ours = super::convert::validate_refuses(&a);
+            compared += 1;
+            refusals += usize::from(ours);
+            assert!(!(ours && cpp.is_ok()), "{name}, {what}: refused here, built in C++");
+            assert!(!(cpp_refused && !ours && from_arrays(&a).is_ok()), "{name}, {what}: refused in C++, built here");
+        }
+    }
+    assert!(compared > 500 && refusals > 200, "{compared} compared, {refusals} refused");
+}
+
 /// The C++ kernel's own box arrays (what `Brep::core` converts) build in solidcore.
 #[cfg(feature = "native")]
 #[test]
