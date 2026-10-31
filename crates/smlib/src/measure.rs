@@ -55,7 +55,10 @@ impl Brep {
     /// else inside a material region or outside. A body with no material (a sheet, an open shell)
     /// has no inside. A non-finite coordinate is [`Error::Argument`](crate::Error::Argument).
     pub fn classify_point(&self, p: [f64; 3]) -> Result<PointClass> {
-        match ffi::measure::classify_point(&self.0, p).map_err(error)? {
+        if on_core() {
+            return core::classify_point(self.core()?, p);
+        }
+        match ffi::measure::classify_point(self.cpp()?, p).map_err(error)? {
             ffi::measure::POINT_OUTSIDE => Ok(PointClass::Outside),
             ffi::measure::POINT_INSIDE => Ok(PointClass::Inside),
             ffi::measure::POINT_ON_BOUNDARY => Ok(PointClass::OnBoundary),

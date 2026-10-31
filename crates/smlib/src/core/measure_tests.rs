@@ -403,3 +403,51 @@ fn faces_apart_with_a_shell_each_check_valid() {
         assert!(r.is_valid(), "{level:?}: {r}");
     }
 }
+
+/// `smlib_brep_classify_point` (fork 34d6b2b), the capi test's cases: a 10 x 20 x 30 box at
+/// `(1, -2, 3)`: inside, outside, on a face, an edge and a vertex; the cylinder of radius 5 about
+/// the z axis through `(1, 2)`: off its curved wall by 1e-8 on it (within the zone tolerance), by
+/// 1e-4 inside or outside, on its axis inside, on its top's centre on it. With SMLib built, the
+/// C++ kernel's own primitives classify the same.
+#[test]
+fn points_classify_as_the_capi() {
+    use super::classify_point;
+    use crate::measure::PointClass::{Inside, OnBoundary, Outside};
+
+    let (bx, _) = case("box");
+    let (cyl, _) = case("cylinder");
+    let c45 = std::f64::consts::FRAC_1_SQRT_2;
+    let wall = |r: f64| [1.0 + r * c45, 2.0 + r * c45, 3.0];
+    let cases = [
+        ("box", [6.0, 8.0, 18.0], Inside),
+        ("box", [6.0, 8.0, 34.0], Outside),
+        ("box", [0.0, -3.0, 2.0], Outside),
+        ("box", [6.0, 8.0, 33.0], OnBoundary),
+        ("box", [11.0, 8.0, 33.0], OnBoundary),
+        ("box", [11.0, 18.0, 33.0], OnBoundary),
+        ("box", [1.0, -2.0, 3.0], OnBoundary),
+        ("cylinder", wall(5.0 + 1e-8), OnBoundary),
+        ("cylinder", wall(5.0 - 1e-8), OnBoundary),
+        ("cylinder", wall(5.0 + 1e-4), Outside),
+        ("cylinder", wall(5.0 - 1e-4), Inside),
+        ("cylinder", [1.0, 2.0, 3.0], Inside),
+        ("cylinder", [1.0, 2.0, 9.0], OnBoundary),
+    ];
+    for (name, p, want) in cases {
+        let body = if name == "box" { &bx } else { &cyl };
+        assert_eq!(classify_point(body, p).unwrap(), want, "{name} {p:?}");
+        #[cfg(feature = "native")]
+        {
+            use crate::ffi::measure::{POINT_INSIDE, POINT_ON_BOUNDARY, POINT_OUTSIDE, classify_point as cpp_classify};
+            let theirs = cpp_classify(cpp(name).cpp().unwrap(), p).unwrap();
+            let want_cpp = match want {
+                Inside => POINT_INSIDE,
+                Outside => POINT_OUTSIDE,
+                OnBoundary => POINT_ON_BOUNDARY,
+            };
+            assert_eq!(theirs, want_cpp, "C++ {name} {p:?}");
+        }
+    }
+    assert_eq!(classify_point(&bx, [f64::NAN, 0.0, 0.0]).unwrap_err(), crate::Error::Argument);
+    assert_eq!(classify_point(&bx, [0.0, f64::INFINITY, 0.0]).unwrap_err(), crate::Error::Argument);
+}
