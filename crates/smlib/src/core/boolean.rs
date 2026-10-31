@@ -62,7 +62,8 @@ fn num_faces(b: &Brep) -> usize {
 
 /// `closed_nonmanifold` (smlib_ops.cpp): a closed body whose solids touch only along edges or at
 /// vertices: at least two regions, no shell vertices, no wire edge, and four edgeuses (two faces,
-/// both sides) per face round every edge.
+/// both sides) per face round every edge. As there, an edge whose query fails (`e == nullptr`, a
+/// failed `GetEdgeuses`) makes it false: [`edge_closes`].
 fn closed_nonmanifold(r: &Brep) -> SolidResult<bool> {
     if p1::regions(r, None)?.len() < 2 {
         return Ok(false);
@@ -71,15 +72,18 @@ fn closed_nonmanifold(r: &Brep) -> SolidResult<bool> {
         return Ok(false);
     }
     for e in p1::edges(r, None)? {
-        if edge::is_wire(r, e)? {
-            return Ok(false);
-        }
-        let uses = edge::edgeuses(r, e, None, None)?.len();
-        if uses < 4 || uses % 4 != 0 {
+        if !edge_closes(edge::is_wire(r, e), edge::edgeuses(r, e, None, None).map(|u| u.len())) {
             return Ok(false);
         }
     }
     Ok(true)
+}
+
+/// The capi's test of one edge in `closed_nonmanifold`, given its `IsWire` and the count of its
+/// `GetEdgeuses`: not a wire, and four edgeuses per face round it. Either query failing is
+/// false, not an error: the capi returns false where `GetEdgeuses` fails.
+pub(super) fn edge_closes(wire: SolidResult<bool>, uses: SolidResult<usize>) -> bool {
+    matches!(wire, Ok(false)) && matches!(uses, Ok(n) if n >= 4 && n % 4 == 0)
 }
 
 /// `finish` (smlib_ops.cpp): the result must have faces, and a solid input must give a closed
