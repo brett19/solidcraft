@@ -828,3 +828,69 @@ fn knife_edge_chamfers() {
         }
     }
 }
+
+/// The part from SolidCraft #871: a plate with a narrower block on top and a window through both.
+fn part_871() -> Body {
+    let (a, b) = (12.74437365538526, 22.69275963366936);
+    let at = |lo: [f64; 3], hi: [f64; 3]| make_box(lo, [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]]).unwrap();
+    let joined = boolean(&at([9.5, 8.0, 0.0], [23.5, 29.5, 10.0]), &at([9.5, a, 10.0], [23.5, b, 20.0]), BooleanOp::Union).unwrap().unwrap();
+    boolean(&joined, &at([9.5, 14.0, 7.0], [23.5, 19.2, 14.1]), BooleanOp::Subtract).unwrap().unwrap()
+}
+
+/// The 12 edges round each of the part's two end faces.
+fn edges_871() -> Vec<[f64; 3]> {
+    let yz = [
+        (12.74437365538526, 15.0),
+        (10.37218682769263, 10.0),
+        (8.0, 5.0),
+        (18.75, 0.0),
+        (29.5, 5.0),
+        (26.09637981683468, 10.0),
+        (22.69275963366936, 15.0),
+        (17.71856664452731, 20.0),
+        (16.6, 7.0),
+        (14.0, 10.55),
+        (16.6, 14.100000000000001),
+        (19.200000000000003, 10.55),
+    ];
+    [23.5, 9.5].iter().flat_map(|x| yz.iter().map(move |(y, z)| [*x, *y, *z])).collect()
+}
+
+/// #871's rounds at r 0.5 fit (the wall between the window and the block's side is 1.26 thick):
+/// 38 faces, and the closed form `issue_871_tests::rounds_that_fit_are_closed` derives. At r 1 they
+/// overlap, which is refused. With SMLib built, the C++ kernel gives the same.
+#[test]
+fn rounds_on_the_871_part() {
+    let p = part_871();
+    let e = edges_871();
+    let sizes = |r: f64| vec![r; e.len()];
+    let part_volume = 14.0 * (21.5 * 10.0 + (22.69275963366936 - 12.74437365538526) * 10.0 - 5.2 * 7.1);
+    let exact = part_volume - 2.0 * (2.0 * (21.5 + 20.0) + 2.0 * (5.2 + 7.1)) * spandrel(0.5);
+    let fit = blend(&p, Blend::Round, &e, &sizes(0.5), TOL, &[], &[], Corners::Filled).unwrap();
+    let (v, n) = (volume(&fit, 1e-8).unwrap(), counts(&fit).unwrap());
+    let refused = blend(&p, Blend::Round, &e, &sizes(1.0), TOL, &[], &[], Corners::Filled).map(|_| ()).unwrap_err();
+    assert_eq!(refused, Error::NoRoom);
+    assert_eq!(n[0], 38);
+    assert!((v - exact).abs() < 1e-3, "{v} vs {exact}");
+    #[cfg(feature = "native")]
+    {
+        use crate::{Brep, ffi};
+        crate::init().unwrap();
+        let bx = |lo: [f64; 3], hi: [f64; 3]| ffi::make_box(&lo, &[hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]]).unwrap();
+        let top = ffi::ops::boolean(
+            &bx([9.5, 8.0, 0.0], [23.5, 29.5, 10.0]),
+            &bx([9.5, 12.74437365538526, 10.0], [23.5, 22.69275963366936, 20.0]),
+            ffi::ops::BOOLEAN_UNION,
+        )
+        .unwrap();
+        let cut = ffi::ops::boolean(&top, &bx([9.5, 14.0, 7.0], [23.5, 19.2, 14.1]), ffi::ops::BOOLEAN_SUBTRACT).unwrap();
+        let cpp = Brep::made(cut);
+        let h = cpp.cpp().unwrap();
+        let fit = ffi::ops::blend(ffi::ops::BLEND_ROUND, h, &e, &sizes(0.5), TOL).unwrap();
+        let (cv, cn) = (ffi::volume(&fit, 1e-8).unwrap(), ffi::counts(&fit).unwrap().map(|x| usize::try_from(x).unwrap()));
+        let crefused = ffi::ops::blend(ffi::ops::BLEND_ROUND, h, &e, &sizes(1.0), TOL).map(|_| ());
+        assert!(rel(v, cv) < 1e-9, "solidcore {v} vs C++ {cv}");
+        assert_eq!(n, cn);
+        assert!(crefused.is_err());
+    }
+}

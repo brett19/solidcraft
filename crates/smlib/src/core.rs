@@ -243,6 +243,13 @@ pub(crate) fn fixes() -> UpstreamFixes {
     f.good_drop_result_distances_in_order = true;
     f.face_tight_box_searches_trim = true;
     f.ssi_low_angle_start_on_probation = true;
+    f.fillet_variable_span_follows_fillet = true;
+    f.simple_coincidence_crossing_is_point = true;
+    f.boolean_temporary_transform_statuses = true;
+    f.primitive_path_curve_statuses = true;
+    f.planar_path_sweep_statuses = true;
+    f.planar_path_profile_placement_statuses = true;
+    f.fillet_trim_status = true;
     f
 }
 
@@ -250,8 +257,7 @@ pub(crate) fn fixes() -> UpstreamFixes {
 /// them on would part this backend from the C++ one. `precise_properties_trim_base_v`
 /// (solidcore#1664, WR-563), `bspline_trim_keeps_rational_end_spans` (solidcore#1711, WR-575) and
 /// `fillet_blend_curve_revolved_on_arc` (solidcore#1759, WR-581, an own design waiting for the
-/// fork's fix) have no fork commit. `fillet_trim_status` (solidcore#674, WR-604) has no fork
-/// commit. `temporary_radius_setup_errors` (solidcore#644, #458), `ellipse_step_interval_checks`
+/// fork's fix) have no fork commit. `temporary_radius_setup_errors` (solidcore#644, #458), `ellipse_step_interval_checks`
 /// (solidcore#686, #428) and `perspective_sphere_offsets` (solidcore#684, WR-608, #525) are the
 /// port's own fixes with no fork commit; the C++ build keeps upstream's behaviour there.
 /// `corner_patch_face_side_twist` (WR-613, fork 7fd9fb0) ports a fork commit that is not
@@ -259,7 +265,7 @@ pub(crate) fn fixes() -> UpstreamFixes {
 ///
 /// `boolean_union_refuses_solid_leak` (solidcore#1794, WR-619) is solidcore's own design;
 /// `curve_loop_start_after_previous_end` (WR-96), `loop_use_reports_open_gaps` (WR-93),
-/// `planar_path_profile_placement_statuses` (WR-632, #483), `face_points_span_domain` (WR-86),
+/// `face_points_span_domain` (WR-86),
 /// `drop_curve_v_domain_degeneracy` (WR-100) and `mirror_curve_keeps_euclidean_control_points`
 /// (WR-98) are the port's fixes of upstream defects: none has a fork commit, and the C++ build
 /// keeps upstream's behaviour there.
@@ -278,12 +284,18 @@ pub(crate) fn fixes() -> UpstreamFixes {
 /// `sRefFrame`'s origin with `rOrigin`, a reference to it), `dupin_bottom_hyperbola_axis` (WR-69:
 /// `MakeDupin`'s bottom hyperbola takes k2 for both axes) and
 /// `extent3d_contains_both_segment_endpoints` (WR-3: `ContainsLineSeg3d` ors its two points).
+///
+/// The fork handles a failed status softly where these flags refuse (solidcore#1775, #483), so the
+/// flags would fail where the C++ kernel carries on: `fillet_corner_statuses` (`sm_TestG1Continuity`:
+/// no tangent is no tangency), `fillet_edge_curve_domain_statuses` (`sm_CheckEdgeCurveDomains`: a
+/// failed trim keeps the edge's curve), `offset_tangent_gap_statuses` (`HaveTangentGaps`: a failed
+/// sample shows no gap) and `ssi_alignment_statuses` (`ALIGN_DIR_WITH_PREVIOUS_POINT`: no angle, no
+/// alignment). `translation_sweep_regularize` (solidcore#1937) has no fork commit.
 #[cfg(test)]
 const HELD_BACK: &[&str] = &[
     "precise_properties_trim_base_v",
     "bspline_trim_keeps_rational_end_spans",
     "fillet_blend_curve_revolved_on_arc",
-    "fillet_trim_status",
     "temporary_radius_setup_errors",
     "ellipse_step_interval_checks",
     "perspective_sphere_offsets",
@@ -291,7 +303,6 @@ const HELD_BACK: &[&str] = &[
     "boolean_union_refuses_solid_leak",
     "curve_loop_start_after_previous_end",
     "loop_use_reports_open_gaps",
-    "planar_path_profile_placement_statuses",
     "face_points_span_domain",
     "drop_curve_v_domain_degeneracy",
     "mirror_curve_keeps_euclidean_control_points",
@@ -300,6 +311,11 @@ const HELD_BACK: &[&str] = &[
     "sphere_from_arcs_common_centre",
     "dupin_bottom_hyperbola_axis",
     "extent3d_contains_both_segment_endpoints",
+    "fillet_corner_statuses",
+    "fillet_edge_curve_domain_statuses",
+    "offset_tangent_gap_statuses",
+    "ssi_alignment_statuses",
+    "translation_sweep_regularize",
 ];
 
 fn fresh() -> Kernel {
