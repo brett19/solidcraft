@@ -255,9 +255,10 @@ pub(crate) fn fixes() -> UpstreamFixes {
 ///
 /// `boolean_union_refuses_solid_leak` (solidcore#1794, WR-619) is solidcore's own design;
 /// `curve_loop_start_after_previous_end` (WR-96), `loop_use_reports_open_gaps` (WR-93),
-/// `planar_path_profile_placement_statuses` (WR-632, #483) and `face_points_span_domain` (WR-86)
-/// are the port's fixes of upstream defects: none has a fork commit, and the C++ build keeps
-/// upstream's behaviour there.
+/// `planar_path_profile_placement_statuses` (WR-632, #483), `face_points_span_domain` (WR-86),
+/// `drop_curve_v_domain_degeneracy` (WR-100) and `mirror_curve_keeps_euclidean_control_points`
+/// (WR-98) are the port's fixes of upstream defects: none has a fork commit, and the C++ build
+/// keeps upstream's behaviour there.
 ///
 /// On since `SMLIB_REV` eaa998a: `fillet_trim_inside_by_best_dot` (fork de4dae6),
 /// `fillet_half_degree_crease` (2e8758b), `fillet_split_edge_keeps_near_half` (ceb3272) and
@@ -285,6 +286,8 @@ const HELD_BACK: &[&str] = &[
     "loop_use_reports_open_gaps",
     "planar_path_profile_placement_statuses",
     "face_points_span_domain",
+    "drop_curve_v_domain_degeneracy",
+    "mirror_curve_keeps_euclidean_control_points",
 ];
 
 fn fresh() -> Kernel {
