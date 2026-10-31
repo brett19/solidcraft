@@ -142,7 +142,12 @@ pub(super) fn pick<T: Copy + PartialEq>(
 }
 
 /// `pick_edges` (`edge_distance`: `SmApiEdgeClosestPoint`).
-fn pick_edges(k: &Kernel, b: &Brep, points: &[[f64; 3]], tol: f64) -> solidcore::Result<std::result::Result<(Vec<EdgeId>, Vec<usize>), Miss>> {
+pub(super) fn pick_edges(
+    k: &Kernel,
+    b: &Brep,
+    points: &[[f64; 3]],
+    tol: f64,
+) -> solidcore::Result<std::result::Result<(Vec<EdgeId>, Vec<usize>), Miss>> {
     let all = brep_p1::edges(b, None)?;
     pick(&all, points, tol, b.tolerance(), |e, p| Ok(answer(edge_closest_point(k, b, e, p))?.map(|c| c.closest.distance)))
 }
@@ -154,7 +159,7 @@ fn pick_vertices(b: &Brep, points: &[[f64; 3]], tol: f64) -> solidcore::Result<s
 }
 
 /// An edge pick's failure as `pick_error` (ops.rs) reads it.
-fn edge_miss(m: Miss) -> Error {
+pub(super) fn edge_miss(m: Miss) -> Error {
     match m {
         Miss::None(point) => Error::NoMatch { point },
         Miss::Ambiguous(point) => Error::Ambiguous { point },
@@ -438,7 +443,7 @@ fn corners(
 }
 
 /// `finish`: the result must have faces, and a solid input must give a closed manifold solid.
-fn finish(b: Brep, solid_in: bool) -> solidcore::Result<Out<Brep>> {
+pub(super) fn finish(b: Brep, solid_in: bool) -> solidcore::Result<Out<Brep>> {
     if b.face_list().is_empty() {
         return Ok(Err(Error::Empty));
     }

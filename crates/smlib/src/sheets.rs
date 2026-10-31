@@ -10,6 +10,9 @@ impl Brep {
     /// outward where they close into a solid, else only made to agree across their shared edges;
     /// with whether the result is a closed solid.
     pub fn stitch(&self, tolerance: f64) -> Result<(Brep, bool)> {
+        if route::Op::Split.backend() == route::Backend::Solidcore {
+            return core::merge::stitch(self.core()?, tolerance).map(|(b, closed)| (Brep::made_core(b), closed));
+        }
         init()?;
         ffi::sheets::stitch(self.cpp()?, tolerance).map(|(h, closed)| (Brep::made(h), closed)).map_err(error)
     }

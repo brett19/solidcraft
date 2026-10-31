@@ -29,12 +29,24 @@ pub(crate) mod history;
 mod measure;
 #[cfg(test)]
 mod measure_tests;
+pub(crate) mod merge;
+#[cfg(test)]
+mod merge_tests;
 pub(crate) mod offset;
 #[cfg(test)]
 mod offset_tests;
+pub(crate) mod split;
+#[cfg(test)]
+mod split_tests;
 pub(crate) mod sweep;
 #[cfg(test)]
 mod sweep_tests;
+pub(crate) mod transform;
+#[cfg(test)]
+mod transform_tests;
+pub(crate) mod trim;
+#[cfg(test)]
+mod trim_tests;
 
 pub(crate) use convert::{from_arrays, to_arrays};
 pub(crate) use measure::{area, bounds, check, edge_face_distance, is_manifold_solid, mass_properties, solid_count};

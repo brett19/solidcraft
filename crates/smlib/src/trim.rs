@@ -1,7 +1,7 @@
 //! Untrim and extend of a sheet's faces. Each returns a new body and leaves its input unchanged;
 //! faces and holes are chosen by points, as [`crate::ops`] chooses them.
 
-use crate::{Brep, Result, error, ffi, init};
+use crate::{Brep, Result, core, error, ffi, init, route};
 
 /// How [`Brep::extend_sheet`] continues a surface past its side.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -29,11 +29,14 @@ impl Brep {
     /// all the way round closes on the surface's seam). The face alone, or
     /// with `in_place` the whole body with it replaced. Tags follow the face and its edges.
     pub fn untrim_face(&self, point: [f64; 3], tolerance: f64, holes: Holes, outer: bool, in_place: bool) -> Result<Brep> {
-        init()?;
         let holes = match holes {
             Holes::All => None,
             Holes::At(at) => Some(at),
         };
+        if route::Op::Split.backend() == route::Backend::Solidcore {
+            return core::trim::untrim_face(self.core()?, point, tolerance, holes, outer, in_place).map(Brep::made_core);
+        }
+        init()?;
         ffi::trim::untrim_face(self.cpp()?, &point, tolerance, holes, outer, in_place).map(Brep::made).map_err(|s| match s {
             ffi::ops::ERR_PICK_NONE => crate::Error::NoMatch { point: 0 },
             s => error(s),
@@ -45,6 +48,9 @@ impl Brep {
     /// `how` says: SMLib's extended surface over the grown box, the face and its sides carrying
     /// the tags of those they continue. A sheet of another shape is [`crate::Error::Unsupported`].
     pub fn extend_sheet(&self, point: [f64; 3], tolerance: f64, distance: f64, how: Continuation) -> Result<Brep> {
+        if route::Op::Split.backend() == route::Backend::Solidcore {
+            return core::trim::extend_sheet(self.core()?, point, tolerance, distance, how).map(Brep::made_core);
+        }
         init()?;
         let mode = match how {
             Continuation::Natural => ffi::trim::EXTEND_NATURAL,

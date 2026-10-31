@@ -939,7 +939,7 @@ pub(crate) fn loft(sections: &[Vec<Profile>], degree: u32, cap: bool) -> Result<
 }
 
 /// Each face's identity, for the face builders: their arena identity.
-fn build_faces<T>(b: &mut Brep, f: impl FnOnce(&mut Brep, &mut FaceBuildEnv<'_, '_>) -> T) -> T {
+pub(super) fn build_faces<T>(b: &mut Brep, f: impl FnOnce(&mut Brep, &mut FaceBuildEnv<'_, '_>) -> T) -> T {
     let mut state = ArenaNotifyState::new(b);
     let mut env = state.env(None);
     let key_of = env.key_of;
