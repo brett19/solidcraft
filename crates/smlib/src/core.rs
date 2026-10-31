@@ -241,6 +241,8 @@ pub(crate) fn fixes() -> UpstreamFixes {
     f.fillet_mitre_gap_patch = true;
     f.fillet_run_on_past_far_end_only = true;
     f.good_drop_result_distances_in_order = true;
+    f.face_tight_box_searches_trim = true;
+    f.ssi_low_angle_start_on_probation = true;
     f
 }
 
@@ -266,17 +268,16 @@ pub(crate) fn fixes() -> UpstreamFixes {
 /// `fillet_half_degree_crease` (2e8758b), `fillet_split_edge_keeps_near_half` (ceb3272) and
 /// `curve_loop_normal_from_area` (be45e8d).
 ///
-/// Held back though its fork commit is in `SMLIB_REV`, because solidcore has only half of the fork's
-/// fix: `face_tight_box_searches_trim` (beb6061) without 326de73 (solidcore#1961), which divides a
-/// cell at the surface's knots, so a screw thread's tight box overshoots (15 thread cases).
-///
 /// `geometric_g2_continuity`: no fork commit; the C++ still has the defect at SmGeomUtility.cpp:5822
 /// (crashes/2992: 183 faces against 831).
 ///
-/// `fillet_corner_variable_radius_rail_on_opposite_fillet` (WR-645, #968),
-/// `sphere_from_arcs_common_centre` and `dupin_bottom_hyperbola_axis` (WR-69) are the port's fixes
-/// with no fork commit in `SMLIB_REV`, and `ssi_low_angle_start_on_probation` (WR-79, #396) ports
-/// fork 30d25bf, which is not in it.
+/// Upstream's defect is still in the fork's source at `SMLIB_REV` 2fc375f:
+/// `fillet_corner_variable_radius_rail_on_opposite_fillet` (WR-645: `MakeVariableRadiusFillet` has
+/// only the concave corner's rail-rail test before resetting the edges, no test of the rail against
+/// the opposite fillet), `sphere_from_arcs_common_centre` (WR-103: `CreateSphereFromArcs` compares
+/// `sRefFrame`'s origin with `rOrigin`, a reference to it), `dupin_bottom_hyperbola_axis` (WR-69:
+/// `MakeDupin`'s bottom hyperbola takes k2 for both axes) and
+/// `extent3d_contains_both_segment_endpoints` (WR-3: `ContainsLineSeg3d` ors its two points).
 #[cfg(test)]
 const HELD_BACK: &[&str] = &[
     "precise_properties_trim_base_v",
@@ -287,7 +288,6 @@ const HELD_BACK: &[&str] = &[
     "ellipse_step_interval_checks",
     "perspective_sphere_offsets",
     "corner_patch_face_side_twist",
-    "face_tight_box_searches_trim",
     "boolean_union_refuses_solid_leak",
     "curve_loop_start_after_previous_end",
     "loop_use_reports_open_gaps",
@@ -299,7 +299,7 @@ const HELD_BACK: &[&str] = &[
     "fillet_corner_variable_radius_rail_on_opposite_fillet",
     "sphere_from_arcs_common_centre",
     "dupin_bottom_hyperbola_axis",
-    "ssi_low_angle_start_on_probation",
+    "extent3d_contains_both_segment_endpoints",
 ];
 
 fn fresh() -> Kernel {

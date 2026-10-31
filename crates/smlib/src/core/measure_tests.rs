@@ -93,6 +93,22 @@ fn checks_valid(name: &str) {
     }
 }
 
+/// Refusing is decided on the body's naming scheme alone. An Unknown body is refused rather than
+/// reported invalid on every edge; a Caller one without recorded keys is checked under the arena
+/// identities (`check_brep` has no error for it, so no error of its can turn into a refusal).
+#[test]
+fn check_refuses_only_an_unknown_naming() {
+    use solidcore::topology::NamingScheme;
+    let name = |naming| {
+        let (b, _) = case("box");
+        b.0.lock().unwrap().set_naming(naming);
+        check(&b, CheckLevel::All)
+    };
+    let refused = name(NamingScheme::Unknown).unwrap_err().to_string();
+    assert!(refused.contains("not supported yet") && refused.contains("NamingScheme::Unknown"), "{refused}");
+    name(NamingScheme::Caller).unwrap();
+}
+
 /// The C++ kernel's body of the same primitive, built by its C API whatever `Op::Primitive`
 /// routes to: a body imported from solidcore's arrays is not the C++ kernel's own (its
 /// `edge_face_distance` measures to each face's surface over its domain, which the import sets).

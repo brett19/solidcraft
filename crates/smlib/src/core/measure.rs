@@ -284,8 +284,7 @@ enum Refusal {
     /// A test solidcore has not ported (its [`SolidError::Unported`]).
     Unported(&'static str, &'static str),
     /// A body whose geometry owners' identities the check cannot know: a
-    /// [`NamingScheme::Unknown`] body, or a [`NamingScheme::Caller`] one whose maker did not
-    /// record its keys (`check_brep`'s [`SolidError::InvalidInput`]).
+    /// [`NamingScheme::Unknown`] body.
     Naming(NamingScheme),
 }
 
@@ -296,9 +295,10 @@ enum Refusal {
 ///
 /// The geometry owners are named as the body's naming scheme names them: `check_brep` reads a
 /// [`NamingScheme::Caller`] body's keys from where its maker recorded them (solidcore#1585: an
-/// array import through `make_topology_from_data`, `api_brep_copy`). A [`NamingScheme::Unknown`]
-/// body, or a Caller one without recorded keys, would be checked under the arena identities, which
-/// no maker uses: every edge would fail `SmBrep` test 61 on the owner of its curve.
+/// array import through `make_topology_from_data`, `api_brep_copy`); where it recorded none, the
+/// arena identities the binders name such an entity by. A [`NamingScheme::Unknown`] body would be
+/// checked under arena identities no maker uses: every edge would fail `SmBrep` test 61 on the
+/// owner of its curve.
 ///
 /// A test solidcore has not ported yet (its [`SolidError::Unported`]), or a body whose geometry
 /// owners' identities the check cannot know, fails the check with "not supported yet": the check
@@ -316,7 +316,6 @@ pub(crate) fn check(body: &Body, level: CheckLevel) -> Result<CheckReport> {
         }
         match check_brep(k, b, lv) {
             Err(SolidError::Unported { upstream, unit }) => Ok(Err(Refusal::Unported(upstream, unit))),
-            Err(SolidError::InvalidInput { operation: "topology::brep::validation::check_brep", .. }) => Ok(Err(Refusal::Naming(naming))),
             r => r.map(Ok),
         }
     })? {
