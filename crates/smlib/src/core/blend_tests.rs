@@ -869,7 +869,7 @@ fn rounds_on_the_871_part() {
     let fit = blend(&p, Blend::Round, &e, &sizes(0.5), TOL, &[], &[], Corners::Filled).unwrap();
     let (v, n) = (volume(&fit, 1e-8).unwrap(), counts(&fit).unwrap());
     let refused = blend(&p, Blend::Round, &e, &sizes(1.0), TOL, &[], &[], Corners::Filled).map(|_| ()).unwrap_err();
-    println!("871 solidcore: r 0.5 V {v:.6} {n:?} (closed form {exact:.6}); r 1: {refused:?}");
+    assert_eq!(refused, Error::NoRoom);
     assert_eq!(n[0], 38);
     assert!((v - exact).abs() < 1e-3, "{v} vs {exact}");
     #[cfg(feature = "native")]
@@ -889,7 +889,6 @@ fn rounds_on_the_871_part() {
         let fit = ffi::ops::blend(ffi::ops::BLEND_ROUND, h, &e, &sizes(0.5), TOL).unwrap();
         let (cv, cn) = (ffi::volume(&fit, 1e-8).unwrap(), ffi::counts(&fit).unwrap().map(|x| usize::try_from(x).unwrap()));
         let crefused = ffi::ops::blend(ffi::ops::BLEND_ROUND, h, &e, &sizes(1.0), TOL).map(|_| ());
-        println!("871 C++: r 0.5 V {cv:.6} {cn:?}; r 1: {crefused:?}");
         assert!(rel(v, cv) < 1e-9, "solidcore {v} vs C++ {cv}");
         assert_eq!(n, cn);
         assert!(crefused.is_err());

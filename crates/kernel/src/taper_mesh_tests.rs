@@ -17,7 +17,6 @@ fn wedge() -> Body {
 #[test]
 fn the_wedge_round_keeps_its_volume() {
     let v = crate::measure(&wedge()).unwrap().volume;
-    println!("wedge V {v:?}");
     assert!((v - 5223.0386).abs() < 1e-3, "{v}");
 }
 

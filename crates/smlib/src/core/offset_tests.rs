@@ -830,7 +830,6 @@ fn offset_faces_close_a_step_wall() {
     for (at, d, v, a) in [([30.0, 15.0, 10.0], 10.0, 24000.0, 5200.0), ([10.0, 15.0, 20.0], -10.0, 12000.0, 3800.0)] {
         let r = offset_faces(&stepped, &[at], 0.1, d).unwrap();
         let (got, n, area) = (volume(&r, 1e-8).unwrap(), counts(&r).unwrap(), super::area(&r, 1e-8).unwrap());
-        println!("step wall d {d}: V {got} A {area} {n:?}");
         assert_eq!(n[0], 6, "d {d}");
         assert!(rel(got, v) < 1e-9 && rel(area, a) < 1e-9, "d {d}: V {got} A {area}");
     }

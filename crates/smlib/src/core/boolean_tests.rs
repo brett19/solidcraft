@@ -714,6 +714,8 @@ fn object_names_stay_distinct_past_a_million() {
 /// with a half annulus prism, r 4..5 about (e, 10), z 2..20, whose cap sits on the ring's top. Two
 /// equal circles a little apart cross; they do not coincide over a tiny edge. The stack's volume
 /// is 113 pi whatever e is.
+/// This path passes with `simple_coincidence_crossing_is_point` off too, so the test holds the
+/// result here and does not single out that flag (solidcore's own test does).
 #[test]
 fn a_ring_and_a_lip_with_walls_nearly_together() {
     use super::sweep::extrude;
@@ -738,13 +740,6 @@ fn a_ring_and_a_lip_with_walls_nearly_together() {
         let u = boolean(&ring, &lip, BooleanOp::Union).unwrap().unwrap();
         let v = volume(&u, 1e-8).unwrap();
         let report = super::check(&u, crate::check::CheckLevel::All).unwrap();
-        println!(
-            "ring + lip e {e}: V {v:.6} solids {} manifold solid {} valid {} counts {:?}",
-            solid_count(&u).unwrap(),
-            super::is_manifold_solid(&u).unwrap(),
-            report.is_valid(),
-            counts(&u).unwrap()
-        );
         assert!(report.is_valid(), "e {e}: {report}");
         assert_eq!(solid_count(&u).unwrap(), 1, "e {e}");
         assert!(super::is_manifold_solid(&u).unwrap(), "e {e}");
