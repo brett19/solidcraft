@@ -27,10 +27,10 @@ use solidcore::kernel::Kernel;
 use solidcore::math::Point2;
 use solidcore::nurbs::b_spline_surface_n_lib::p2::OrientType;
 use solidcore::nurbs::knots::Side;
-use solidcore::offset::offset_faces::{OffsetFacesExecutive, OffsetFacesRefusal};
 use solidcore::offset::offset_executive::p2::{
     OffsetNotifications, OffsetOptions, ShellCopyIdentities, ShellOptions, api_offset_brep_full, api_shell_brep_full,
 };
+use solidcore::offset::offset_faces::{OffsetFacesExecutive, OffsetFacesRefusal};
 use solidcore::query::api_queries::{BrepRef, face_bounding_box, face_classify_uv, face_closest_point_in_shape, face_internal_point};
 use solidcore::query::brep::{BrepIdentity, BrepQuery, LiveBrepObjects};
 use solidcore::surface::cone::Cone;
@@ -42,8 +42,8 @@ use solidcore::topology::face::p2 as face_p2;
 use solidcore::topology::topology::{NotifyRecords, Topology};
 use solidcore::topology::{Brep, BrepId, EdgeId, FaceId, FaceuseId, RegionId};
 
-use super::boolean::{domain, named};
 use super::blend::{Miss, on_copy, p3, pick, points_ok, status as blend_status, tolerance_ok};
+use super::boolean::{domain, named};
 use super::{Body, answer};
 use crate::{Error, Result};
 

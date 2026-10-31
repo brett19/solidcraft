@@ -540,7 +540,7 @@ mod history {
 #[test]
 fn object_names_stay_distinct_past_a_million() {
     use solidcore::EntityRef;
-    use solidcore::topology::{BrepId, EdgeId, FaceId, FaceuseId, LoopId, LoopuseId, RegionId, ShellId, VertexId, VertexuseId, EdgeuseId};
+    use solidcore::topology::{BrepId, EdgeId, EdgeuseId, FaceId, FaceuseId, LoopId, LoopuseId, RegionId, ShellId, VertexId, VertexuseId};
 
     use super::boolean::{domain, named};
     let at = |i: u32| {
