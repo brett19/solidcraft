@@ -589,3 +589,54 @@ mod history {
         check(Blend::Chamfer, 2.0);
     }
 }
+
+/// The capi's `knife_edge_chamfers` (fork e96898d): a 10 high extrusion of the profile whose arc
+/// of radius R = 21 runs out tangent into its top line at the tip x = 62 1/6 (a knife edge, a
+/// cusp), chamfered d at the tip. No ball lies d back along both faces there; the chamfer is the
+/// chord between the contacts of the ball of radius d, sqrt(4 R d) back on the flat face and where
+/// the line from the arc's axis to the ball's centre meets the wall. It takes the triangle flat
+/// contact, tip, wall contact less the wall's circular segment R²/2 (b - sin b),
+/// b = acos((R - d)/(R + d)): at d = 2 the chord is 3.822 wide and takes 159.23645 (each to
+/// 1e-12). Mirrored in x too.
+#[test]
+fn knife_edge_chamfers() {
+    use super::sweep::extrude;
+    use super::transform::transform;
+    use crate::sweeps::{Curve, DraftCorner};
+
+    const R: f64 = 21.0;
+    const TIP: f64 = 62.0 + 1.0 / 6.0;
+    const H: f64 = 10.0;
+    let line = |a: [f64; 2], b: [f64; 2]| Curve::Line { start: [a[0], a[1], 0.0], end: [b[0], b[1], 0.0] };
+    let profile = [
+        line([0.0, 0.0], [0.0, -R]),
+        line([0.0, -R], [TIP - R, -R]),
+        Curve::Arc { center: [TIP, -R, 0.0], axis: [0.0, 0.0, -1.0], reference: [1.0, 0.0, 0.0], radius: R, start: PI, end: 1.5 * PI },
+        line([TIP, 0.0], [0.0, 0.0]),
+    ];
+    let part = extrude(&profile, [0.0, 0.0, 1.0], H, 0.0, DraftCorner::Curvature, true).unwrap();
+    let before = (TIP - R) * R * H + R * R * (1.0 - PI / 4.0) * H;
+    assert!((volume(&part, 1e-8).unwrap() - before).abs() < 1e-9 * before);
+    for d in [1.0, 2.0, 5.0] {
+        let flat = TIP - (4.0 * R * d).sqrt();
+        let (wx, wy) = (TIP - (4.0 * R * d).sqrt() * R / (R + d), -R + (R - d) * R / (R + d));
+        let triangle = 0.5 * ((TIP - flat) * wy).abs();
+        let b = ((R - d) / (R + d)).acos();
+        let removed = (triangle - 0.5 * R * R * (b - b.sin())) * H;
+        if d == 2.0 {
+            assert!((removed - 159.236_450_742_901_18).abs() < 1e-12 * 159.24);
+            assert!(((wx - flat).hypot(wy) - 3.822_132_343_623_634_7).abs() < 1e-12 * 3.83);
+        }
+        for mirrored in [false, true] {
+            let sx = if mirrored { -1.0 } else { 1.0 };
+            let m = [[sx, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0]];
+            let body = transform(&part, &m).unwrap();
+            let tip = [sx * TIP, 0.0, H / 2.0];
+            let cut = blend(&body, Blend::Chamfer, &[tip], &[d], TOL, &[], &[], Corners::Filled).unwrap();
+            let v = volume(&cut, 1e-8).unwrap();
+            let want = before - removed;
+            assert!((v - want).abs() < 1e-9 * want, "d {d} mirrored {mirrored}: {v} vs {want}");
+            native(&to_arrays(&cut).unwrap()).unwrap();
+        }
+    }
+}

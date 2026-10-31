@@ -46,6 +46,13 @@ pub(crate) struct Later {
     seams: Vec<usize>,
 }
 
+impl Later {
+    /// How many of `edges`, the last ones, are the new edges.
+    pub(crate) fn new_count(&self) -> usize {
+        self.new.len()
+    }
+}
+
 /// The history of `body` over the body `levels` rounds back ([`Rounds::before`] taken that many
 /// times), composed; `None` when a step has no record or history, or for no levels.
 fn down(body: &Body, levels: usize) -> Option<History> {
@@ -397,8 +404,8 @@ mod tests {
             assert_eq!(result.unmeshed_faces(), 0);
             assert!(result.validity().is_empty(), "{:?}", result.validity());
             assert!((vol(&result) - vol(&reference)).abs() < 0.05);
-            assert!(!result.contains(Vec3::new(24.9, 0.1, 5.0)));
-            assert!(result.contains(Vec3::new(24.0, 1.0, 5.0)));
+            assert_eq!(result.classify_point(Vec3::new(24.9, 0.1, 5.0)).unwrap(), crate::PointClass::Outside);
+            assert_eq!(result.classify_point(Vec3::new(24.0, 1.0, 5.0)).unwrap(), crate::PointClass::Inside);
         }
     }
 
@@ -417,8 +424,8 @@ mod tests {
             assert!(result.validity().is_empty(), "{:?}", result.validity());
             assert!((vol(&result) - vol(&reference)).abs() < 0.05, "radius {radius}");
             // The old bottom radius is still 2, away from the newly rounded corner.
-            assert!(!result.contains(Vec3::new(12.5, 0.5, 0.5)));
-            assert!(result.contains(Vec3::new(12.5, 1.0, 1.0)));
+            assert_eq!(result.classify_point(Vec3::new(12.5, 0.5, 0.5)).unwrap(), crate::PointClass::Outside);
+            assert_eq!(result.classify_point(Vec3::new(12.5, 1.0, 1.0)).unwrap(), crate::PointClass::Inside);
         }
         // A tangent boundary of an earlier round is not a sharp edge, and cannot be
         // reinterpreted as the sharp edge exposed when that round is taken off.
@@ -463,8 +470,8 @@ mod tests {
                 let result = fillet(&rounded, &crate::tangent_chain(&rounded, selection).unwrap(), 2.0).unwrap();
                 assert!(result.validity().is_empty(), "{:?}", result.validity());
                 assert!((vol(&result) - want).abs() < 1e-6 * want, "{selection:?}: {} vs {want}", vol(&result));
-                assert!(!result.contains(Vec3::new(-4.9, 87.1, 10.0)));
-                assert!(result.contains(Vec3::new(-4.1, 86.3, 10.0)));
+                assert_eq!(result.classify_point(Vec3::new(-4.9, 87.1, 10.0)).unwrap(), crate::PointClass::Outside);
+                assert_eq!(result.classify_point(Vec3::new(-4.1, 86.3, 10.0)).unwrap(), crate::PointClass::Inside);
             }
         }
     }
@@ -537,9 +544,17 @@ mod tests {
     #[test]
     fn corners_refuse_what_they_cannot_build() {
         let (bx, a, b, _) = setup();
-        // Larger than the faces, or not a size: errors, no panic. Large but fitting is fine.
+        // Not a size: errors, no panic. Large but fitting is fine.
         assert!(fillet_radii(&bx, &[(a, 15.0), (b, 2.0)]).is_ok_and(|r| r.unmeshed_faces() == 0));
-        assert!(fillet_radii(&bx, &[(a, 25.0), (b, 2.0)]).is_err());
+        // R25 on a overflows both its faces and goes first: its circle about (x, z) = (-5, -5)
+        // takes all of the top, and with it b, which is gone. What is left is R25's alone: the
+        // square [0, 20]² inside that circle, with t = x + 5, ∫₅^√600 √(625 − t²) dt − 5 (√600 − 5),
+        // along 20.
+        let g = |t: f64| 0.5 * (t * (625.0 - t * t).sqrt() + 625.0 * (t / 25.0).asin());
+        let w = 600f64.sqrt();
+        let want = 20.0 * (g(w) - g(5.0) - 5.0 * (w - 5.0));
+        let r = fillet_radii(&bx, &[(a, 25.0), (b, 2.0)]).unwrap();
+        assert!((vol(&r) - want).abs() < 1e-9 * want, "{} vs {want}", vol(&r));
         assert!(fillet_radii(&bx, &[(a, f64::NAN)]).is_err());
         assert!(fillet_radii(&bx, &[(a, 0.0)]).is_err());
         assert!(fillet_radii(&bx, &[]).is_err());
@@ -584,7 +599,6 @@ mod tests {
     /// where the front strip's edge 1 + t/2 − w(t) crosses y = 0, so Simpson's rule is exact on
     /// each piece: 375.673069 taken from V0 = 140333.333333 (the prismatoid), 139957.660264.
     #[test]
-    #[ignore = "fails until SMLib builds the cliff overflow of a blended loop: CloseRemovalRegion refuses it (SM_FILERR_NO_ROOM, its fillet boundary closes on one face)"]
     fn a_rim_loop_chamfer_running_off_its_rim_builds() {
         use solidcraft_geom::{Loop2, Plane, Vec2};
         let rectangle = |x0, y0, x1, y1| Loop2::polygon(&[Vec2::new(x0, y0), Vec2::new(x1, y0), Vec2::new(x1, y1), Vec2::new(x0, y1)]);

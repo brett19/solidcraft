@@ -39,7 +39,7 @@ enum Done {
 /// The object names of a copy's source (`domain` 0) and of the copy itself: each copy in a call
 /// names its objects in its own key domain, as solidcore's difftest copies do, so that the
 /// notification records of source and copy never collide.
-fn named(entity: EntityRef, domain: u64) -> ObjectRef {
+pub(super) fn named(entity: EntityRef, domain: u64) -> ObjectRef {
     let r = p3::topology_ref(0, entity);
     ObjectRef { type_code: r.type_code, key: ObjectKey(domain + r.type_code as u64 * 1_000_000 + (r.key.0 & 0xffff_ffff)) }
 }

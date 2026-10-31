@@ -9,14 +9,24 @@
 
 use std::collections::BTreeMap;
 
+use solidcore::curve::curve::Curve;
+use solidcore::curve::line::Line;
 use solidcore::geom::extent2d::Extent2d;
 use solidcore::geom::vector2d::Vec2;
 use solidcore::geom::vector3d::Vec3;
+use solidcore::kernel::Kernel;
+use solidcore::nurbs::b_spline_curve::p1::KnotType;
+use solidcore::nurbs::b_spline_surface::p1::{BSplineSurface, BSplineSurfaceForm, CanonicalSurfaceData};
+use solidcore::primitive::api_primitives::{create_box, create_plane};
+use solidcore::primitive::api_trim_ops::trim_surface_with_3d_curves;
 use solidcore::surface::plane::p1::Plane;
 use solidcore::surface::surface::Surface;
-use solidcore::topology::brep::p3::new_brep;
+use solidcore::topology::Brep;
+use solidcore::topology::brep::p2::ArenaNotifyState;
+use solidcore::topology::brep::p3::{merge_brep, new_brep};
 use solidcore::topology::brep::p8::create_face_from_surface;
 
+use super::boolean::named;
 use super::merge::{merge_faces, stitch};
 use super::sweep::build_faces;
 use super::{Body, area, bounds, counts, make_box, run, to_arrays, volume};
@@ -281,6 +291,130 @@ fn hostile_arguments_are_refused() {
     assert_eq!(merge_faces(&b, &[[f64::NAN, 0.0, 0.0]], TOL).err(), Some(Error::Argument));
     let many = vec![[0.0; 3]; crate::MAX_POINTS + 1];
     assert_eq!(merge_faces(&b, &many, TOL).err(), Some(Error::Argument));
+}
+
+/// A 10 mm cube and, unsewn in the same body (`MergeBrep`), a sheet made on the kernel.
+fn cube_and_sheet(sheet: impl FnOnce(&mut Kernel) -> solidcore::Result<Brep>) -> Body {
+    run("cube and sheet", |k| {
+        let mut cube = create_box(k, Vec3::new(0.0, 0.0, 0.0), 10.0, 10.0, 10.0)?;
+        let sheet = sheet(k)?;
+        let target = |e| named(e, 100_000_000);
+        let mut state = ArenaNotifyState::new(&cube);
+        let mut env = state.env(None);
+        env.key_of = &target;
+        merge_brep(k, &mut env, &mut cube, &sheet, &|e| named(e, 0), None, None, true)?;
+        cube.refresh_cached_topology();
+        Ok(cube)
+    })
+    .map(Body::new)
+    .unwrap()
+}
+
+/// The capi's `cube_and_cover` (capi/tests/sheets.cpp): the cube and a cover over its top, a
+/// height field z(x, y) over [0, 10]^2 of `degree` and uniform `spans`, its control points at
+/// their Greville abscissae (so its parameters are x and y), z = 10 but for the middle one,
+/// 10 + `rise`, trimmed to the square by lines (`SmApiTrimSurfaceWith3dCurves`), so its rim is the
+/// cube's top edges.
+fn cube_and_cover(degree: usize, spans: usize, rise: f64) -> Body {
+    cube_and_sheet(|k| {
+        let n = spans + degree;
+        let step = 10.0 / spans as f64;
+        let unique: Vec<f64> = (0..=spans).map(|k| step * k as f64).collect();
+        let mult: Vec<usize> = (0..=spans).map(|k| if k == 0 || k == spans { degree + 1 } else { 1 }).collect();
+        let knots: Vec<f64> = unique.iter().zip(&mult).flat_map(|(&u, &m)| std::iter::repeat_n(u, m)).collect();
+        let greville: Vec<f64> = (0..n).map(|i| knots[i + 1..=i + degree].iter().sum::<f64>() / degree as f64).collect();
+        let mut net = Vec::with_capacity(n * n);
+        for i in 0..n {
+            for j in 0..n {
+                let z = if 2 * i + 1 == n && 2 * j + 1 == n { 10.0 + rise } else { 10.0 };
+                net.push(Vec3::new(greville[i], greville[j], z));
+            }
+        }
+        let surface = BSplineSurface::create_canonical(&CanonicalSurfaceData {
+            u_degree: degree,
+            v_degree: degree,
+            control_points: &net,
+            form: BSplineSurfaceForm::Unspecified,
+            u_multiplicities: &mult,
+            v_multiplicities: &mult,
+            u_knots: &unique,
+            v_knots: &unique,
+            knot_type: KnotType::Unspecified,
+            weights: None,
+            uv_domain: None,
+        })?;
+        let corner = [[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]].map(|[x, y]| Vec3::new(x, y, 10.0));
+        let mut sides = Vec::with_capacity(4);
+        for i in 0..4 {
+            sides.push(Curve::from(Line::create_line_segment(3, corner[i], corner[(i + 1) % 4], None)?));
+        }
+        trim_surface_with_3d_curves(k, Surface::from(surface), &[4], sides)
+    })
+}
+
+/// A biquadratic Bezier cover rising 9 at its middle control point,
+/// z = 10 + 9 * 2s(1-s) * 2t(1-t) (s = x/10, t = y/10): the capi's cover.
+fn cube_and_biquadratic_cover() -> Body {
+    cube_and_cover(2, 1, 9.0)
+}
+
+/// A bicubic cover over 8 spans whose only raised control point is the middle one: the capi's
+/// cover lying on the cube's top for 2.5 mm in from every edge.
+fn cube_and_bicubic_cover() -> Body {
+    cube_and_cover(3, 8, 9.0)
+}
+
+/// The capi's flap: a 10 x 10 sheet on from the cube's top edge at x = 10, in the plane z = 10.
+fn cube_and_flap() -> Body {
+    cube_and_sheet(|k| create_plane(k, Vec3::new(10.0, 0.0, 10.0), 10.0, 10.0))
+}
+
+/// The space between the cover and the cube's top encloses 9 * (10/3)^2 = 100 mm^3: sewn, it is
+/// part of the solid and the top, now inside it, goes. A closed solid of the cube's five other
+/// faces and the cover, 1100 mm^3.
+#[test]
+fn a_cover_sews_onto_a_cube_into_a_closed_solid() {
+    let (sewn, closed) = stitch(&cube_and_biquadratic_cover(), 1e-6).unwrap();
+    assert!(closed);
+    assert_eq!(counts(&sewn).unwrap()[0], 6);
+    let v = volume(&sewn, 1e-8).unwrap();
+    assert!((v - 1100.0).abs() < 1e-6, "volume {v}");
+}
+
+/// The bicubic cover overlaps the top: no sector between the faces at the rim to sew it into, so
+/// it is refused, not sewn so that the cube's inside joins the outside.
+#[test]
+fn a_cover_lying_on_the_cube_is_refused() {
+    assert_eq!(stitch(&cube_and_bicubic_cover(), 1e-6).err(), Some(Error::Unsupported));
+}
+
+/// The flap closes nothing with the cube: it stays the sheet beside it the manifold stitch
+/// leaves, not glued into an edge three faces would share.
+#[test]
+fn a_flap_on_a_cube_edge_stays_beside_it() {
+    let (sewn, closed) = stitch(&cube_and_flap(), 1e-6).unwrap();
+    assert!(!closed);
+    assert_eq!(counts(&sewn).unwrap()[0], 7);
+    let (v, a) = (volume(&sewn, 1e-8).unwrap(), area(&sewn, 1e-8).unwrap());
+    assert!((v - 1000.0).abs() < 1e-6 && (a - 700.0).abs() < 1e-6, "volume {v}, area {a}");
+}
+
+/// The same three on C++, the same input converted: the fork's e5d9bba, as its capi tests say.
+#[cfg(feature = "native")]
+#[test]
+fn sheets_on_a_cube_stitch_the_same_on_cpp() {
+    use crate::{Brep, error, ffi};
+    crate::init().unwrap();
+    let sew = |b: Body| ffi::sheets::stitch(Brep::made_core(b).cpp().unwrap(), 1e-6).map_err(error);
+    let (cover, closed) = sew(cube_and_biquadratic_cover()).unwrap();
+    assert!(closed);
+    assert_eq!(ffi::counts(&cover).unwrap()[0], 6);
+    assert!((ffi::volume(&cover, 1e-8).unwrap() - 1100.0).abs() < 1e-6);
+    assert_eq!(sew(cube_and_bicubic_cover()).err(), Some(Error::Unsupported));
+    let (flap, closed) = sew(cube_and_flap()).unwrap();
+    assert!(!closed);
+    assert_eq!(ffi::counts(&flap).unwrap()[0], 7);
+    assert!((ffi::volume(&flap, 1e-8).unwrap() - 1000.0).abs() < 1e-6);
 }
 
 /// The inputs are never changed.
