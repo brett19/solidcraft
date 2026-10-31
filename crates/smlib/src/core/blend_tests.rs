@@ -11,9 +11,10 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use super::blend::{Corners, blend, blend_holes, chamfer_sides, fillet_variable};
+use super::boolean::boolean;
 use super::{Body, counts, make_box, make_cylinder, to_arrays, volume};
 use crate::export::native;
-use crate::{Blend, ChamferSecond, Error};
+use crate::{Blend, BooleanOp, ChamferSecond, Error};
 
 /// A case longer than this is a hang.
 const TIMEOUT: Duration = Duration::from_secs(300);
@@ -25,6 +26,8 @@ const TOL: f64 = 0.01;
 enum Shape {
     Box([f64; 3], [f64; 3]),
     Cylinder([f64; 3], f64, f64),
+    /// A box (corner, size) less a cylinder along z (base centre, radius, height).
+    Holed([f64; 3], [f64; 3], [f64; 3], f64, f64),
 }
 
 impl Shape {
@@ -32,6 +35,9 @@ impl Shape {
         match self {
             Shape::Box(o, s) => make_box(o, s),
             Shape::Cylinder(o, r, h) => make_cylinder(o, r, h),
+            Shape::Holed(o, s, c, r, h) => {
+                boolean(&make_box(o, s).unwrap(), &make_cylinder(c, r, h).unwrap(), BooleanOp::Subtract).map(|b| b.unwrap())
+            }
         }
         .unwrap()
     }
@@ -170,6 +176,24 @@ fn case(name: &str) -> Case {
         "pick_near_nothing" => {
             c(Op::Blend(BLOCK, Blend::Round, vec![TOP_FRONT, [100.0, 100.0, 100.0]], r), Expect::Fails(Error::NoMatch { point: 1 }))
         }
+        // A 20 mm cube with a hole of radius 5 along z whose wall touches the face y = 0 along
+        // x = 10 (#1390): a 3 mm chamfer of the hole's top rim runs out of that face where the
+        // rim meets it tangentially, a vertex no blend corner handles. The tangent chain the app
+        // blends is picked: the rim at 135° and 315° round the hole (away from the cylinder's
+        // seam at 0° and the face at 270°), and the two pieces of the top's front edge, which the
+        // rim runs on tangentially into at (10, 0, 20).
+        "chamfer_hole_rim_touching_a_face" => {
+            let d = 5.0 * std::f64::consts::FRAC_1_SQRT_2;
+            c(
+                Op::Blend(
+                    Shape::Holed([0.0; 3], [20.0; 3], [10.0, 5.0, -1.0], 5.0, 22.0),
+                    Blend::Chamfer,
+                    vec![[10.0 - d, 5.0 + d, 20.0], [10.0 + d, 5.0 - d, 20.0], [5.0, 0.0, 20.0], [15.0, 0.0, 20.0]],
+                    3.0,
+                ),
+                Expect::Fails(Error::CornerUnsupported),
+            )
+        }
         // √3 from all three edges at the corner (0, 0, 10).
         "pick_ambiguous" => c(Op::Blend(BLOCK, Blend::Round, vec![[-1.0, -1.0, 11.0]], r), Expect::Fails(Error::Ambiguous { point: 0 })),
         _ => panic!("{name}"),
@@ -268,6 +292,9 @@ fn cpp_case(name: &str) -> Got {
         match s {
             Shape::Box(o, z) => ffi::make_box(&o, &z),
             Shape::Cylinder(o, r, h) => ffi::make_cylinder(&o, r, h),
+            Shape::Holed(o, z, c, r, h) => {
+                ffi::ops::boolean(&ffi::make_box(&o, &z).unwrap(), &ffi::make_cylinder(&c, r, h).unwrap(), ffi::ops::BOOLEAN_SUBTRACT)
+            }
         }
         .map(Brep::made)
         .unwrap()
@@ -367,6 +394,7 @@ cases!(
     fillet_variable_linear,
     fillet_over_a_cliff: ignore = "solidcore#960: no cliff overflow (fork 8ba4667)",
     fillet_too_large,
+    chamfer_hole_rim_touching_a_face,
     pick_near_nothing,
     pick_ambiguous,
 );

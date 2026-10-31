@@ -254,15 +254,24 @@ fn face_set(b: &Brep) -> solidcore::Result<HashSet<FaceId>> {
 const RAIL_LEAVES_FACE: &str = "Fillet Error: a rail leaves the face it rolls on (the blend is larger than the faces allow)";
 
 /// `blend_failure`: a blend the executive found larger than its faces allow
-/// (`SM_FILERR_NO_ROOM`) is [`Error::NoRoom`]; any other failure its status.
+/// (`SM_FILERR_NO_ROOM`) is [`Error::NoRoom`]; a filleted vertex no corner type handles
+/// (`SM_FILERR_CORNER_UNSUPPORTED`, which solidcore notes under
+/// `fixes.fillet_vertex_error_diagnostics`) is [`Error::CornerUnsupported`]; any other failure
+/// its status. `corner` says `CreateFilletCorners` noted such a vertex: the corner it could not
+/// make is why a later step fails, so that note stands for it whatever the later step noted
+/// (as solidcore's own `FilletSession::do_fillet` keeps it).
 ///
 /// Except a blend whose rail leaves its face: there the fork decides between building the
 /// blend over the cliff (`SmFilletCliffOverflow.cpp`, fork 8ba4667) and refusing it, which
 /// solidcore does not port, refusing every such blend. Its answer is the fork's only by chance,
 /// so it is [`Error::Unsupported`].
-fn blend_failure(s: &FilletSession<'_>, e: SolidError) -> Error {
+fn blend_failure(s: &FilletSession<'_>, e: SolidError, corner: bool) -> Error {
     let info = s.error_info();
-    if info.code != FilletErrorType::NoRoom as i32 || e.is_unported() {
+    if e.is_unported() {
+        status(e)
+    } else if corner || info.code == FilletErrorType::CornerUnsupported as i32 {
+        Error::CornerUnsupported
+    } else if info.code != FilletErrorType::NoRoom as i32 {
         status(e)
     } else if info.comment == RAIL_LEAVES_FACE {
         Error::Unsupported
@@ -311,6 +320,9 @@ fn blend_edges(
             (Section::Chamfer(second), _) => chamfer_parameters(k, &mut s, edges, sizes, second),
         };
         let mut step = prepared.and_then(|()| s.create_corners(k, None)).map(|()| Ok(Vec::new()));
+        // A vertex `CreateFilletCorners` made no corner for, noted before a later step notes its
+        // own failure over it ([`blend_failure`]).
+        let corner = step.is_ok() && s.error_info().code == FilletErrorType::CornerUnsupported as i32;
         if let Ok(Ok(_)) = step {
             step = corners(&mut s, section, setbacks);
         }
@@ -319,10 +331,10 @@ fn blend_edges(
             // The marks go with the session: read them before it drops.
             Ok(Ok(set_back)) => match s.do_filleting(k, None) {
                 Ok(()) => s.corner_patch_faces().map(|marked| Ok((set_back, marked))),
-                Err(e) => Ok(Err(Err(blend_failure(&s, e)))),
+                Err(e) => Ok(Err(Err(blend_failure(&s, e, corner)))),
             },
             Ok(Err(refusal)) => Ok(Err(refusal)),
-            Err(e) => Ok(Err(Err(blend_failure(&s, e)))),
+            Err(e) => Ok(Err(Err(blend_failure(&s, e, corner)))),
         }
     };
     let done: solidcore::Result<std::result::Result<(Vec<usize>, Vec<(usize, FaceId)>), std::result::Result<usize, Error>>> = done;
