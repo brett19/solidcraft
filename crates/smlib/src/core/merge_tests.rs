@@ -26,7 +26,7 @@ use solidcore::topology::brep::p2::ArenaNotifyState;
 use solidcore::topology::brep::p3::{merge_brep, new_brep};
 use solidcore::topology::brep::p8::create_face_from_surface;
 
-use super::boolean::named;
+use super::boolean::{domain, named};
 use super::merge::{merge_faces, stitch};
 use super::sweep::build_faces;
 use super::{Body, area, bounds, counts, make_box, run, to_arrays, volume};
@@ -298,7 +298,7 @@ fn cube_and_sheet(sheet: impl FnOnce(&mut Kernel) -> solidcore::Result<Brep>) ->
     run("cube and sheet", |k| {
         let mut cube = create_box(k, Vec3::new(0.0, 0.0, 0.0), 10.0, 10.0, 10.0)?;
         let sheet = sheet(k)?;
-        let target = |e| named(e, 100_000_000);
+        let target = |e| named(e, domain(1));
         let mut state = ArenaNotifyState::new(&cube);
         let mut env = state.env(None);
         env.key_of = &target;

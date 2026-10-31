@@ -437,7 +437,7 @@ cases!(
     offset_sheet_a_solid,
     offset_sheet_a_sphere,
     offset_sheet_a_sphere_to_its_centre,
-    offset_faces_top_out: ignore = "no SmOffsetFacesExecutive, fork a96ce9f (solidcore#1060)",
+    offset_faces_top_out,
     offset_faces_through,
     draft_box_sides,
     draft_one_side,
@@ -600,7 +600,6 @@ mod history {
 
     /// The top moved down 2 mm: it stands for itself, its four neighbours are trimmed to meet it.
     #[test]
-    #[ignore = "no SmOffsetFacesExecutive, fork a96ce9f (solidcore#1060): solidcore cannot offset the face yet"]
     fn tags_cross_a_face_offset() {
         let a = tagged_box();
         let top = [[10.0, 15.0, 10.0]];

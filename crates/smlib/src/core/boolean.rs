@@ -36,19 +36,28 @@ enum Done {
     NoCut,
 }
 
-/// The object names of a copy's source (`domain` 0) and of the copy itself: each copy in a call
-/// names its objects in its own key domain, as solidcore's difftest copies do, so that the
-/// notification records of source and copy never collide.
+/// The start of key domain `n`: past every [`named`] key of the domain before it.
+pub(super) const fn domain(n: u64) -> u64 {
+    n << 36
+}
+
+/// The object names of a copy's source (domain 0) and of the copy itself: each copy in a call
+/// names its objects in its own key domain ([`domain`]), as solidcore's difftest copies do, so that
+/// the notification records of source and copy never collide. Within a domain the key is
+/// `(kind + 1) << 32 | index`, [`convert`](super::convert)'s, distinct for every 32-bit arena index
+/// (solidcore refuses namings in which two live objects share a key).
 pub(super) fn named(entity: EntityRef, domain: u64) -> ObjectRef {
     let r = p3::topology_ref(0, entity);
-    ObjectRef { type_code: r.type_code, key: ObjectKey(domain + r.type_code as u64 * 1_000_000 + (r.key.0 & 0xffff_ffff)) }
+    // `topology_ref(0, ..)`'s kind (at most 10) and index.
+    let (kind, index) = ((r.key.0 >> 32) & 0xf, r.key.0 & 0xffff_ffff);
+    ObjectRef { type_code: r.type_code, key: ObjectKey(domain + (((kind + 1) << 32) | index)) }
 }
 
 /// `copy_of` (smlib_ops.cpp, smlib_imprint.cpp): `SmApiBrepCopy`, a copy that owns its geometry.
 /// A plain `Clone` is not one: its geometry keeps the source's owners. Copy `n` (from 1) names
 /// its objects in key domain `n`.
 pub(crate) fn copy_of(k: &mut Kernel, b: &Brep, n: u64) -> SolidResult<Brep> {
-    let target = move |e| named(e, n.saturating_mul(100_000_000));
+    let target = move |e| named(e, domain(n));
     let mut state = p2::ArenaNotifyState::new(&Brep::new());
     let mut env = state.env(None);
     env.key_of = &target;
