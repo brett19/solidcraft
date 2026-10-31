@@ -98,7 +98,7 @@ impl Raw {
     /// This history with its faces in a canonical order (by origins, then change) and each edge
     /// naming its faces by that order, the edges sorted: two kernels' histories of one result
     /// compare equal whatever order each lists its faces and edges in.
-    #[cfg(test)]
+    #[cfg(all(test, feature = "native"))]
     pub(crate) fn canonical(&self) -> Raw {
         let mut order: Vec<usize> = (0..self.faces.len()).collect();
         order.sort_by(|a, b| {

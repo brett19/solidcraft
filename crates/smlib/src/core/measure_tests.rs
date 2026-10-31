@@ -274,6 +274,7 @@ primitive!(torus, "torus");
 
 /// The head of each report line, `<reporting type>::Test #<n>`, or the whole line for the capi's
 /// own lines (a failed status without a report, a skipped AssertValid).
+#[cfg(feature = "native")]
 fn tests_of(text: &str) -> Vec<&str> {
     text.lines().map(|l| l.find(" #").and_then(|i| l[i + 2..].find(' ').map(|j| &l[..i + 2 + j])).unwrap_or(l)).collect()
 }
