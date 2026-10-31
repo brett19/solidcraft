@@ -233,8 +233,6 @@ pub(crate) fn fixes() -> UpstreamFixes {
     f.fillet_trim_inside_by_best_dot = true;
     f.fillet_half_degree_crease = true;
     f.fillet_split_edge_keeps_near_half = true;
-    f.good_drop_result_distances_in_order = true;
-    f.face_tight_box_searches_trim = true;
     f.curve_loop_normal_from_area = true;
     f
 }
@@ -251,11 +249,14 @@ pub(crate) fn fixes() -> UpstreamFixes {
 /// published.
 ///
 /// On since `SMLIB_REV` eaa998a: `fillet_trim_inside_by_best_dot` (fork de4dae6),
-/// `fillet_half_degree_crease` (2e8758b), `fillet_split_edge_keeps_near_half` (ceb3272),
-/// `good_drop_result_distances_in_order` (0b4de8c, landed as eaa998a), `curve_loop_normal_from_area`
-/// (be45e8d) and `face_tight_box_searches_trim` (beb6061; the fork's follow-up 326de73, dividing a
-/// cell at the surface's knots, is not in solidcore yet, so a screw sweep's tight box can still
-/// differ).
+/// `fillet_half_degree_crease` (2e8758b), `fillet_split_edge_keeps_near_half` (ceb3272) and
+/// `curve_loop_normal_from_area` (be45e8d).
+///
+/// Held back though their fork commits are in `SMLIB_REV`, because solidcore has only half of the
+/// fork's fix: `face_tight_box_searches_trim` (beb6061) without 326de73, which divides a cell at the
+/// surface's knots, so a screw thread's tight box overshoots (15 thread cases);
+/// `good_drop_result_distances_in_order` (eaa998a) without that commit's tight convergence test, so
+/// the peg's round is refused with Bad Gap.
 #[cfg(test)]
 const HELD_BACK: &[&str] = &[
     "precise_properties_trim_base_v",
@@ -266,6 +267,8 @@ const HELD_BACK: &[&str] = &[
     "ellipse_step_interval_checks",
     "perspective_sphere_offsets",
     "corner_patch_face_side_twist",
+    "face_tight_box_searches_trim",
+    "good_drop_result_distances_in_order",
 ];
 
 fn fresh() -> Kernel {
