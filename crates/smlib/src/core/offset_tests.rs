@@ -653,6 +653,26 @@ fn a_draft_moves_a_face_as_on_cpp() {
     }
 }
 
+/// The tip cut off a triangular prism, drafted about a plane 100 mm off so that the whole face goes
+/// out past where its neighbours meet: its edges vanish, `SM_ERR_OFFSET_EDGE_VANISHES` in SMLib,
+/// which the capi's `status` answers as `SMLIB_ERR_UNSUPPORTED`, on both kernels.
+#[cfg(feature = "native")]
+#[test]
+fn a_draft_past_the_neighbours_meeting_is_unsupported_as_on_cpp() {
+    use crate::sweeps::{Curve, DraftCorner};
+    use crate::{Brep, ffi};
+    crate::init().unwrap();
+    let p = [[0.0, 0.0, 0.0], [20.0, 0.0, 0.0], [11.0, 18.0, 0.0], [9.0, 18.0, 0.0]];
+    let profile: Vec<Curve> = (0..4).map(|i| Curve::Line { start: p[i], end: p[(i + 1) % 4] }).collect();
+    crate::sweeps::ON_CPP.with(|c| c.set(true));
+    let prism = Brep::extrude(&profile, [0.0, 0.0, 1.0], 10.0, 0.0, DraftCorner::default(), true).unwrap();
+    crate::sweeps::ON_CPP.with(|c| c.set(false));
+    let (tip, z, origin, angle) = ([[10.0, 18.0, 5.0]], [0.0, 0.0, 1.0], [0.0, 0.0, -100.0], (-2f64).to_radians());
+    let cpp = ffi::ops::draft(prism.cpp().unwrap(), &tip, TOL, &origin, &z, &z, angle);
+    assert_eq!(cpp.err(), Some((ffi::ops::ERR_UNSUPPORTED, None)));
+    assert_eq!(draft(prism.core().unwrap(), &tip, TOL, origin, z, z, angle).err(), Some(Error::Unsupported));
+}
+
 /// Face and edge tags (`Brep::tagged`) through offsets routed to solidcore, as on C++: the box is
 /// tagged on the C++ kernel, its solidcore body converted from that and tagged the same way, and
 /// the two results' histories must be the same.

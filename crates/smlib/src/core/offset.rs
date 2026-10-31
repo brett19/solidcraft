@@ -60,11 +60,16 @@ const INVALID_INPUT: i32 = 1007;
 /// `SMLIB_ERR_WALLS_TOUCH`.
 const OFFSET_WALLS_TOUCH: i32 = 1042;
 
+/// `SM_ERR_OFFSET_EDGE_VANISHES` (fork 34318f4): a vertex moved past an edge's other end, which
+/// `status` (smlib_shim.h) reports as `SMLIB_ERR_UNSUPPORTED`.
+const OFFSET_EDGE_VANISHES: i32 = 1043;
+
 /// `status` (smlib_shim.h): an offset whose walls touch is [`Error::WallsTouch`]; any other
 /// status as the blends pass it on.
 fn status(e: SolidError) -> Error {
     match e {
         SolidError::Upstream { code: OFFSET_WALLS_TOUCH, .. } => Error::WallsTouch,
+        SolidError::Upstream { code: OFFSET_EDGE_VANISHES, .. } => Error::Unsupported,
         e => blend_status(e),
     }
 }
