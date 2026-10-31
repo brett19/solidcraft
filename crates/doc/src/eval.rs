@@ -392,23 +392,37 @@ pub struct SolvedSketch {
 /// for each group of edges sharing a face; the radius per edge is returned. With
 /// [`FilletFit::Taper`](crate::FilletFit::Taper) it tapers along each edge it doesn't fit. With
 /// the exact fit a radius too large is refused, naming the largest that fits ([`with_largest_fit`]).
+/// Also the picks whose edges a round overflowing its faces removed whole ([`kernel::fillet_removing`]).
 fn fillet_fitted(
     body: &kernel::Body,
     edges: &[Vec3],
     r: f64,
     fit: crate::FilletFit,
-) -> std::result::Result<(kernel::Body, Option<Vec<f64>>), kernel::KernelError> {
-    match kernel::fillet(body, edges, r) {
+) -> std::result::Result<(kernel::Body, Option<Vec<f64>>, Vec<Vec3>), kernel::KernelError> {
+    match kernel::fillet_removing(body, edges, r) {
+        Ok((b, gone)) => Ok((b, None, gone)),
         Err(kernel::KernelError::TooLarge(why)) if fit == crate::FilletFit::Exact => {
             Err(with_largest_fit(why, "radius", || kernel::fillet_max(body, edges, r)))
         }
         Err(kernel::KernelError::TooLarge(why)) if fit == crate::FilletFit::Reduce => match kernel::fillet_max_each(body, edges, r)? {
             // Built at the radius asked for after all (the groups apart): nothing reduced.
-            Some((used, b)) => Ok((b, used.iter().any(|u| *u < r).then_some(used))),
+            Some((used, b)) => Ok((b, used.iter().any(|u| *u < r).then_some(used), Vec::new())),
             None => Err(kernel::KernelError::TooLarge(why)),
         },
-        Err(kernel::KernelError::TooLarge(_)) if fit == crate::FilletFit::Taper => kernel::fillet_tapered(body, edges, r).map(|(b, _)| (b, None)),
-        other => other.map(|b| (b, None)),
+        Err(kernel::KernelError::TooLarge(_)) if fit == crate::FilletFit::Taper => {
+            kernel::fillet_tapered(body, edges, r).map(|(b, _)| (b, None, Vec::new()))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// The warning of a fillet some of whose edges a larger round, overflowing its faces, removed
+/// whole: they are gone, so they are not rounded.
+fn removed_note(gone: &[Vec3]) -> String {
+    let at = |p: &Vec3| format!("({}, {}, {})", show_mm(p.x), show_mm(p.y), show_mm(p.z));
+    match gone {
+        [one] => format!("the edge at {} was removed by the larger round, so it is not rounded", at(one)),
+        _ => format!("the edges at {} were removed by the larger round, so they are not rounded", gone.iter().map(at).collect::<Vec<_>>().join(", ")),
     }
 }
 
@@ -3718,9 +3732,12 @@ fn blend_body(
             (b, input)
         }
         FeatureKind::Fillet { fit, .. } => {
-            let (b, u) = fillet_fitted(&mb.body, edges, r, *fit)?;
+            let (b, u, gone) = fillet_fitted(&mb.body, edges, r, *fit)?;
             if let Some(u) = &u {
                 append_warning(warning, reduced_note(u, r));
+            }
+            if !gone.is_empty() {
+                append_warning(warning, removed_note(&gone));
             }
             used = u;
             (b, input)
@@ -4230,8 +4247,13 @@ fn hole_tools_and_prisms(
             // face, which would lie on the drill point's shoulder (a through hole, as drilled).
             let at = |h: f64| *position + dir * (-h);
             let eps = size * 1e-6;
-            let solid_at = |h: f64| st.bodies.iter().any(|b| b.body.contains(at(h)));
-            let exits_at_shoulder = solid_at(bottom + eps) && !solid_at(bottom - eps);
+            // Exact classification against every body: material where one has the point inside,
+            // air where all have it outside; a point within a body's tolerance of its boundary is
+            // neither, and the hole is then not taken to exit at its shoulder.
+            let classes = |h: f64| st.bodies.iter().map(|b| b.body.classify_point(at(h))).collect::<std::result::Result<Vec<_>, _>>();
+            let solid = classes(bottom + eps)?.contains(&kernel::PointClass::Inside);
+            let air = classes(bottom - eps)?.iter().all(|c| *c == kernel::PointClass::Outside);
+            let exits_at_shoulder = solid && air;
             if depth.is_some() && half > 1e-3 && half < std::f64::consts::FRAC_PI_2 && !exits_at_shoulder {
                 // One revolved tool (cylinder with a drill point).
                 let tip = r / half.tan();

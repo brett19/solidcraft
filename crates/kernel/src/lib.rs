@@ -157,12 +157,13 @@ pub mod watch;
 
 pub use blend::{
     ChamferSide, blend_edges, chamfer, chamfer_max, chamfer_sides, fillet, fillet_each, fillet_g2, fillet_g2_corners, fillet_g2_with_g2_corners,
-    fillet_least_setback, fillet_max, fillet_max_each, fillet_setback, tangent_chain,
+    fillet_least_setback, fillet_max, fillet_max_each, fillet_removing, fillet_setback, tangent_chain,
 };
 pub use blend_corner::fillet_radii;
 pub use blend_variable::{RadiusSpline, Taper, fillet_chord, fillet_tapered, fillet_variable, fillet_variable_points, fillet_variable_spline, taper};
 pub use body::{
-    Body, CapSignature, DISPLAY_ANGLE, DisplayShare, EdgeInfo, FaceInfo, FacePaint, FaceSource, MeshTolerance, Paint, Refusal, SurfaceKind,
+    Body, CapSignature, DISPLAY_ANGLE, DisplayShare, EdgeInfo, FaceInfo, FacePaint, FaceSource, MeshTolerance, Paint, PointClass, Refusal,
+    SurfaceKind,
 };
 pub use boundary::{Boundary, boundary_patch};
 pub use boundary_network::{BoundaryCurve, CurveSource, MAX_CHAIN_CURVES, MAX_EDGE_PICKS, boundary_join, boundary_surface};

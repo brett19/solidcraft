@@ -15,11 +15,11 @@ The long form is `docs/book/src/dev/testing.md`.
 - Crash fixes: a regression test from the report's `design.solidcraft` and `replay.json` (`skills/solidcraft-crash-safety/SKILL.md`).
 
 ## Unit test or rig case
-- Unit tests assert the code's logic: which edges a chain picks, name resolution, history labels, refusal wording, hostile input, parsing and saving (`corner_rounds_larger_than_their_faces_are_too_large`: per-edge radii, which no command takes, refused as `TooLarge`).
+- Unit tests assert the code's logic: which edges a chain picks, name resolution, history labels, refusal wording, hostile input, parsing and saving (`a_corner_round_wider_than_its_faces_overflows_and_takes_the_corners_other_edges`: per-edge radii, which no command takes).
 - The rig (`tests/kernel-cases/`) asserts geometry: exact volumes, shapes, seam continuity, geometric refusals, through commands with a hand-derived answer, so it survives a kernel swap (`fillets/190-fillet-disc-rim-past-its-2mm-wall`). A test doing both keeps only its logic.
 
 ## A failing test needs its fix
-A failing test cannot merge without its fix (it turns `main` red): include the fix, or mark the test `#[ignore = "fails until #123 is fixed"]` and remove that line in the PR that fixes it.
+A failing test cannot merge without its fix (it turns `main` red): include it, or list the test and cause in `tests/KNOWN_FAILING_TESTS` (`cargo xtask known-failing`); the fix drops the line.
 
 ## Running
 - `cargo xtask test` builds with the `ci` profile and runs every test binary at once; arguments after `--` go to each binary (`cargo xtask test -- shell`). It builds several times faster than `--release`; a test failing only in a debug build: say so in the PR.
