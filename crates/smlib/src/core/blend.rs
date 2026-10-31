@@ -212,7 +212,8 @@ fn mid(b: &Brep, e: EdgeId) -> solidcore::Result<f64> {
 
 /// `chamfer_radius`: the radius of the ball whose tangent points on the two faces of `e` lie
 /// `distance` back from the edge at its midpoint, `distance * tan(a / 2)` with `a` the angle
-/// between the directions into the faces. `None` where the capi's returns false.
+/// between the directions into the faces; at a cusp (a knife edge) `distance` itself, the ball
+/// whose contacts the chamfer joins. `None` where the capi's returns false.
 fn chamfer_radius(k: &Kernel, b: &mut Brep, e: EdgeId, distance: f64) -> solidcore::Result<Option<f64>> {
     let Some(u0) = edge::blend_edgeuse(k, b, e)? else { return Ok(None) };
     let Some(u1) = eu_p1::radial(b, u0)? else { return Ok(None) };
@@ -220,8 +221,15 @@ fn chamfer_radius(k: &Kernel, b: &mut Brep, e: EdgeId, distance: f64) -> solidco
     let options = BinormalOptions::default();
     let Some(e0) = answer(evaluate_binormal(k, b, u0, t, false, &options))? else { return Ok(None) };
     let Some(e1) = answer(evaluate_binormal(k, b, u1, t, false, &options))? else { return Ok(None) };
-    let c = e0.binormal.dot(e1.binormal).clamp(-1.0, 1.0);
-    let radius = distance * ((1.0 - c) / (1.0 + c)).sqrt();
+    // Unitize's failure (a zero vector) is the capi's `return false`.
+    let (Ok(n0), Ok(b0), Ok(b1)) = (e0.face_normal.unitize(), e0.binormal.unitize(), e1.binormal.unitize()) else { return Ok(None) };
+    let c = b0.dot(b1).clamp(-1.0, 1.0);
+    // At a cusp (a knife edge: the faces tangent within the half degree `GetBlendEdgeuse` calls
+    // tangent, folded back on each other, the binormals the same way) a is 0 and no ball lies
+    // `distance` back along both: the chamfer is the chord between the contacts of the ball of
+    // radius `distance` (fork e96898d).
+    let cusp = c > 0.0 && b1.dot(n0).abs() < (0.5 * std::f64::consts::PI / 180.0).sin();
+    let radius = if cusp { distance } else { distance * ((1.0 - c) / (1.0 + c)).sqrt() };
     Ok((radius.is_finite() && radius > 0.0).then_some(radius))
 }
 
