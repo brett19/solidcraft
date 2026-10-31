@@ -366,6 +366,29 @@ fn operands_stay_as_they_were() {
     assert!(rel(v, 1000.0) < 1e-9, "A ∪ A: {v}");
 }
 
+/// `moved`: a closest-point query that fails, even with an error that is no SMLib status (an edge
+/// without its curve here), counts as off the piece, as `SmApiEdgeClosestPoint` failing does in the
+/// capi (smlib_history.cpp:246): the face is Modified, the operation stands.
+#[test]
+fn a_failed_closest_point_counts_as_off_the_piece() {
+    use solidcore::query::api_queries::edge_closest_point;
+    use solidcore::topology::edge;
+    let body = A.core();
+    super::with_body("moved", &body, |k, b| {
+        let e = b.edge_list()[0];
+        let (Some(s), Some(f)) = edge::start_end_vertices(b, e)? else { panic!("an edge with no ends") };
+        let (s, f) = (b.vertex(s)?.point, b.vertex(f)?.point);
+        let at = [s, f, s + (f - s) * 0.5];
+        let tol = b.tolerance();
+        assert!(!super::history::moved(k, b, &[(e, &at)], tol)?, "still where it lay");
+        b.edge_mut(e)?.curve = None;
+        assert!(edge_closest_point(k, b, e, at[2]).is_err_and(|e| e.sm_status().is_none()), "fails with no status");
+        assert!(super::history::moved(k, b, &[(e, &at)], tol)?, "off the piece");
+        Ok(())
+    })
+    .unwrap();
+}
+
 /// Face and edge tags (`Brep::tagged`) through operations routed to solidcore, as on C++: each
 /// operand is tagged on the C++ kernel, its solidcore body converted from that and tagged the same
 /// way there, and the two results' histories ([`Raw`], each in its own kernel's face and edge
