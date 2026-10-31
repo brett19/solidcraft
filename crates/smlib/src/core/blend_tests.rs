@@ -10,7 +10,7 @@ use std::f64::consts::PI;
 use std::sync::mpsc;
 use std::time::Duration;
 
-use super::blend::{Corners, blend, blend_holes, chamfer_sides, fillet_variable};
+use super::blend::{Corners, blend, blend_dropping, blend_holes, chamfer_sides, fillet_variable};
 use super::boolean::boolean;
 use super::{Body, counts, make_box, make_cylinder, to_arrays, volume};
 use crate::export::native;
@@ -424,6 +424,52 @@ fn a_cliff_overflow_the_fork_refuses_has_no_room() {
         blend(&Shape::Box([0.0; 3], [20.0; 3]).core(), Blend::Round, &corner, &[20.0; 3], TOL, &[], &[], Corners::Filled).err()
     });
     assert_eq!(r, Some(Error::NoRoom));
+}
+
+/// The capi's `overflow_goes_first` (fork 241f7ba): R21 on a 20 cube's edge takes all of both faces
+/// that edge lies on, and rounds with it on other edges go after it. With R5 on the corner's other
+/// two edges those edges are gone (the two R5 points flagged) and the result is the R21's alone,
+/// 20 (F(w) - F(1) - (w - 1)) with F the integral of sqrt(441 - u²) and w = sqrt(440). With R5 on
+/// the back upright that upright's round runs above the R21 cylinder, taking the corner's piece
+/// over it too (Simpson on 4000 spans, against a bound of its quartic end edge's tolerance).
+#[test]
+fn overflow_goes_first() {
+    let f = |u: f64| 0.5 * (u * (441.0 - u * u).sqrt() + 441.0 * (u / 21.0).asin());
+    let w = 440f64.sqrt();
+    let alone = 20.0 * (f(w) - f(1.0) - (w - 1.0));
+    let strip = |t: f64| {
+        let y = 15.0 + 5.0 * t.sin();
+        let zc = 21.0 - (441.0 - (y - 21.0) * (y - 21.0)).sqrt();
+        5.0 * (1.0 - t.cos()) * (20.0 - zc) * 5.0 * t.cos()
+    };
+    let (n, h) = (4000, 0.5 * PI / 4000.0);
+    let mut sum = strip(0.0) + strip(0.5 * PI);
+    for i in 1..n {
+        sum += f64::from(if i % 2 == 1 { 4 } else { 2 }) * strip(f64::from(i) * h);
+    }
+    let corner = sum * h / 3.0;
+    assert!((corner - 106.612_300_588).abs() < 1e-6, "{corner}");
+    let cases: [(&[[f64; 3]], &[f64], &[bool], f64, f64); 2] = [
+        (&[[10.0, 0.0, 0.0], [0.0, 10.0, 0.0], [0.0, 0.0, 10.0]], &[21.0, 5.0, 5.0], &[false, true, true], alone, 1e-9 * alone),
+        (&[[10.0, 0.0, 0.0], [0.0, 20.0, 10.0]], &[21.0, 5.0], &[false, false], alone - corner, 0.02),
+    ];
+    for (points, sizes, dropped, want, bound) in cases {
+        let got = timed("overflow_first", move || {
+            let (b, d) = blend_dropping(&Shape::Box([0.0; 3], [20.0; 3]).core(), Blend::Round, points, sizes, 1.0).unwrap();
+            native(&to_arrays(&b).unwrap()).unwrap();
+            (volume(&b, 1e-8).unwrap(), d)
+        });
+        assert_eq!(got.1, dropped, "{sizes:?}");
+        assert!((got.0 - want).abs() <= bound, "{sizes:?}: {} vs {want}", got.0);
+        #[cfg(feature = "native")]
+        {
+            let body = crate::Brep::made_core(Shape::Box([0.0; 3], [20.0; 3]).core());
+            let (cpp, d) = crate::ffi::ops::blend_dropping(crate::ffi::ops::BLEND_ROUND, body.cpp().unwrap(), points, sizes, 1.0).unwrap();
+            assert_eq!(d, dropped, "C++ {sizes:?}");
+            let v = crate::ffi::volume(&cpp, 1e-8).unwrap();
+            assert!((got.0 - v).abs() <= bound, "{sizes:?}: solidcore {} vs C++ {v}", got.0);
+        }
+    }
 }
 
 /// The corner of r5 rounds at (60, 40, 20) on a 60 x 40 x 20 box, set back 8 and left open: the

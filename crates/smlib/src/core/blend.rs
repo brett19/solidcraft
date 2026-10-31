@@ -1,9 +1,9 @@
 //! Fillets and chamfers on solidcore: the C API's composition round SMLib's fillet executive,
 //! ported from the fork's `capi/src/smlib_ops.cpp` (`blend_call`, `round_edges`,
 //! `chamfer_offsets`, `chamfer_edges`, `chamfer_radius`, `outer_faceuse`, `face_frame`,
-//! `sides_offsets`, `blend_failure`, `setbacks_fit`,
+//! `sides_offsets`, `blend_failure`, `setbacks_fit`, `overflow_first`, `Picked`,
 //! `size_ok`, `points_ok`, `tolerance_ok`, `law_ok`, `law_pinches`, `law_along`, `finish`,
-//! `smlib_fillet`, `smlib_chamfer`, `smlib_blend`, `smlib_blend_setback`,
+//! `smlib_fillet`, `smlib_chamfer`, `smlib_blend`, `smlib_blend_dropping`, `smlib_blend_setback`,
 //! `smlib_blend_setback_open`, `smlib_fillet_variable`, `smlib_chamfer_sides`) and
 //! `capi/src/smlib_pick.h` (`pick`, `pick_edges`, `pick_vertices`).
 //!
@@ -15,9 +15,6 @@
 //! [`Error::Unsupported`], refused where the capi would first reach it, so every error before
 //! it is the C++ path's:
 //! - a variable radius whose law has a corner (`SplitFilletFacesAtRadiusCorners`, fork 6eecf04; solidcore#430, PR #1403).
-//!
-//! - a blend whose rail leaves its face, which the fork may build over the cliff
-//!   (`SmFilletCliffOverflow.cpp`, fork 8ba4667; solidcore#960) and solidcore always refuses ([`blend_failure`]).
 //!
 //! solidcore's own refusals of code it has not ported (`SolidError::Unported`) are
 //! [`Error::Unsupported`] too.
@@ -32,7 +29,7 @@ use solidcore::blend::fillet_executive::p3::NoRoomReason;
 use solidcore::blend::fillet_executive::session::FilletSession;
 use solidcore::blend::fillet_geom::p1::{FilletCornerType, FilletErrorType};
 use solidcore::blend::fillet_solver::p1::{FilletSurfaceGenerator, FilletSurfaceGeneratorType};
-use solidcore::geom::attribute::ids as attribute_ids;
+use solidcore::geom::attribute::{Attribute, AttributeHandlers, Behavior, ids as attribute_ids};
 use solidcore::geom::vector3d::{Point3, Vec3};
 use solidcore::kernel::Kernel;
 use solidcore::mass::integrator::properties::edge_length;
@@ -285,6 +282,15 @@ fn blend_failure(s: &FilletSession<'_>, e: SolidError, corner: bool) -> Error {
     }
 }
 
+/// `round_edges`' `overflow_first` argument: with it the session stops, nothing built, when blends
+/// of several edges overflow their faces across cliffs (`SetOverflowFirst`) or (`classify_only`)
+/// always (`SetClassifyOnly`), and `stopped` gets the edges whose blends overflow
+/// (`GetOverflowEdges`; the capi's status `OVERFLOW_FIRST`, the call's failure then meaning only that).
+struct OverflowFirst<'a> {
+    classify_only: bool,
+    stopped: &'a mut Option<Vec<EdgeId>>,
+}
+
 /// `round_edges` and `chamfer_offsets` (with equal offsets): `edges` of `b` blended in place,
 /// edge i at `sizes[i]`, the executive driven as `SmApiFilletEdgesPerEdge` drives it with the
 /// corners' setbacks (`SmFilletCorner::SetSetBackDist`) set between making the corners and
@@ -305,6 +311,22 @@ fn blend_edges(
     law: Option<FilletLaw>,
     setbacks: &[SetBack],
     patches: Option<&mut Vec<Vec<FaceId>>>,
+) -> solidcore::Result<std::result::Result<(), std::result::Result<usize, Error>>> {
+    blend_edges_stopping(k, b, edges, sizes, section, law, setbacks, patches, None)
+}
+
+/// [`blend_edges`], with `round_edges`' `overflow_first` argument.
+#[allow(clippy::too_many_arguments)] // the capi's round_edges
+fn blend_edges_stopping(
+    k: &mut Kernel,
+    b: &mut Brep,
+    edges: &[EdgeId],
+    sizes: &[f64],
+    section: Section<'_>,
+    law: Option<FilletLaw>,
+    setbacks: &[SetBack],
+    patches: Option<&mut Vec<Vec<FaceId>>>,
+    overflow_first: Option<OverflowFirst<'_>>,
 ) -> solidcore::Result<std::result::Result<(), std::result::Result<usize, Error>>> {
     let before = face_set(b)?;
     let done = {
@@ -328,6 +350,8 @@ fn blend_edges(
         // A vertex `CreateFilletCorners` made no corner for, noted before a later step notes its
         // own failure over it ([`blend_failure`]).
         let corner = step.is_ok() && s.error_info().code == FilletErrorType::CornerUnsupported as i32;
+        s.set_overflow_first(overflow_first.is_some());
+        s.set_classify_only(overflow_first.as_ref().is_some_and(|o| o.classify_only));
         if let Ok(Ok(_)) = step {
             step = corners(&mut s, section, setbacks);
         }
@@ -336,7 +360,14 @@ fn blend_edges(
             // The marks go with the session: read them before it drops.
             Ok(Ok(set_back)) => match s.do_filleting(k, None) {
                 Ok(()) => s.corner_patch_faces().map(|marked| Ok((set_back, marked))),
-                Err(e) => Ok(Err(Err(blend_failure(&s, e, corner)))),
+                Err(e) => {
+                    if let Some(o) = overflow_first
+                        && s.error_info().code == FilletErrorType::OverflowFirst as i32
+                    {
+                        *o.stopped = Some(s.overflow_edges());
+                    }
+                    Ok(Err(Err(blend_failure(&s, e, corner))))
+                }
             },
             Ok(Err(refusal)) => Ok(Err(refusal)),
             Err(e) => Ok(Err(Err(blend_failure(&s, e, corner)))),
@@ -493,6 +524,126 @@ pub(crate) enum Corners {
     Open,
 }
 
+/// `Picked::ID`: above SMLib's own ids (`SM_AI_USER_1 + 9`).
+const PICKED_ID: u64 = attribute_ids::USER_1 + 9;
+
+/// The capi's `Picked`: which picked edge an edge stands for, put on the picked edges before an
+/// overflowing blend goes first, handed on through every split and copy (`SM_AB_COPY`), so
+/// afterwards the edges carrying it are what the overflow left of that picked edge (none: it
+/// removed the edge whole).
+#[derive(Debug, Clone, PartialEq)]
+struct Picked(usize);
+
+impl AttributeHandlers for Picked {}
+
+/// The attribute `Picked` on `e`, with its handle.
+fn picked_on(b: &Brep, e: EdgeId) -> Option<(solidcore::geom::attribute::AttributeHandle, usize)> {
+    let (h, a) = b.entity_attributes(EntityRef::Edge(e)).into_iter().find(|(_, a)| a.attribute_id() == PICKED_ID)?;
+    a.application_value::<Picked>().map(|p| (h, p.0))
+}
+
+/// `overflow_first`: the rounds of [`blend_call`] when blends of several edges overflow their
+/// faces (`round_edges` stopped in the copy `w` of `body`, `picked` its picked edges, `each` their
+/// sizes). The blends that overflow on their own (each edge's alone, classified in `w`, which
+/// nothing was built in) go first: on a fresh copy of `body`, the picked edges tagged with their
+/// places ([`Picked`]), those are rounded, and each other picked edge is then what is left of it,
+/// the edges carrying its tag, rounded at its size. A picked edge with nothing left is gone: its
+/// points are flagged in `dropped`. Where none overflows on its own, or all do, the edges are
+/// rounded together as before. The result is the new body. Unlike the capi, the tags come off it
+/// (nothing reads them after the call, and a later call's copy would carry them on).
+#[allow(clippy::too_many_arguments)] // the capi's overflow_first
+fn overflow_first(
+    k: &mut Kernel,
+    body: &Body,
+    points: &[[f64; 3]],
+    tolerance: f64,
+    section: Section<'_>,
+    picked: &[EdgeId],
+    each: &[f64],
+    w: &mut Brep,
+    dropped: &mut [bool],
+) -> solidcore::Result<Out<Brep>> {
+    /// A failure of `round_edges` on the fresh copy, which has no setback corners.
+    fn failed(e: std::result::Result<usize, Error>) -> Error {
+        e.err().unwrap_or(Error::Unsupported)
+    }
+    let mut fresh = {
+        let g = body.0.lock().unwrap_or_else(PoisonError::into_inner);
+        copy_of(k, &g, 2)?
+    };
+    let again = match pick_edges(k, &fresh, points, tolerance)? {
+        Ok((again, _)) if again.len() == picked.len() => again,
+        Ok(_) => return Ok(Err(Error::NoMatch { point: 0 })),
+        Err(m) => return Ok(Err(edge_miss(m))),
+    };
+    let (mut lead, mut lead_sizes, mut rest) = (Vec::new(), Vec::new(), Vec::new());
+    for (i, ((&e, &to), &size)) in picked.iter().zip(&again).zip(each).enumerate() {
+        let mut stopped = None;
+        let alone = OverflowFirst { classify_only: true, stopped: &mut stopped };
+        match blend_edges_stopping(k, w, &[e], &[size], section, None, &[], None, Some(alone))? {
+            Err(Err(why)) if stopped.is_none() => return Ok(Err(why)),
+            Err(Ok(_)) => return Ok(Err(Error::Unsupported)),
+            Ok(()) => return Ok(Err(Error::Status(1001))),
+            Err(Err(_)) => {}
+        }
+        fresh.add_attribute(EntityRef::Edge(to), Attribute::application(PICKED_ID, Behavior::Copy, Picked(i)))?;
+        if stopped.is_some_and(|over| !over.is_empty()) {
+            lead.push(to);
+            lead_sizes.push(size);
+        } else {
+            rest.push(i);
+        }
+    }
+    if lead.is_empty() || rest.is_empty() {
+        return Ok(match blend_edges(k, &mut fresh, &again, each, section, None, &[], None)? {
+            Ok(()) => untagged(fresh),
+            Err(e) => Err(failed(e)),
+        });
+    }
+    if let Err(e) = blend_edges(k, &mut fresh, &lead, &lead_sizes, section, None, &[], None)? {
+        return Ok(Err(failed(e)));
+    }
+    let edges = brep_p1::edges(&fresh, None)?;
+    let (mut rest_edges, mut rest_sizes) = (Vec::new(), Vec::new());
+    for i in rest {
+        let mut left = false;
+        for &e in &edges {
+            if picked_on(&fresh, e).is_some_and(|(_, p)| p == i) {
+                rest_edges.push(e);
+                rest_sizes.push(each.get(i).copied().unwrap_or(0.0));
+                left = true;
+            }
+        }
+        if !left {
+            // Every point that picked edge i (in `w`, which nothing was built in).
+            for (j, p) in points.iter().enumerate() {
+                if let (Ok((one, _)), Some(flag)) = (pick_edges(k, w, std::slice::from_ref(p), tolerance)?, dropped.get_mut(j))
+                    && one.as_slice() == picked.get(i..=i).unwrap_or_default()
+                {
+                    *flag = true;
+                }
+            }
+        }
+    }
+    if !rest_edges.is_empty()
+        && let Err(e) = blend_edges(k, &mut fresh, &rest_edges, &rest_sizes, section, None, &[], None)?
+    {
+        return Ok(Err(failed(e)));
+    }
+    Ok(untagged(fresh))
+}
+
+/// `b` with [`Picked`] off its edges.
+fn untagged(mut b: Brep) -> Out<Brep> {
+    let edges = brep_p1::edges(&b, None).map_err(status)?;
+    for e in edges {
+        if let Some((h, _)) = picked_on(&b, e) {
+            b.remove_attribute(EntityRef::Edge(e), h).map_err(status)?;
+        }
+    }
+    Ok(b)
+}
+
 /// [`blend_holes`] without its holes.
 #[allow(clippy::too_many_arguments)] // the capi's blend_call
 pub(crate) fn blend(
@@ -506,6 +657,14 @@ pub(crate) fn blend(
     open: Corners,
 ) -> Result<Body> {
     blend_holes(body, kind, points, sizes, tolerance, corners, setbacks, open).map(|(b, _)| b)
+}
+
+/// `smlib_blend_dropping`: [`blend`] with one size per point, no corners, and per point whether it
+/// picked an edge that a larger round, overflowing its faces, removed whole.
+pub(crate) fn blend_dropping(body: &Body, kind: Blend, points: &[[f64; 3]], sizes: &[f64], tolerance: f64) -> Result<(Body, Vec<bool>)> {
+    let mut dropped = vec![false; points.len()];
+    let (b, _) = blend_call(body, kind, points, sizes, tolerance, &[], &[], Corners::Filled, &mut dropped)?;
+    Ok((b, dropped))
 }
 
 /// `blend_call` (as `smlib_fillet`, `smlib_chamfer`, `smlib_blend`, `smlib_blend_setback` and
@@ -522,6 +681,23 @@ pub(crate) fn blend_holes(
     corners: &[[f64; 3]],
     setbacks: &[f64],
     open: Corners,
+) -> Result<(Body, Vec<Hole>)> {
+    blend_call(body, kind, points, sizes, tolerance, corners, setbacks, open, &mut vec![false; points.len()])
+}
+
+/// `blend_call`: [`blend_holes`], with per point in `dropped` whether it picked an edge an
+/// overflowing round removed whole ([`overflow_first`]).
+#[allow(clippy::too_many_arguments)] // the capi's blend_call
+fn blend_call(
+    body: &Body,
+    kind: Blend,
+    points: &[[f64; 3]],
+    sizes: &[f64],
+    tolerance: f64,
+    corners: &[[f64; 3]],
+    setbacks: &[f64],
+    open: Corners,
+    dropped: &mut [bool],
 ) -> Result<(Body, Vec<Hole>)> {
     let one_size = sizes.len() == 1;
     if !points_ok(points, false)
@@ -580,7 +756,21 @@ pub(crate) fn blend_holes(
         // The corners' places, read now: filleting deletes the vertices.
         let at_points = at.iter().map(|&v| vertex::point(&w, v)).collect::<solidcore::Result<Vec<Point3>>>()?;
         let mut patches = Vec::new();
-        match blend_edges(k, &mut w, &picked, &each, section, None, &back, (open == Corners::Open).then_some(&mut patches))? {
+        // An overflow goes first (rounds without corner setbacks): when some of the rounds
+        // overflow their faces across cliffs and others fit, the overflowing ones are built
+        // first, on a fresh copy, and the others then round what is left of their edges. An edge
+        // the overflow removes whole is gone (`dropped`); one it cuts keeps the rest.
+        let may_go_first = back.is_empty() && open == Corners::Filled && picked.len() > 1;
+        let mut stopped = None;
+        let first = may_go_first.then_some(OverflowFirst { classify_only: false, stopped: &mut stopped });
+        let done = blend_edges_stopping(k, &mut w, &picked, &each, section, None, &back, (open == Corners::Open).then_some(&mut patches), first)?;
+        if stopped.is_some() {
+            return Ok(match overflow_first(k, body, points, tolerance, section, &picked, &each, &mut w, dropped)? {
+                Ok(fresh) => finish(fresh, solid_in)?,
+                Err(e) => Err(e),
+            });
+        }
+        match done {
             Ok(()) => {}
             // A corner SMLib does not set back: the first of the caller's points that picked it.
             Err(Ok(j)) => return Ok(Err(first_corner.get(j).map_or(Error::Unsupported, |&corner| Error::CornerRefused { corner }))),
