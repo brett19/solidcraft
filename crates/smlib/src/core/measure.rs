@@ -187,7 +187,7 @@ pub(crate) fn classify_point(body: &Body, p: [f64; 3]) -> Result<PointClass> {
     if !finite(&p) {
         return Err(Error::Argument);
     }
-    let class = with_body("classify_point", body, |k, b| {
+    with_body("classify_point", body, |k, b| {
         let tol = brep_zone_tol_3d(k, b, SmallTopoType::NormalSize);
         let mut classifier = BrepClassifier::of_brep(b);
         let pc = match classifier.point_3d_classify(k, Point3::new(p[0], p[1], p[2]), tol, true) {
@@ -203,8 +203,7 @@ pub(crate) fn classify_point(body: &Body, p: [f64; 3]) -> Result<PointClass> {
             // Point3DClassify reports only the four classes above on success: SM_ERR.
             _ => Err(Error::Status(SM_ERR)),
         })
-    })?;
-    class
+    })?
 }
 
 /// `SM_ERR`.
