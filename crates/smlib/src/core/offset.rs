@@ -12,13 +12,14 @@
 //! A draft tilts planes and, since tangency-labs/smlib#27, turns a cylinder about the pull into
 //! a cone (solidcore's `Cone::lean_cylinder`, solidcore#1545); a cone that is not a cylinder
 //! (smlib#53) is [`Error::Unsupported`]. A draft's tilted faces go in through solidcore's
-//! `SmBrep::LocalOperation` ([`local_operation`]); the capi's check that it moved some face (`moved_faces`) needs face
-//! history solidcore does not report (solidcore#1462) and is not made.
+//! `SmBrep::LocalOperation` ([`local_operation`]). The capi's check that it moved some face
+//! (`moved_faces`) marks the replacement surfaces; solidcore names a surface by its owning face, so
+//! the mark goes on the picked faces, which it stays with through the operation (solidcore#1875).
 
 use solidcore::EntityRef;
 use solidcore::SolidError;
 use solidcore::curve::curve::Curve;
-use solidcore::geom::attribute::{AttributeStore, ObjectKey};
+use solidcore::geom::attribute::{Attribute, AttributeStore, Behavior, ObjectKey, ids};
 use solidcore::geom::axis2_placement::Axis2Placement;
 use solidcore::geom::object::{ObjectRef, Shape};
 use solidcore::geom::vector3d::{Point3, Vec3};
@@ -57,11 +58,16 @@ const INVALID_INPUT: i32 = 1007;
 /// `SMLIB_ERR_WALLS_TOUCH`.
 const OFFSET_WALLS_TOUCH: i32 = 1042;
 
+/// `SM_ERR_OFFSET_EDGE_VANISHES` (fork 34318f4): a vertex moved past an edge's other end, which
+/// `status` (smlib_shim.h) reports as `SMLIB_ERR_UNSUPPORTED`.
+const OFFSET_EDGE_VANISHES: i32 = 1043;
+
 /// `status` (smlib_shim.h): an offset whose walls touch is [`Error::WallsTouch`]; any other
 /// status as the blends pass it on.
 fn status(e: SolidError) -> Error {
     match e {
         SolidError::Upstream { code: OFFSET_WALLS_TOUCH, .. } => Error::WallsTouch,
+        SolidError::Upstream { code: OFFSET_EDGE_VANISHES, .. } => Error::Unsupported,
         e => blend_status(e),
     }
 }
@@ -626,6 +632,37 @@ fn drafted_cone(
     Ok(answer(cyl.lean_cylinder(k, slope, v0))?.ok_or(Error::Unsupported))
 }
 
+/// The capi's `Before` mark on what `SmBrep::LocalOperation` is to move: above the history's tag.
+const MOVED_MARK: u64 = ids::USER_1 + 8;
+
+/// `Before::mark` on each replacement surface. A surface has no identity apart from its owning
+/// face here, and `faces[i]`'s offset face takes `surfaces[i]`, so the mark goes on the picked face
+/// and travels as the surface's does (Copy behaviour; solidcore#1875). The one difference, recorded
+/// in solidcore's `topology.brep_local_operation--1875-face-mark-for-surface-mark` finding: a merge
+/// keeping an unpicked face over a picked one hands that survivor the mark, where SMLib's survivor
+/// keeps its own unmarked surface.
+pub(super) fn mark_moved(w: &mut Brep, picked: &[FaceId]) -> solidcore::Result<()> {
+    for &f in picked {
+        w.add_attribute(EntityRef::Face(f), Attribute::long(MOVED_MARK, 0, Behavior::Copy))?;
+    }
+    Ok(())
+}
+
+/// `moved_faces`'s reading (`read_marks`): whether any face of `w` carries the mark, every mark
+/// removed.
+pub(super) fn moved_faces(w: &mut Brep) -> solidcore::Result<bool> {
+    let mut moved = false;
+    for f in w.face_list().to_vec() {
+        let e = EntityRef::Face(f);
+        let marks: Vec<_> = w.entity_attributes(e).into_iter().filter(|(_, a)| a.attribute_id() == MOVED_MARK).map(|(h, _)| h).collect();
+        moved = moved || !marks.is_empty();
+        for h in marks {
+            w.remove_attribute(e, h)?;
+        }
+    }
+    Ok(moved)
+}
+
 /// `smlib_draft`: its checks, the solid check, the pick, then `draft_faces`: each picked face (a
 /// plane parallel to the pull) gets a copy of its plane turned by `angle` about its line on the
 /// neutral plane, and a cylinder about the pull the cone `drafted_cone` gives
@@ -720,14 +757,15 @@ pub(crate) fn draft(
             }
             surfaces.push(tilted);
         }
-        // `moved_faces(b, status(b->LocalOperation(faces, surfaces)))`. The capi marks the
-        // tilted surfaces first and, when SMLib reports success, answers SMLIB_ERR_NO_EFFECT if
-        // no face of the result lies on a marked one. solidcore surfaces carry no attributes and
-        // the local operation reports no face history (solidcore#1462), so that check is not
-        // made here: a success is the capi's answer whenever SMLib's marks survive.
+        // `moved_faces(b, status(b->LocalOperation(faces, surfaces)))`, its marks on the picked
+        // faces (`mark_moved`).
+        mark_moved(&mut w, &picked)?;
         let mut notes = Notifications::new(&mut w);
         if let Err(e) = called(local_operation(k, &mut w, &picked, surfaces, &mut notes.context()))? {
             return Ok(Err(e));
+        }
+        if !moved_faces(&mut w)? {
+            return Ok(Err(Error::NoEffect));
         }
         finish(w, true)
     })
