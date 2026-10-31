@@ -1,6 +1,6 @@
 //! Split Face and Split Body on solidcore: the C API's composition, ported from the fork's
 //! `capi/src/smlib_split.cpp` (`smlib_split_faces`, `smlib_split_body`, `cut_face`,
-//! `plane_covers`, `copy_of`) and the tool surfaces of `capi/src/smlib_ssi.cpp`
+//! `plane_covers`, `copy_of`, `slice`, `both_sides`, `smlib_split_body_by_sheet`) and the tool surfaces of `capi/src/smlib_ssi.cpp`
 //! (`smlib_surface_plane`, `_cylinder`, `_cone`, `_sphere`, `_torus`, `_nurbs`).
 //!
 //! As there, every operation works on copies of its body (`SmApiBrepCopy`). A face is cut where
@@ -9,7 +9,8 @@
 //! reaching over the face, `GlobalSurfaceIntersect` otherwise) and the untrimmed curves go to
 //! `SmBrep::MergeCurvesOnSurface` with the tool as the intersecting surface. Unlike the plane
 //! cutter, a failed merge fails the call. A body is split by slicing (`SM_BO_SLICE`) copies of it
-//! with a one-face sheet on the tool surface, once with the surface turned over.
+//! with a one-face sheet on the tool surface, once with the surface turned over; or with a sheet
+//! of several faces as it is, its surfaces first turned to agree.
 //!
 //! A tool is a [`crate::ssi::Surface`]; solidcore's own surface is made from its description
 //! ([`Spec`]), as `smlib_ssi.cpp` makes SMLib's, over the surface's natural UV domain.
@@ -39,9 +40,10 @@ use solidcore::surface::surface::Surface;
 use solidcore::surface::surface::p2::TsectCurveType;
 use solidcore::surface::torus::{Torus, TorusOptions};
 use solidcore::topology::brep::p1 as brep_p1;
-use solidcore::topology::brep::p2::is_manifold_solid;
+use solidcore::topology::brep::p2::{is_manifold_solid, is_sheet};
 use solidcore::topology::brep::p3::{new_brep, with_kernel_callbacks};
 use solidcore::topology::brep::p8::create_face_from_surface;
+use solidcore::topology::brep::p9::orient_sheet_surfaces;
 use solidcore::topology::brep::p10::merge_curves_on_surface_through_surface;
 use solidcore::topology::brep::planar_section::face_planar_section_curves;
 use solidcore::topology::brep_cache::CacheObject;
@@ -380,14 +382,60 @@ pub(crate) fn split_faces(body: &Body, faces: &[usize], tools: &[&Spec]) -> Resu
     Ok(r.map(|(b, made)| (Body::new(b), made)))
 }
 
-/// One side of `smlib_split_body`: a copy of `body` sliced by a one-face sheet on the tool's
-/// surface (turned over with `flip`: SMLib's slice reads the side from the surface, not the
-/// face's use). `None` when the side is empty.
-fn side(k: &mut Kernel, body: &Body, spec: &Spec, flip: bool) -> solidcore::Result<Out<Option<Brep>>> {
+/// `slice`: a copy of `body` sliced by `sheet` (SMLib's slice reads the side from the surfaces, not
+/// the faces' uses). `None` when nothing is left.
+fn slice(k: &mut Kernel, body: &Body, sheet: Brep) -> solidcore::Result<Out<Option<Brep>>> {
     let a = {
         let g = body.0.lock().unwrap_or_else(PoisonError::into_inner);
         copy_of(k, &g, 1)?
     };
+    let options = MergeOptions::new(false, false, false, false, false);
+    let r = match boolean_with_options(k, a, sheet, BooleanOperation::Slice, options) {
+        Ok(r) => r.result,
+        Err(e) => return Ok(Err(status(e))),
+    };
+    Ok(Ok((!r.face_list().is_empty()).then_some(r)))
+}
+
+/// `both_sides`: both parts, `side` making each side's sheet (`true`: turned over, for the back).
+/// A body that is no manifold solid is [`Error::NotSolid`]; a side left empty is `None`
+/// (`SMLIB_ERR_NO_CUT`), and with `whole` so is a part that is no manifold solid: `SM_BO_SLICE`
+/// with a sheet that only nicks a region behaves as a difference, leaving the sheet's piece as a
+/// slit in the body and a lamina on the other side, which is no cut.
+fn both_sides(
+    k: &mut Kernel,
+    body: &Body,
+    whole: bool,
+    mut side: impl FnMut(&mut Kernel, bool) -> solidcore::Result<Out<Brep>>,
+) -> solidcore::Result<Out<Option<(Brep, Brep)>>> {
+    let solid = {
+        let g = body.0.lock().unwrap_or_else(PoisonError::into_inner);
+        is_manifold_solid(&g)?
+    };
+    if !solid {
+        return Ok(Err(Error::NotSolid));
+    }
+    let mut parts = [None, None];
+    for (part, flip) in parts.iter_mut().zip([true, false]) {
+        let sheet = match side(k, flip)? {
+            Ok(s) => s,
+            Err(e) => return Ok(Err(e)),
+        };
+        *part = match slice(k, body, sheet)? {
+            Ok(p) => p,
+            Err(e) => return Ok(Err(e)),
+        };
+    }
+    let [Some(back), Some(front)] = parts else { return Ok(Ok(None)) };
+    if whole && !(is_manifold_solid(&back)? && is_manifold_solid(&front)?) {
+        return Ok(Ok(None));
+    }
+    Ok(Ok(Some((back, front))))
+}
+
+/// One side of `smlib_split_body`: a one-face sheet on the tool's surface, turned over with `flip`.
+fn side(k: &mut Kernel, body: &Body, spec: &Spec, flip: bool) -> solidcore::Result<Out<Brep>> {
+    let tolerance = body.0.lock().unwrap_or_else(PoisonError::into_inner).tolerance();
     let t = match tool(k, spec)? {
         Ok(t) => t,
         Err(e) => return Ok(Err(e)),
@@ -397,18 +445,13 @@ fn side(k: &mut Kernel, body: &Body, spec: &Spec, flip: bool) -> solidcore::Resu
         return Ok(Err(status(e)));
     }
     let mut sheet = new_brep(k, USE_DEFAULT, USE_DEFAULT)?;
-    sheet.set_tolerance(a.tolerance());
+    sheet.set_tolerance(tolerance);
     let natural = surface.natural_uv_domain_with_nurb(k)?;
     if let Err(e) = build_faces(&mut sheet, |s, fenv| create_face_from_surface(k, s, Some(surface), &natural, fenv)) {
         return Ok(Err(status(e)));
     }
     sheet.refresh_cached_topology();
-    let options = MergeOptions::new(false, false, false, false, false);
-    let r = match boolean_with_options(k, a, sheet, BooleanOperation::Slice, options) {
-        Ok(r) => r.result,
-        Err(e) => return Ok(Err(status(e))),
-    };
-    Ok(Ok((!r.face_list().is_empty()).then_some(r)))
+    Ok(Ok(sheet))
 }
 
 /// `smlib_split_body`: the manifold solid `body` cut in two by the tool: the part behind the
@@ -418,23 +461,42 @@ pub(crate) fn split_body(body: &Body, spec: &Spec) -> Result<Option<(Body, Body)
     if body.0.is_poisoned() {
         return Err(Error::Internal("smlib_split_body: the body was left unfinished by an earlier panic".to_owned()));
     }
-    let r = run("smlib_split_body", |k| {
-        let solid = {
-            let g = body.0.lock().unwrap_or_else(PoisonError::into_inner);
-            is_manifold_solid(&g)?
-        };
-        if !solid {
-            return Ok(Err(Error::NotSolid));
+    let r = run("smlib_split_body", |k| both_sides(k, body, false, |k, flip| side(k, body, spec, flip)))??;
+    Ok(r.map(|(b, f)| (Body::new(b), Body::new(f))))
+}
+
+/// `smlib_split_body_by_sheet`: the manifold solid `body` cut in two by `sheet` as it is (one or
+/// more faces joined edge to edge), its surfaces turned to agree with face `face`'s
+/// (`SmBrep::OrientSheetSurfaces`), for the back all turned over: the part behind that normal and
+/// the part in front. A sheet that does not divide the body is `None` (`SMLIB_ERR_NO_CUT`). A
+/// `sheet` that is no sheet, or a `face` out of range, is [`Error::Argument`].
+pub(crate) fn split_body_by_sheet(body: &Body, sheet: &Body, face: usize) -> Result<Option<(Body, Body)>> {
+    if std::ptr::eq(body, sheet) {
+        return Err(Error::Argument);
+    }
+    if body.0.is_poisoned() || sheet.0.is_poisoned() {
+        return Err(Error::Internal("smlib_split_body_by_sheet: a body was left unfinished by an earlier panic".to_owned()));
+    }
+    let r = run("smlib_split_body_by_sheet", |k| {
+        {
+            let g = sheet.0.lock().unwrap_or_else(PoisonError::into_inner);
+            if !is_sheet(k, &g)? || face >= g.face_list().len() {
+                return Ok(Err(Error::Argument));
+            }
         }
-        let back = match side(k, body, spec, true)? {
-            Ok(b) => b,
-            Err(e) => return Ok(Err(e)),
-        };
-        let front = match side(k, body, spec, false)? {
-            Ok(f) => f,
-            Err(e) => return Ok(Err(e)),
-        };
-        Ok(Ok(back.zip(front)))
+        both_sides(k, body, true, |k, flip| {
+            let mut copy = {
+                let g = sheet.0.lock().unwrap_or_else(PoisonError::into_inner);
+                copy_of(k, &g, 2)?
+            };
+            let Some(&f) = brep_p1::faces(&copy, None)?.get(face) else { return Ok(Err(Error::Argument)) };
+            let turned = orient_sheet_surfaces(k, &mut copy, Some(f), !flip);
+            copy.refresh_cached_topology();
+            Ok(match turned {
+                Ok(()) => Ok(copy),
+                Err(e) => Err(status(e)),
+            })
+        })
     })??;
     Ok(r.map(|(b, f)| (Body::new(b), Body::new(f))))
 }

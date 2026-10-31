@@ -51,10 +51,14 @@ impl Brep {
     /// normal and the part in front. A `sheet` that is no sheet, or a `face` it does not have, is
     /// [`Error::Argument`].
     pub fn split_body_by_sheet(&self, sheet: &Brep, face: usize) -> Result<Option<(Brep, Brep)>> {
+        if route::Op::Split.backend() == route::Backend::Solidcore {
+            return core::split::split_body_by_sheet(self.core()?, sheet.core()?, face)
+                .map(|r| r.map(|(b, f)| (Brep::made_core(b), Brep::made_core(f))));
+        }
         init()?;
         let face = i64::try_from(face).map_err(|_| Error::Argument)?;
-        match ffi::split::split_body_by_sheet(&self.0, &sheet.0, face) {
-            Ok((b, f)) => Ok(Some((Brep(b), Brep(f)))),
+        match ffi::split::split_body_by_sheet(self.cpp()?, sheet.cpp()?, face) {
+            Ok((b, f)) => Ok(Some((Brep::made(b), Brep::made(f)))),
             Err(ffi::ops::ERR_NO_CUT) => Ok(None),
             Err(s) => Err(error(s)),
         }
