@@ -392,7 +392,7 @@ cases!(
     fillet_cylinder_rim,
     setback_corner,
     fillet_variable_linear,
-    fillet_over_a_cliff: ignore = "solidcore#960: no cliff overflow (fork 8ba4667)",
+    fillet_over_a_cliff: ignore = "solidcore#960: no cliff overflow (fork 8ba4667) at 6a2e8c68f: the rail leaves its face (NoRoom), Unsupported",
     fillet_too_large,
     chamfer_hole_rim_touching_a_face,
     pick_near_nothing,
