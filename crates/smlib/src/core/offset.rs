@@ -10,21 +10,24 @@
 //! solid as the capi does since tangency-labs/smlib#17.
 //!
 //! A draft tilts planes and, since tangency-labs/smlib#27, turns a cylinder about the pull into
-//! a cone (solidcore's `Cone::lean_cylinder`, solidcore#1545); a cone that is not a cylinder
-//! (smlib#53) is [`Error::Unsupported`]. A draft's tilted faces go in through solidcore's
-//! `SmBrep::LocalOperation` ([`local_operation`]); the capi's check that it moved some face (`moved_faces`) needs face
-//! history solidcore does not report (solidcore#1462) and is not made.
+//! a cone (solidcore's `Cone::lean_cylinder`, solidcore#1545), and since smlib#53 a cone about the
+//! pull into the cone its generators turned make. A draft's tilted faces go in through solidcore's
+//! `SmBrep::LocalOperation` ([`local_operation`]). The capi's check that it moved some face
+//! (`moved_faces`) marks the replacement surfaces; solidcore names a surface by its owning face, so
+//! the mark goes on the picked faces, which it stays with through the operation (solidcore#1875).
 
 use solidcore::EntityRef;
 use solidcore::SolidError;
 use solidcore::curve::curve::Curve;
-use solidcore::geom::attribute::{AttributeStore, ObjectKey};
+use solidcore::geom::attribute::{Attribute, AttributeStore, Behavior, ObjectKey, ids};
 use solidcore::geom::axis2_placement::Axis2Placement;
 use solidcore::geom::object::{ObjectRef, Shape};
 use solidcore::geom::vector3d::{Point3, Vec3};
 use solidcore::intersect::point_class::PointClassType;
 use solidcore::kernel::Kernel;
 use solidcore::math::Point2;
+use solidcore::nurbs::b_spline_curve::ControlPointForm;
+use solidcore::nurbs::b_spline_surface::p1::SurfParamType;
 use solidcore::nurbs::b_spline_surface_n_lib::p2::OrientType;
 use solidcore::nurbs::knots::Side;
 use solidcore::offset::offset_executive::p2::{
@@ -57,11 +60,16 @@ const INVALID_INPUT: i32 = 1007;
 /// `SMLIB_ERR_WALLS_TOUCH`.
 const OFFSET_WALLS_TOUCH: i32 = 1042;
 
+/// `SM_ERR_OFFSET_EDGE_VANISHES` (fork 34318f4): a vertex moved past an edge's other end, which
+/// `status` (smlib_shim.h) reports as `SMLIB_ERR_UNSUPPORTED`.
+const OFFSET_EDGE_VANISHES: i32 = 1043;
+
 /// `status` (smlib_shim.h): an offset whose walls touch is [`Error::WallsTouch`]; any other
 /// status as the blends pass it on.
 fn status(e: SolidError) -> Error {
     match e {
         SolidError::Upstream { code: OFFSET_WALLS_TOUCH, .. } => Error::WallsTouch,
+        SolidError::Upstream { code: OFFSET_EDGE_VANISHES, .. } => Error::Unsupported,
         e => blend_status(e),
     }
 }
@@ -570,17 +578,18 @@ fn outward_normal(k: &Kernel, b: &Brep, f: FaceId, fu: FaceuseId, at: Point3) ->
     Ok(Some(n))
 }
 
-/// `drafted_cone` (tangency-labs/smlib#27): the cone a face on the cylinder `cyl` about the pull
-/// (its outward normal `n` at `inside`) becomes drafted by `angle` about its circle on the neutral
-/// plane (through `origin`, normal `normal`), so that it leans in going along `pull`: its radius
-/// R - s h tan(angle) at height h along the pull from that circle, s = 1 where the face looks
-/// away from the axis (a pin), -1 where it looks towards it (a hole). The capi moves the
-/// cylinder's NURB control points radially and lets `CopyAndAddAnalytics` find the cone;
-/// solidcore's `Cone::lean_cylinder` (solidcore#1545) is that edit, keeping the cylinder's
-/// parameters so the face's UV trims stay valid. [`Error::Unsupported`] when the pull does not
-/// run along the axis, the axis lies in the neutral plane, or the cone would close within the
-/// face's span. A cone that is not a cylinder (`drafted_cone`'s turned generators,
-/// tangency-labs/smlib#53) is [`Error::Unsupported`] too: `lean_cylinder` takes cylinders only.
+/// `drafted_cone` (tangency-labs/smlib#27, #53): the cone a face on the cone or cylinder `cyl` about
+/// the pull (its outward normal `n` at `inside`) becomes drafted by `angle` about its circle on the
+/// neutral plane (through `origin`, normal `normal`), so that it leans in going along `pull`: its
+/// generators turned by `angle` in their planes through the axis, about that circle. With R0 the
+/// radius on the neutral plane and t the slope of the radius going along the pull (0 for a
+/// cylinder), the radius h along the pull from that circle is R0 + h tan(atan(t) - s angle), s = 1
+/// where the face looks away from the axis (a pin), -1 where it looks towards it (a hole). It is
+/// the surface's own NURB with each control point moved radially by the new radius over the old at
+/// its height, so it keeps the surface's parameters and the face's UV trims stay valid: for a
+/// cylinder solidcore's `Cone::lean_cylinder` (solidcore#1545), for a cone the same edit on
+/// [`Cone::base_mut`]. [`Error::Unsupported`] when the pull does not run along the axis, the axis
+/// lies in the neutral plane, or the cone would close within the face's span.
 #[allow(clippy::too_many_arguments)] // the capi's drafted_cone
 fn drafted_cone(
     k: &Kernel,
@@ -592,10 +601,6 @@ fn drafted_cone(
     pull: Vec3,
     angle: f64,
 ) -> solidcore::Result<Out<Cone>> {
-    let bot = cyl.bot_radius();
-    if (bot - cyl.top_radius()).abs() > 1e-12 * (1.0 + bot) {
-        return Ok(Err(Error::Unsupported));
-    }
     let frame = cyl.canonical().origin;
     let z = frame.x_axis().cross(frame.y_axis());
     let len = z.length();
@@ -612,18 +617,77 @@ fn drafted_cone(
     if toward.abs() < 1e-12 {
         return Ok(Err(Error::Unsupported));
     }
-    // The hinge circle's centre: the axis on the neutral plane, at the cylinder's height v0.
+    // The hinge circle's centre: the axis on the neutral plane, at the cone's height v0.
     let v0 = (origin - axis).dot(normal) / toward;
     let centre = axis + z * v0;
     let radial = (inside - centre) - pull * (inside - centre).dot(pull);
     let s = if radial.dot(n) >= 0.0 { 1.0 } else { -1.0 };
-    // The radius changes by -s tan(angle) per unit along the pull, so by -s tan(angle) (z . pull)
-    // per unit of the cylinder's height, from its radius at v0.
-    let slope = -s * angle.tan() * sense;
-    if !slope.is_finite() {
+    // The cone's radius is linear in its height along z; along the pull it changes by `slope` per
+    // unit, and drafted by `turned`.
+    let r0 = cyl.radius(v0);
+    let slope = (cyl.radius(1.0) - cyl.radius(0.0)) * sense;
+    let turned = (slope.atan() - s * angle).tan();
+    if !(r0 > 0.0) || !turned.is_finite() {
         return Ok(Err(Error::Unsupported));
     }
-    Ok(answer(cyl.lean_cylinder(k, slope, v0))?.ok_or(Error::Unsupported))
+    if cyl.is_cylinder() {
+        return Ok(answer(cyl.lean_cylinder(k, turned * sense, v0))?.ok_or(Error::Unsupported));
+    }
+    let mut cone = cyl.clone();
+    let net = cone.base_mut();
+    let (nu, nv) = (net.number_control_points(SurfParamType::U), net.number_control_points(SurfParamType::V));
+    for i in 0..nu {
+        for j in 0..nv {
+            let Some((p, w)) = answer(net.control_point(ControlPointForm::EuclideanRational, i, j))? else {
+                return Ok(Err(Error::Unsupported));
+            };
+            let h = (p - centre).dot(pull);
+            let (was, now) = (cyl.radius(v0 + h * sense), r0 + h * turned);
+            if !(was > 0.0 && now > 0.0) {
+                return Ok(Err(Error::Unsupported));
+            }
+            let foot = centre + pull * h;
+            if answer(net.set_control_point(ControlPointForm::EuclideanRational, i, j, foot + (p - foot) * (now / was), w))?.is_none() {
+                return Ok(Err(Error::Unsupported));
+            }
+        }
+    }
+    // `CopyAndAddAnalytics`: the cone's analytic data from its edited NURB.
+    if answer(cone.rebuild_step_from_nurb_parameters(k))?.is_none() {
+        return Ok(Err(Error::Unsupported));
+    }
+    Ok(Ok(cone))
+}
+
+/// The capi's `Before` mark on what `SmBrep::LocalOperation` is to move: above the history's tag.
+const MOVED_MARK: u64 = ids::USER_1 + 8;
+
+/// `Before::mark` on each replacement surface. A surface has no identity apart from its owning
+/// face here, and `faces[i]`'s offset face takes `surfaces[i]`, so the mark goes on the picked face
+/// and travels as the surface's does (Copy behaviour; solidcore#1875). The one difference, recorded
+/// in solidcore's `topology.brep_local_operation--1875-face-mark-for-surface-mark` finding: a merge
+/// keeping an unpicked face over a picked one hands that survivor the mark, where SMLib's survivor
+/// keeps its own unmarked surface.
+pub(super) fn mark_moved(w: &mut Brep, picked: &[FaceId]) -> solidcore::Result<()> {
+    for &f in picked {
+        w.add_attribute(EntityRef::Face(f), Attribute::long(MOVED_MARK, 0, Behavior::Copy))?;
+    }
+    Ok(())
+}
+
+/// `moved_faces`'s reading (`read_marks`): whether any face of `w` carries the mark, every mark
+/// removed.
+pub(super) fn moved_faces(w: &mut Brep) -> solidcore::Result<bool> {
+    let mut moved = false;
+    for f in w.face_list().to_vec() {
+        let e = EntityRef::Face(f);
+        let marks: Vec<_> = w.entity_attributes(e).into_iter().filter(|(_, a)| a.attribute_id() == MOVED_MARK).map(|(h, _)| h).collect();
+        moved = moved || !marks.is_empty();
+        for h in marks {
+            w.remove_attribute(e, h)?;
+        }
+    }
+    Ok(moved)
 }
 
 /// `smlib_draft`: its checks, the solid check, the pick, then `draft_faces`: each picked face (a
@@ -720,14 +784,15 @@ pub(crate) fn draft(
             }
             surfaces.push(tilted);
         }
-        // `moved_faces(b, status(b->LocalOperation(faces, surfaces)))`. The capi marks the
-        // tilted surfaces first and, when SMLib reports success, answers SMLIB_ERR_NO_EFFECT if
-        // no face of the result lies on a marked one. solidcore surfaces carry no attributes and
-        // the local operation reports no face history (solidcore#1462), so that check is not
-        // made here: a success is the capi's answer whenever SMLib's marks survive.
+        // `moved_faces(b, status(b->LocalOperation(faces, surfaces)))`, its marks on the picked
+        // faces (`mark_moved`).
+        mark_moved(&mut w, &picked)?;
         let mut notes = Notifications::new(&mut w);
         if let Err(e) = called(local_operation(k, &mut w, &picked, surfaces, &mut notes.context()))? {
             return Ok(Err(e));
+        }
+        if !moved_faces(&mut w)? {
+            return Ok(Err(Error::NoEffect));
         }
         finish(w, true)
     })

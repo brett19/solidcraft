@@ -18,7 +18,7 @@ use solidcore::geom::vector3d::Vec3;
 use solidcore::primitive::api_curves::create_line_segment;
 use solidcore::sweep::api_brep::create_linear_sweep;
 
-use super::offset::{draft, offset_faces, offset_sheet, shell, thicken};
+use super::offset::{draft, mark_moved, moved_faces, offset_faces, offset_sheet, shell, thicken};
 use super::{Body, area, bounds, counts, make_box, make_cylinder, make_sphere, run, to_arrays, volume};
 use crate::export::native;
 use crate::{BooleanOp, Error};
@@ -34,6 +34,8 @@ enum Shape {
     Box([f64; 3], [f64; 3]),
     Cylinder([f64; 3], f64, f64),
     Sphere([f64; 3], f64),
+    /// A frustum about +Z: base centre, base radius, top radius, height.
+    Frustum([f64; 3], f64, f64, f64),
     /// A sheet: the line from the first point to the second swept along `dir` by `dist`.
     LineSheet([f64; 3], [f64; 3], [f64; 3], f64),
     /// A sheet: the arc about +Z through `center` of `radius` from 0 to `degrees`, swept along
@@ -54,6 +56,7 @@ impl Shape {
             Shape::Box(o, s) => make_box(o, s).unwrap(),
             Shape::Cylinder(o, r, h) => make_cylinder(o, r, h).unwrap(),
             Shape::Sphere(o, r) => make_sphere(o, r).unwrap(),
+            Shape::Frustum(o, a, b, h) => super::make_cone(o, a, b, h).unwrap(),
             Shape::LineSheet(a, b, dir, dist) => run("sheet", |k| {
                 let c = Curve::from(create_line_segment(v3(a), v3(b))?);
                 create_linear_sweep(k, &[Some(&c)], v3(dir), dist, false)
@@ -212,6 +215,16 @@ fn case(name: &str) -> Case {
                 Expect::Volume(PI * h * (big * big + big * small + small * small) / 3.0),
             )
         }
+        // A cone r 10 at its base to 8 at its top, 20 tall, drafted 5° about its base turns its
+        // generators 5° more (fork d51a723): r 10 + 20 tan(atan(-0.1) - 5°) at the top.
+        "draft_a_cone_about_the_pull" => {
+            let (big, h, a) = (10.0, 20.0, 5f64.to_radians());
+            let small = big + h * ((-0.1f64).atan() - a).tan();
+            c(
+                Op::Draft(Shape::Frustum([0.0; 3], big, 8.0, h), vec![[0.0, 9.0, 10.0]], [0.0; 3], [0.0, 0.0, 1.0], [0.0, 0.0, 1.0], a),
+                Expect::Volume(PI * h * (big * big + big * small + small * small) / 3.0),
+            )
+        }
         // The top is square to the pull, not along it.
         "draft_a_face_across_the_pull" => {
             c(Op::Draft(BLOCK, vec![TOP], [0.0; 3], [0.0, 0.0, 1.0], [0.0, 0.0, 1.0], 0.1), Expect::Fails(Error::Unsupported))
@@ -337,6 +350,7 @@ fn cpp_case(name: &str) -> Got {
             Shape::Box(o, z) => ffi::make_box(&o, &z).map(Brep::made).unwrap(),
             Shape::Cylinder(o, r, h) => ffi::make_cylinder(&o, r, h).map(Brep::made).unwrap(),
             Shape::Sphere(o, r) => ffi::make_sphere(&o, r).map(Brep::made).unwrap(),
+            Shape::Frustum(o, a, b, h) => ffi::make_cone(&o, a, b, h).map(Brep::made).unwrap(),
             Shape::LineSheet(a, b, dir, dist) => Brep::extrude(&[line(a, b)], dir, dist, 0.0, DraftCorner::default(), false).unwrap(),
             Shape::ArcSheet(o, r, degrees, h) => {
                 let arc = crate::sweeps::Curve::Arc {
@@ -444,6 +458,7 @@ cases!(
     draft_one_side_out,
     draft_one_side_hinged_at_the_top,
     draft_a_curved_face,
+    draft_a_cone_about_the_pull,
     draft_a_face_across_the_pull,
 );
 
@@ -575,6 +590,122 @@ fn a_solidcore_error_in_a_pick_is_an_error() {
     assert!(matches!(unported, Err(SolidError::Unported { .. })), "{unported:?}");
 }
 
+/// The capi's `moved_faces` reading: no mark, no move (SMLIB_ERR_NO_EFFECT); a mark is read once,
+/// and gone.
+#[test]
+fn a_draft_with_no_marked_face_left_has_no_effect() {
+    let body = make_box([0.0; 3], [10.0; 3]).unwrap();
+    super::with_body("marks", &body, |_, w| {
+        assert!(!moved_faces(w)?, "no face marked");
+        let f = w.face_list()[0];
+        mark_moved(w, &[f])?;
+        assert!(moved_faces(w)?, "a face marked");
+        assert!(!moved_faces(w)?, "the mark removed");
+        Ok(())
+    })
+    .unwrap();
+}
+
+/// A draft leaves no mark of its own on what it returns, on a plane or on a cylinder turned cone.
+#[test]
+fn a_draft_leaves_no_mark() {
+    let z = [0.0, 0.0, 1.0];
+    let bx = make_box([0.0; 3], [20.0, 30.0, 10.0]).unwrap();
+    let plane = draft(&bx, &[[10.0, 0.0, 5.0]], TOL, [0.0; 3], z, z, 0.1).unwrap();
+    let cyl = make_cylinder([0.0; 3], 5.0, 10.0).unwrap();
+    let cone = draft(&cyl, &[[5.0, 0.0, 5.0]], TOL, [0.0; 3], z, z, 0.1).unwrap();
+    for b in [plane, cone] {
+        super::with_body("marks", &b, |_, w| {
+            assert!(!moved_faces(w)?);
+            Ok(())
+        })
+        .unwrap();
+    }
+}
+
+/// `moved_faces` on both kernels: drafts so small they leave a plane or cylinder where it was
+/// still moved a face (SMLib's mark and solidcore's both stay on it), an angle that brings a wall
+/// onto the plane of the wall above it leaves the two faces apart, and no draft here is
+/// SMLIB_ERR_NO_EFFECT on either: the same answer, volume and counts. The C++ check holds a local
+/// operation to what it promised and no body found so far trips it.
+#[cfg(feature = "native")]
+#[test]
+fn a_draft_moves_a_face_as_on_cpp() {
+    use crate::sweeps::{Curve, DraftCorner};
+    use crate::{Brep, ffi};
+    crate::init().unwrap();
+    let z = [0.0, 0.0, 1.0];
+    let make = |h: ffi::Handle| Brep::made(h);
+    let plate = make(ffi::make_box(&[0.0; 3], &[40.0, 40.0, 10.0]).unwrap());
+    let rod = make(ffi::make_cylinder(&[20.0, 20.0, -5.0], 5.0, 30.0).unwrap());
+    let holed = make(ffi::ops::boolean(plate.cpp().unwrap(), rod.cpp().unwrap(), ffi::ops::BOOLEAN_SUBTRACT).unwrap());
+    let pinned = make(ffi::ops::boolean(plate.cpp().unwrap(), rod.cpp().unwrap(), ffi::ops::BOOLEAN_UNION).unwrap());
+    let t = 5f64.to_radians().tan();
+    // A wall x = 20 up to z = 10, then a wall leaning in 5 degrees: the lower wall turned 5
+    // degrees about z = 10 lies on the upper one's plane.
+    let p = [[0.0, 0.0, 0.0], [20.0, 0.0, 0.0], [20.0, 0.0, 10.0], [20.0 - 10.0 * t, 0.0, 20.0], [0.0, 0.0, 20.0]];
+    let profile: Vec<Curve> = (0..5).map(|i| Curve::Line { start: p[i], end: p[(i + 1) % 5] }).collect();
+    crate::sweeps::ON_CPP.with(|c| c.set(true));
+    let leaning = Brep::extrude(&profile, [0.0, 1.0, 0.0], 10.0, 0.0, DraftCorner::default(), true).unwrap();
+    crate::sweeps::ON_CPP.with(|c| c.set(false));
+    let five = 5f64.to_radians();
+    let cases: [(&str, &Brep, [f64; 3], [f64; 3], f64); 7] = [
+        ("tiny on a plane", &plate, [20.0, 0.0, 5.0], [0.0; 3], 1e-14),
+        ("tiny on a hole", &holed, [25.0, 20.0, 5.0], [0.0, 0.0, 5.0], 1e-14),
+        ("tiny on a pin", &pinned, [25.0, 20.0, 20.0], [0.0, 0.0, 5.0], -1e-14),
+        ("small on a hole", &holed, [25.0, 20.0, 5.0], [0.0, 0.0, 5.0], 1e-6),
+        ("onto the wall above", &leaning, [20.0, 5.0, 5.0], [0.0, 0.0, 10.0], five),
+        ("away from the wall above", &leaning, [20.0, 5.0, 5.0], [0.0, 0.0, 10.0], -five),
+        ("hinged far off", &plate, [20.0, 0.0, 5.0], [0.0, 0.0, 1000.0], five),
+    ];
+    for (name, b, at, origin, angle) in cases {
+        let cpp = ffi::ops::draft(b.cpp().unwrap(), &[at], TOL, &origin, &z, &z, angle).unwrap();
+        let (v, n) = (ffi::volume(&cpp, 1e-8).unwrap(), ffi::counts(&cpp).unwrap().map(|x| usize::try_from(x).unwrap()));
+        let core = draft(b.core().unwrap(), &[at], TOL, origin, z, z, angle).unwrap();
+        let w = volume(&core, 1e-8).unwrap();
+        assert!(rel(w, v) < 1e-9, "{name}: solidcore {w} vs C++ {v}");
+        assert_eq!(counts(&core).unwrap(), n, "{name}");
+    }
+}
+
+/// The tip cut off a triangular prism, drafted about a plane 100 mm off so that the whole face goes
+/// out past where its neighbours meet: its edges vanish, `SM_ERR_OFFSET_EDGE_VANISHES` in SMLib,
+/// which the capi's `status` answers as `SMLIB_ERR_UNSUPPORTED`, on both kernels.
+#[cfg(feature = "native")]
+#[test]
+fn a_draft_past_the_neighbours_meeting_is_unsupported_as_on_cpp() {
+    use crate::sweeps::{Curve, DraftCorner};
+    use crate::{Brep, ffi};
+    crate::init().unwrap();
+    let p = [[0.0, 0.0, 0.0], [20.0, 0.0, 0.0], [11.0, 18.0, 0.0], [9.0, 18.0, 0.0]];
+    let profile: Vec<Curve> = (0..4).map(|i| Curve::Line { start: p[i], end: p[(i + 1) % 4] }).collect();
+    crate::sweeps::ON_CPP.with(|c| c.set(true));
+    let prism = Brep::extrude(&profile, [0.0, 0.0, 1.0], 10.0, 0.0, DraftCorner::default(), true).unwrap();
+    crate::sweeps::ON_CPP.with(|c| c.set(false));
+    let (tip, z, origin, angle) = ([[10.0, 18.0, 5.0]], [0.0, 0.0, 1.0], [0.0, 0.0, -100.0], (-2f64).to_radians());
+    let cpp = ffi::ops::draft(prism.cpp().unwrap(), &tip, TOL, &origin, &z, &z, angle);
+    assert_eq!(cpp.err(), Some((ffi::ops::ERR_UNSUPPORTED, None)));
+    assert_eq!(draft(prism.core().unwrap(), &tip, TOL, origin, z, z, angle).err(), Some(Error::Unsupported));
+}
+
+/// A flat L of two faces thickened by 2 with mitred walls: 2 x 10 x (20 + 22), as the C++ kernel
+/// makes it.
+#[cfg(feature = "native")]
+#[test]
+fn an_l_sheet_thickens_as_on_cpp() {
+    use crate::sweeps::{Curve, DraftCorner};
+    use crate::{Brep, ffi};
+    crate::init().unwrap();
+    let l = [Curve::Line { start: [0.0; 3], end: [20.0, 0.0, 0.0] }, Curve::Line { start: [20.0, 0.0, 0.0], end: [20.0, 20.0, 0.0] }];
+    crate::sweeps::ON_CPP.with(|c| c.set(true));
+    let sheet = Brep::extrude(&l, [0.0, 0.0, 1.0], 10.0, 0.0, DraftCorner::default(), false).unwrap();
+    crate::sweeps::ON_CPP.with(|c| c.set(false));
+    let cpp = ffi::ops::thicken(sheet.cpp().unwrap(), 2.0, false).unwrap();
+    assert!(rel(ffi::volume(&cpp, 1e-8).unwrap(), 840.0) < 1e-9);
+    let core = thicken(sheet.core().unwrap(), 2.0, false).unwrap();
+    assert!(rel(volume(&core, 1e-8).unwrap(), 840.0) < 1e-9);
+}
+
 /// Face and edge tags (`Brep::tagged`) through offsets routed to solidcore, as on C++: the box is
 /// tagged on the C++ kernel, its solidcore body converted from that and tagged the same way, and
 /// the two results' histories must be the same.
@@ -605,6 +736,69 @@ mod history {
         let top = [[10.0, 15.0, 10.0]];
         let cpp = Brep::made(ffi::ops::pick_op(ffi::ops::Pick::OffsetFaces, a.cpp().unwrap(), &top, super::TOL, -2.0).unwrap()).history().unwrap();
         let core = Brep::made_core(super::offset_faces(a.core().unwrap(), &top, super::TOL, -2.0).unwrap()).history().unwrap();
+        assert_eq!(core.canonical(), cpp.canonical());
+    }
+
+    /// A flat sheet and a half-round open extrusion, tagged on the C++ kernel.
+    fn tagged_sheet(curved: bool) -> Brep {
+        use std::f64::consts::PI;
+
+        use crate::sweeps::{Curve, DraftCorner};
+        crate::init().unwrap();
+        crate::sweeps::ON_CPP.with(|c| c.set(true));
+        let b = if curved {
+            let arc = [Curve::Arc { center: [0.0; 3], axis: [0.0, 0.0, 1.0], reference: [1.0, 0.0, 0.0], radius: 10.0, start: 0.0, end: PI }];
+            Brep::extrude(&arc, [0.0, 0.0, 1.0], 20.0, 0.0, DraftCorner::default(), false)
+        } else {
+            let c = [[0.0, 0.0, 0.0], [20.0, 0.0, 0.0], [20.0, 10.0, 0.0], [0.0, 10.0, 0.0]];
+            let l: Vec<Curve> = (0..4).map(|i| Curve::Line { start: c[i], end: c[(i + 1) % 4] }).collect();
+            Brep::planar_faces(&l)
+        };
+        crate::sweeps::ON_CPP.with(|c| c.set(false));
+        b.unwrap().tagged(0).unwrap()
+    }
+
+    /// A sheet thickened to one side and to both: both faces stand for the sheet's (the histories
+    /// `offset_backend` reads), its edges and their offsets for its edges, the walls for nothing.
+    fn thicken_parity(curved: bool) {
+        for symmetric in [false, true] {
+            let a = tagged_sheet(curved);
+            let cpp = Brep::made(ffi::ops::thicken(a.cpp().unwrap(), 2.0, symmetric).unwrap()).history().unwrap();
+            let core = Brep::made_core(super::thicken(a.core().unwrap(), 2.0, symmetric).unwrap()).history().unwrap();
+            assert_eq!(core.canonical(), cpp.canonical(), "symmetric {symmetric}");
+        }
+    }
+
+    #[test]
+    fn tags_cross_a_thicken_of_a_curved_sheet() {
+        thicken_parity(true);
+    }
+
+    #[test]
+    #[ignore = "solidcore's stitch in the shell drops the flat sheet's edge tags (write-up review-1031/bugs/thicken-flat-sheet-edge-tags.md, not filed yet)"]
+    fn tags_cross_a_thicken_of_a_flat_sheet() {
+        thicken_parity(false);
+    }
+
+    /// A sheet moved along its normal, flat and curved: each face stands for itself.
+    #[test]
+    fn tags_cross_a_sheet_offset() {
+        for curved in [false, true] {
+            let a = tagged_sheet(curved);
+            let cpp = Brep::made(ffi::sheets::offset_sheet(a.cpp().unwrap(), 1.5).unwrap()).history().unwrap();
+            let core = Brep::made_core(super::offset_sheet(a.core().unwrap(), 1.5).unwrap()).history().unwrap();
+            assert_eq!(core.canonical(), cpp.canonical(), "curved {curved}");
+        }
+    }
+
+    /// A cylinder hollowed, its top open: the walls round closed edges, on a curved face.
+    #[test]
+    fn tags_cross_a_shell_of_a_cylinder() {
+        crate::init().unwrap();
+        let a = Brep::made(ffi::make_cylinder(&[0.0; 3], 10.0, 20.0).unwrap()).tagged(0).unwrap();
+        let top = [[0.0, 0.0, 20.0]];
+        let cpp = Brep::made(ffi::ops::pick_op(ffi::ops::Pick::Shell, a.cpp().unwrap(), &top, super::TOL, -2.0).unwrap()).history().unwrap();
+        let core = Brep::made_core(super::shell(a.core().unwrap(), &top, super::TOL, -2.0).unwrap()).history().unwrap();
         assert_eq!(core.canonical(), cpp.canonical());
     }
 

@@ -162,7 +162,7 @@ fn samples(k: &Kernel, b: &Brep, e: EdgeId) -> std::result::Result<Vec<Point3>, 
 /// piece still ends on), and every point it ran through must lie on one of them (within `tol`).
 /// One piece is the edge still whole; more, the edge cut by vertices. Pieces with no record of
 /// where the edge lay have not moved.
-fn moved(k: &Kernel, b: &Brep, pieces: &[(EdgeId, &[Point3])], tol: f64) -> std::result::Result<bool, SolidError> {
+pub(super) fn moved(k: &Kernel, b: &Brep, pieces: &[(EdgeId, &[Point3])], tol: f64) -> std::result::Result<bool, SolidError> {
     let Some(at) = pieces.iter().map(|(_, at)| *at).find(|at| at.len() >= 2) else { return Ok(false) };
     let [a, z, ..] = at else { return Ok(false) };
     let near = |p: &Point3, q: &Point3| p.distance(*q) <= tol;
@@ -193,17 +193,9 @@ fn moved(k: &Kernel, b: &Brep, pieces: &[(EdgeId, &[Point3])], tol: f64) -> std:
         return Ok(true);
     }
     for q in at.iter().skip(2) {
-        // `SmApiEdgeClosestPoint` failing counts as off a piece, as a distance above `tol` does.
-        let mut on = false;
-        for (e, _) in pieces {
-            if let Some(c) = answer(edge_closest_point(k, b, *e, *q))?
-                && c.closest.distance <= tol
-            {
-                on = true;
-                break;
-            }
-        }
-        if !on {
+        // `SmApiEdgeClosestPoint` failing, however it fails, counts as off a piece, as a distance
+        // above `tol` does: the face is then Modified, and the operation stands.
+        if !pieces.iter().any(|(e, _)| edge_closest_point(k, b, *e, *q).is_ok_and(|c| c.closest.distance <= tol)) {
             return Ok(true);
         }
     }

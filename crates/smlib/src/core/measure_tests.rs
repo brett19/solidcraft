@@ -451,3 +451,28 @@ fn points_classify_as_the_capi() {
     assert_eq!(classify_point(&bx, [f64::NAN, 0.0, 0.0]).unwrap_err(), crate::Error::Argument);
     assert_eq!(classify_point(&bx, [0.0, f64::INFINITY, 0.0]).unwrap_err(), crate::Error::Argument);
 }
+
+/// A sheet hung on a solid (fork 9767916's capi test): a 10 mm cube and a 10 x 10 sheet on from its
+/// top front edge, merged into one body. Its area is every face's, the cube's 600 and the sheet's
+/// 100, not the cube's boundary alone; its volume the cube's. The same on the C++ kernel.
+#[test]
+fn a_sheet_hung_on_a_solid_counts_in_the_area() {
+    use solidcore::boolean::api_brep::boolean_merge;
+    use solidcore::geom::vector3d::Vec3;
+    use solidcore::primitive::api_primitives::{create_box, create_plane};
+    let both = super::run("cube and flap", |k| {
+        let cube = create_box(k, Vec3::new(0.0, 0.0, 0.0), 10.0, 10.0, 10.0)?;
+        let flap = create_plane(k, Vec3::new(10.0, 0.0, 10.0), 10.0, 10.0)?;
+        boolean_merge(k, cube, flap)
+    })
+    .map(Body::new)
+    .unwrap();
+    let m = mass_properties(&both, 1e-8).unwrap();
+    assert!((m.area - 700.0).abs() < 1e-6 && (m.volume - 1000.0).abs() < 1e-6, "{m:?}");
+    #[cfg(feature = "native")]
+    {
+        let cpp = crate::Brep::made_core(both);
+        let c = crate::ffi::measure::mass_properties(cpp.cpp().unwrap(), 1e-8).unwrap();
+        assert!((c[0] - m.area).abs() < 1e-6 && (c[1] - m.volume).abs() < 1e-6, "C++ {c:?} vs {m:?}");
+    }
+}

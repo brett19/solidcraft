@@ -240,10 +240,7 @@ const SURFACE_TORUS_I: i64 = SURFACE_TORUS as i64;
 /// The `SmBSplineCurve` part of a curve that is one (`IsKindOf(SmBSplineCurve_TYPE)`), with its
 /// NURB (`GetOrCreateGwNurbPointer`: a lazy line or conic makes it on a copy); `None` for the
 /// other kinds.
-fn bspline_curve_part<'c>(k: &Kernel, c: &'c Curve) -> Result<Option<Cow<'c, BSplineCurve>>> {
-    let conic = |base: &'c BSplineCurve| -> Result<Cow<'c, BSplineCurve>> {
-        if base.gw_nurb().is_some() { Ok(Cow::Borrowed(base)) } else { Err(bad("a conic without its NURB")) }
-    };
+pub(super) fn bspline_curve_part<'c>(k: &Kernel, c: &'c Curve) -> Result<Option<Cow<'c, BSplineCurve>>> {
     Ok(Some(match c.kind() {
         CurveKind::BSpline(b) => Cow::Borrowed(b),
         CurveKind::Line(l) => l.base_with_nurb().map_err(sc("SmLine::GetOrCreateGwNurbPointer"))?,
@@ -253,8 +250,18 @@ fn bspline_curve_part<'c>(k: &Kernel, c: &'c Curve) -> Result<Option<Cow<'c, BSp
             Cow::Owned(made.base().clone_exact())
         }
         CurveKind::Ellipse(e) => Cow::Borrowed(e.base()),
-        CurveKind::Hyperbola(h) => conic(h.base())?,
-        CurveKind::Parabola(p) => conic(p.base())?,
+        CurveKind::Hyperbola(h) if h.base().gw_nurb().is_none() => {
+            let mut made = h.clone();
+            made.make_nurb(None).map_err(sc("SmHyperbola::MakeNurb"))?;
+            Cow::Owned(made.base().clone_exact())
+        }
+        CurveKind::Hyperbola(h) => Cow::Borrowed(h.base()),
+        CurveKind::Parabola(p) if p.base().gw_nurb().is_none() => {
+            let mut made = p.clone();
+            made.make_nurb(None).map_err(sc("SmParabola::MakeNurb"))?;
+            Cow::Owned(made.base().clone_exact())
+        }
+        CurveKind::Parabola(p) => Cow::Borrowed(p.base()),
         _ => return Ok(None),
     }))
 }
@@ -761,7 +768,6 @@ fn flat_from_brep(k: &mut Kernel, b: &mut Brep) -> Result<Arrays> {
         let made = eu3::get_or_create_uv_trim_curve(k, b, eu, false, false, true).map_err(sc("GetOrCreateUVTrimCurve"))?;
         made.status.map_err(sc("GetOrCreateUVTrimCurve"))?;
     }
-    let k: &Kernel = k;
     let b: &Brep = b;
 
     // the BrepData; its records keep the B-rep's lists' order
@@ -823,11 +829,10 @@ fn flat_from_brep(k: &mut Kernel, b: &mut Brep) -> Result<Arrays> {
     let mut point_shell_vertices: Vec<u64> = Vec::new();
     let mut wire_edges: Vec<u64> = Vec::new();
     let mut wire_vertices_raw: Vec<u64> = Vec::new();
-    let mut kk = Kernel::new(&solidcore::KernelOptions::default());
     for (sd, &s) in bd.shells.iter().zip(&shell_ids) {
         let sh = b.shell(s).map_err(sc("GetShell"))?;
         let faceuses = sh.get_faceuses().map_err(sc("SmShell::GetFaceuses"))?.len();
-        let wires = shell::wire_edges(&mut kk, b, s).map_err(sc("SmShell::GetWireEdges"))?;
+        let wires = shell::wire_edges(k, b, s).map_err(sc("SmShell::GetWireEdges"))?;
         let point = faceuses == 0 && wires.is_empty();
         o.i(SHELL_FACEUSE_COUNT).push(count(faceuses)?);
         o.i(SHELL_WIRE_EDGE_COUNT).push(count(wires.len())?);
@@ -865,6 +870,10 @@ fn flat_from_brep(k: &mut Kernel, b: &mut Brep) -> Result<Arrays> {
     let mut loop_plane_map: Vec<Option<[f64; 6]>> = vec![None; n_loops];
     for (fd, &f) in bd.faces.iter().zip(&face_ids) {
         let surface = b.face(f).map_err(sc("GetFace"))?.surface.as_ref().ok_or_else(|| bad("a face without a surface"))?;
+        // `m_lSurface >= m_vSurfaces.GetSize()`: a surface no face of the B-rep owns.
+        if !usize::try_from(fd.surface).is_ok_and(|s| s < bd.surfaces.len()) {
+            return Err(bad("a face whose surface its B-rep does not hold"));
+        }
         let trim_type = i64::from(fd.rectangular_trim == 1);
         let ty = match surface.kind() {
             SurfaceKind::Sphere(_) => SURFACE_SPHERE_I,
@@ -2481,6 +2490,12 @@ fn extent2d(u0: f64, v0: f64, u1: f64, v1: f64) -> Result<Extent2d> {
         return Err(bad("a domain with its ends reversed"));
     }
     Ok(Extent2d::from_bounds(u0, v0, u1, v1))
+}
+
+/// Whether `Validate` refuses these arrays.
+#[cfg(all(test, feature = "native"))]
+pub(super) fn validate_refuses(a: &Arrays) -> bool {
+    validate(&In(a)).is_none()
 }
 
 /// A body from the flat arrays the C API imports (`BrepFromFlat`): `Validate`,

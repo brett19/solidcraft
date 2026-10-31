@@ -15,10 +15,10 @@ use solidcore::mass::integrator::properties::{MassPropertyBehavior, PropertyAttr
 use solidcore::nurbs::b_spline_surface_n_lib::p2::OrientType;
 use solidcore::query::api_queries::{brep_bounding_box, brep_is_manifold_solid, brep_material_census, face_bounding_box};
 use solidcore::query::brep::BrepClassifier;
-use solidcore::topology::NamingScheme;
 use solidcore::topology::brep::p1 as bl;
 use solidcore::topology::brep::validation::{CheckLevel as SolidcoreCheckLevel, check_brep};
 use solidcore::topology::face::p2::{PPF_AREA, PPF_AREA_FIRST_MOMENTS};
+use solidcore::topology::{FaceId, FaceuseId, NamingScheme};
 use solidcore::{Kernel, Point3, SolidError, Vec3};
 
 use super::blend::status;
@@ -47,12 +47,16 @@ fn finite(v: &[f64]) -> bool {
 
 /// `faces_area` of `smlib_measure.cpp`: every face counted once (SmApiBrepComputeArea, with the
 /// [1e-8, 1e-1] envelope instead of its [1e-4, 1e-1]), the total area and, when `first` is set,
-/// the area's first moments about `o`.
-fn faces_area(k: &Kernel, b: &mut solidcore::Brep, accuracy: f64, o: Point3, first: bool) -> solidcore::Result<(f64, Vec3)> {
+/// the area's first moments about `o`. With `only_sheets`, only [`sheet_face`]s (the capi's
+/// `counted`).
+fn faces_area(k: &Kernel, b: &mut solidcore::Brep, accuracy: f64, o: Point3, first: bool, only_sheets: bool) -> solidcore::Result<(f64, Vec3)> {
     let mut area = 0.0;
     let mut sum = Vec3::new(0.0, 0.0, 0.0);
     let flags = if first { PPF_AREA | PPF_AREA_FIRST_MOMENTS } else { PPF_AREA };
     for f in bl::faces(b, None)? {
+        if only_sheets && !sheet_face(b, f)? {
+            continue;
+        }
         let size = face_bounding_box(k, b, f, false)?.size();
         let edge = size.z.max(size.x.max(size.y));
         let p = face_properties(k, b, f, OrientType::Same, accuracy, o, edge * edge / 100.0, 0.0, flags)?;
@@ -70,10 +74,26 @@ fn faces_area(k: &Kernel, b: &mut solidcore::Brep, accuracy: f64, o: Point3, fir
     Ok((area, sum))
 }
 
+/// `sheet_face`: a face with material on neither side, standing free or hung on a solid (a blend
+/// sheet stitched between two boxes). `SmBrep::ComputePreciseProperties` takes its area only from
+/// faces between a solid region and a void, so such a face is counted on its own.
+fn sheet_face(b: &solidcore::Brep, f: FaceId) -> solidcore::Result<bool> {
+    let void_side = |u: Option<FaceuseId>| -> solidcore::Result<bool> {
+        let Some(u) = u else { return Ok(true) };
+        let Some(shell) = b.faceuse(u)?.shell else { return Ok(true) };
+        let Some(region) = b.shell(shell)?.region else { return Ok(true) };
+        // IsVoid's UNSURE (2) is true in C++: only FALSE is material.
+        Ok(b.region(region)?.is_void() != 0)
+    };
+    let (x, y) = solidcore::topology::face::p2::faceuses(b, f)?;
+    Ok(void_side(x)? && void_side(y)?)
+}
+
 /// `smlib_brep_mass_properties`: `SmBrep::ComputePreciseProperties` directly, as the C API calls
 /// it (not `SmApiBrepComputeMassProperties`: the [1e-8, 1e-1] accuracy envelope, no manifold
 /// refusal, the sum over material regions), the face-by-face area and its centroid for a body
-/// with no material, and moments about the middle of the box moved to the centroid.
+/// with no material, and moments about the middle of the box moved to the centroid. A body's area
+/// is every face's: the solid's boundary and its sheet faces (fork 9767916).
 pub(crate) fn mass_properties(body: &Body, relative_accuracy: f64) -> Result<MassProperties> {
     let accuracy = accuracy(relative_accuracy)?;
     with_body("mass_properties", body, |k, b| {
@@ -93,7 +113,7 @@ pub(crate) fn mass_properties(body: &Body, relative_accuracy: f64) -> Result<Mas
             return Err(invalid("non-finite box"));
         }
         if !material {
-            let (area, first) = faces_area(k, b, accuracy, o, true)?;
+            let (area, first) = faces_area(k, b, accuracy, o, true, false)?;
             if !(area > 0.0) {
                 return Err(invalid("no area"));
             }
@@ -112,8 +132,9 @@ pub(crate) fn mass_properties(body: &Body, relative_accuracy: f64) -> Result<Mas
         // about o. Parallel axes from o to the centroid (unit density: mass = volume).
         let [_, _, _, _, m4, _, m6, m7] = p.moments;
         let d = [m4.x / mass, m4.y / mass, m4.z / mass];
+        let (sheets, _) = faces_area(k, b, accuracy, o, false, true)?;
         let r = MassProperties {
-            area: p.area,
+            area: p.area + sheets,
             volume,
             centroid: [o.x + d[0], o.y + d[1], o.z + d[2]],
             moments: [
@@ -133,7 +154,7 @@ pub(crate) fn mass_properties(body: &Body, relative_accuracy: f64) -> Result<Mas
 /// `smlib_brep_area`: every face counted once.
 pub(crate) fn area(body: &Body, relative_accuracy: f64) -> Result<f64> {
     let accuracy = accuracy(relative_accuracy)?;
-    with_body("area", body, |k, b| faces_area(k, b, accuracy, Point3::new(0.0, 0.0, 0.0), false).map(|(a, _)| a))
+    with_body("area", body, |k, b| faces_area(k, b, accuracy, Point3::new(0.0, 0.0, 0.0), false, false).map(|(a, _)| a))
 }
 
 /// `smlib_brep_bounds`: `SmBrep::CalculateTightBoundingBox`.
