@@ -298,6 +298,15 @@ fn extend_case(name: &str) -> (Sheet, [f64; 3], f64, Continuation, Expect) {
         "extend_a_cylinder_round_its_axis" => {
             (Sheet::QuarterCylinder, [10.0, 0.0, 5.0], 5.0, Continuation::Natural, Expect::Sheet(10.0 * (quarter + 5.0), 1))
         }
+        // Run-offs 5 long across the surface whatever their curvature: the strip stays its section
+        // swept 10 along z. A circle's G2 run-off runs about 2.3 times what it is asked and more
+        // than doubles with it (fork 0f7b209), so the ask must be solved for.
+        "extend_a_cylinder_tangent_run_off" => {
+            (Sheet::QuarterCylinder, [10.0, 0.0, 5.0], 5.0, Continuation::Tangent, Expect::Sheet(10.0 * (quarter + 5.0), 1))
+        }
+        "extend_a_cylinder_curvature_run_off" => {
+            (Sheet::QuarterCylinder, [10.0, 0.0, 5.0], 5.0, Continuation::Curvature, Expect::Sheet(10.0 * (quarter + 5.0), 1))
+        }
         "extend_picks_near_no_edge" => (Sheet::Square, [50.0, 50.0, 0.0], 5.0, Continuation::Natural, Expect::Fails(Error::NoMatch { point: 0 })),
         _ => panic!("no case {name}"),
     }
@@ -392,6 +401,8 @@ extend_cases!(
     extend_a_square_curvature,
     extend_a_cylinder_along_its_axis,
     extend_a_cylinder_round_its_axis,
+    extend_a_cylinder_tangent_run_off,
+    extend_a_cylinder_curvature_run_off,
     extend_picks_near_no_edge,
 );
 

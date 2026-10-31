@@ -222,18 +222,12 @@ impl Brep {
     /// [`Brep::blend`], with whether each point picked an edge that a larger round, overflowing
     /// its faces, removed whole: that edge is gone and not rounded (SMLib rounds the edges whose
     /// blends overflow first, then what is left of the others).
-    ///
-    /// On solidcore no point is dropped: the overflow that goes first (`smlib_blend_dropping`'s
-    /// `SetOverflowFirst`, fork 241f7ba) builds on the fork's cliff overflow
-    /// (`SmFilletCliffOverflow`), which solidcore has not ported: there the rounds are blended
-    /// together, as [`Brep::blend`] blends them.
     pub fn blend_dropping(&self, kind: Blend, edges: &[[f64; 3]], sizes: &[f64], tolerance: f64) -> Result<(Brep, Vec<bool>)> {
         if edges.len() > MAX_POINTS || edges.is_empty() || sizes.len() != edges.len() {
             return Err(Error::Argument);
         }
         if route::Op::Blend.backend() == route::Backend::Solidcore {
-            let out = self.core_blend(kind, edges, sizes, tolerance, &[], &[], core::blend::Corners::Filled)?;
-            return Ok((out, vec![false; edges.len()]));
+            return core::blend::blend_dropping(self.core()?, kind, edges, sizes, tolerance).map(|(b, d)| (Brep::made_core(b), d));
         }
         init()?;
         let kind = match kind {

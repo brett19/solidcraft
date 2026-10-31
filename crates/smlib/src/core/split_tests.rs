@@ -7,7 +7,7 @@
 //! The body is a 10 mm cube [0, 10]^3 on solidcore; the tools are described as
 //! [`crate::ssi::Surface`] describes them.
 
-use super::split::{split_body, split_faces};
+use super::split::{split_body, split_body_by_sheet, split_faces};
 use super::{Body, area, counts, make_box, to_arrays, volume};
 use crate::Error;
 use crate::export::native;
@@ -262,6 +262,77 @@ fn a_sheet_is_not_split_into_two_bodies() {
     .unwrap();
     assert!(rel(area(&sheet, 1e-8).unwrap(), 100.0) < 1e-9);
     assert_eq!(split_body(&sheet, &plane_x(5.0)).err(), Some(Error::NotSolid));
+}
+
+/// Faces of the box -20..5 x -20..20 x -20..5 copied off it into a sheet (`CopyFaces` with merge,
+/// as the capi's test): the top z = 5 and, with `side`, the side x = 5 too.
+fn lid(side: bool) -> Body {
+    use solidcore::EntityRef;
+    use solidcore::geom::tol::USE_DEFAULT;
+    use solidcore::query::api_queries::face_internal_point;
+    use solidcore::topology::brep::p1::faces;
+    use solidcore::topology::brep::p2::ArenaNotifyState;
+    use solidcore::topology::brep::p3::new_brep;
+    use solidcore::topology::brep::p7::copy_faces;
+    let slab = make_box([-20.0; 3], [25.0, 40.0, 25.0]).unwrap();
+    super::run("sheet", |k| {
+        let mut whole = super::boolean::copy_of(k, &slab.0.lock().unwrap(), 1)?;
+        let mut picked = Vec::new();
+        for f in faces(&whole, None)? {
+            let p = face_internal_point(k, &mut whole, f)?;
+            if (p.z - 5.0).abs() < 1e-9 || (side && (p.x - 5.0).abs() < 1e-9) {
+                picked.push(f);
+            }
+        }
+        assert_eq!(picked.len(), if side { 2 } else { 1 });
+        let mut w = new_brep(k, USE_DEFAULT, USE_DEFAULT)?;
+        w.set_tolerance(whole.tolerance());
+        {
+            let mut state = ArenaNotifyState::new(&w);
+            let mut env = state.env(None);
+            let key_of = env.key_of;
+            let this_face = |f| key_of(EntityRef::Face(f));
+            copy_faces(k, &mut whole, &picked, &mut w, true, &this_face, &mut env)?;
+        }
+        w.refresh_cached_topology();
+        Ok(w)
+    })
+    .map(Body::new)
+    .unwrap()
+}
+
+/// The capi's test of `smlib_split_body_by_sheet` (fork 2fc375f): a cube 0..10 cut by an L of two
+/// faces: the corner x < 5, z < 5 (250) on one side, the rest (750) on the other, whichever face
+/// the sides are read from; on C++ too.
+#[test]
+fn split_body_by_an_l_sheet() {
+    let (c, sheet) = (cube(), lid(true));
+    for face in 0..2 {
+        let (b, f) = split_body_by_sheet(&c, &sheet, face).unwrap().expect("the sheet divides the cube");
+        valid("L sheet", &b);
+        valid("L sheet", &f);
+        let (vb, vf) = (volume(&b, 1e-8).unwrap(), volume(&f, 1e-8).unwrap());
+        assert!(rel(vb.min(vf), 250.0) < 1e-9 && rel(vb.max(vf), 750.0) < 1e-9, "face {face}: {vb} + {vf}");
+        #[cfg(feature = "native")]
+        {
+            let (body, tool) = (crate::Brep::made_core(cube()), crate::Brep::made_core(lid(true)));
+            let (bc, fc) = crate::ffi::split::split_body_by_sheet(body.cpp().unwrap(), tool.cpp().unwrap(), face as i64).unwrap();
+            let (vbc, vfc) = (crate::ffi::volume(&bc, 1e-8).unwrap(), crate::ffi::volume(&fc, 1e-8).unwrap());
+            assert!(rel(vb, vbc) < 1e-9 && rel(vf, vfc) < 1e-9, "face {face}: {vb} + {vf} vs C++ {vbc} + {vfc}");
+        }
+    }
+}
+
+/// What `smlib_split_body_by_sheet` refuses: a body that is no sheet, a face out of range, the
+/// sheet as its own body; a face that ends inside the cube only nicks it, which is no cut.
+#[test]
+fn split_by_a_sheet_refuses() {
+    let (c, sheet) = (cube(), lid(true));
+    assert_eq!(split_body_by_sheet(&c, &make_box([-20.0; 3], [25.0, 40.0, 25.0]).unwrap(), 0).err(), Some(Error::Argument));
+    assert_eq!(split_body_by_sheet(&c, &sheet, 2).err(), Some(Error::Argument));
+    assert_eq!(split_body_by_sheet(&c, &c, 0).err(), Some(Error::Argument));
+    assert!(split_body_by_sheet(&c, &lid(false), 0).unwrap().is_none());
+    assert_eq!(split_body_by_sheet(&sheet, &lid(false), 0).err(), Some(Error::NotSolid));
 }
 
 /// The body split is never changed.

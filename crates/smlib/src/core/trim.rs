@@ -657,9 +657,89 @@ fn same_patch(k: &Kernel, p: &Surface, q: &Surface, tol: f64) -> bool {
     })
 }
 
+/// `extended_by`: the surface `surf` (whose face is its whole box `dom`) extended past side `s` as
+/// `ct` says, so that it runs `distance` past that side measured across it ([`across`]), within
+/// 1e-9 of it. `CreateExtendedSurface` takes its distance as an estimate, and how far it then runs
+/// is increasing in what it is asked: a bracketed solve on that (each ask scaled by the distance
+/// over what it gave until two asks fall either side, then Illinois false position). An extension
+/// that moves the face's side off its parameters, or a target not met, is [`Error::NotExact`],
+/// never the surface as it came out.
+fn extended_by(k: &Kernel, surf: &Surface, dom: &Extent2d, s: Side, ct: ContinuityType, distance: f64, model_tol: f64) -> Result<Surface> {
+    const BRACKET_TRIES: usize = 40;
+    const SOLVE_TRIES: usize = 100;
+    let tol = 1e-9 * distance;
+    // How far asking `ask` runs, and the surface it makes.
+    let try_ask = |ask: f64| -> Result<(Surface, f64)> {
+        let tried = surf.create_extended_surface_dir(k, s.which, ask, ct).map_err(status)?;
+        // The face's side stays where it was on the extended surface's parameters.
+        let mid = on_side(dom, s, 0.5);
+        let stays = matches!((point_at(k, surf, mid), point_at(k, &tried, mid)), (Some(was), Some(now)) if (was - now).length() <= model_tol);
+        if !stays {
+            return Err(Error::NotExact);
+        }
+        let got = across(k, &tried, dom, s);
+        if got.is_finite() && got > 0.0 { Ok((tried, got)) } else { Err(Error::NotExact) }
+    };
+    // Asks that run short of and past `distance`, by f = got - distance.
+    let (mut short, mut past) = (None, None);
+    let mut ask = distance;
+    for _ in 0..BRACKET_TRIES {
+        let (made, got) = try_ask(ask)?;
+        let f = got - distance;
+        if f.abs() <= tol {
+            return Ok(made);
+        }
+        if f < 0.0 {
+            short = Some((ask, f));
+        } else {
+            past = Some((ask, f));
+        }
+        if short.is_some() && past.is_some() {
+            break;
+        }
+        ask *= distance / got;
+    }
+    let (Some((mut lo, mut flo)), Some((mut hi, mut fhi))) = (short, past) else { return Err(Error::NotExact) };
+    // Illinois: false position, halving the value at the end that stays when the same end moves
+    // twice running.
+    #[derive(PartialEq)]
+    enum Moved {
+        Neither,
+        Lo,
+        Hi,
+    }
+    let mut moved = Moved::Neither;
+    for _ in 0..SOLVE_TRIES {
+        let x = hi - fhi * (hi - lo) / (fhi - flo);
+        if !(x > lo.min(hi) && x < lo.max(hi)) {
+            break;
+        }
+        let (made, got) = try_ask(x)?;
+        let f = got - distance;
+        if f.abs() <= tol {
+            return Ok(made);
+        }
+        if f < 0.0 {
+            (lo, flo) = (x, f);
+            if moved == Moved::Lo {
+                fhi *= 0.5;
+            }
+            moved = Moved::Lo;
+        } else {
+            (hi, fhi) = (x, f);
+            if moved == Moved::Hi {
+                flo *= 0.5;
+            }
+            moved = Moved::Hi;
+        }
+    }
+    Err(Error::NotExact)
+}
+
 /// `smlib_extend_sheet`: the one-face sheet `sheet`, whose face is its surface's whole parameter
 /// box, continued `distance` past the side its edge nearest `point` (within `tol`) runs along,
-/// as `how` says. A sheet of another shape is [`Error::Unsupported`].
+/// as `how` says. A sheet of another shape is [`Error::Unsupported`]; an extension that cannot be
+/// made `distance` long across the side (within 1e-9 of it) is [`Error::NotExact`].
 pub(crate) fn extend_sheet(sheet: &Body, point: [f64; 3], tol: f64, distance: f64, how: Continuation) -> Result<Body> {
     if !point.iter().all(|x| x.is_finite()) || !tol.is_finite() || !(tol > 0.0) || !distance.is_finite() || !(distance > 0.0) {
         return Err(Error::Argument);
@@ -717,29 +797,13 @@ pub(crate) fn extend_sheet(sheet: &Body, point: [f64; 3], tol: f64, distance: f6
             Continuation::Curvature => ContinuityType::G1G2,
             Continuation::Natural => ContinuityType::CInfinity,
         };
-        // CreateExtendedSurface takes its distance as an estimate: the distance asked of it is
-        // corrected until the extension measures `distance` across the side's middle.
-        let mut extended: Option<Surface> = None;
-        let mut failed = None;
-        let mut ask = distance;
-        for _ in 0..12 {
-            let tried = match surf.create_extended_surface_dir(k, grow.which, ask, ct) {
-                Ok(t) => t,
-                Err(e) => {
-                    failed = Some(status(e));
-                    break;
-                }
-            };
-            let mid = on_side(&dom, grow, 0.5);
-            let stays = matches!((point_at(k, &surf, mid), point_at(k, &tried, mid)), (Some(was), Some(now)) if (was - now).length() <= model_tol);
-            let got = if stays { across(k, &tried, &dom, grow) } else { -1.0 };
-            extended = Some(tried);
-            if !stays || !(got > 0.0) || (got - distance).abs() <= 1e-9 * distance {
-                break;
-            }
-            ask *= distance / got;
-        }
-        let Some(extended) = extended else { return Ok(Err(failed.unwrap_or(Error::Empty))) };
+        // CreateExtendedSurface takes its distance as an estimate (a natural parabola falls 2.5%
+        // short, a G2 run-off of a circle runs more than twice as far): the distance asked of it
+        // is solved for until the extension measures `distance` across the side's middle.
+        let extended = match extended_by(k, &surf, &dom, grow, ct, distance, model_tol) {
+            Ok(e) => e,
+            Err(e) => return Ok(Err(e)),
+        };
         // A cone or cylinder continued naturally stays one, as the analytic widened, else SMLib
         // gives it back its analytic kind where it can.
         let grown = match how {

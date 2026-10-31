@@ -9,10 +9,6 @@
 //! convex edges extended and the results merged. A sheet offset takes faces that close into a
 //! solid as the capi does since tangency-labs/smlib#17.
 //!
-//! What the capi asks of SMLib code that solidcore does not have is [`Error::Unsupported`],
-//! refused where the capi would first reach it, so every error before it is the C++ path's: a
-//! face move (`SmOffsetFacesExecutive`, fork a96ce9f, solidcore#1060).
-//!
 //! A draft tilts planes and, since tangency-labs/smlib#27, turns a cylinder about the pull into
 //! a cone (solidcore's `Cone::lean_cylinder`, solidcore#1545); a cone that is not a cylinder
 //! (smlib#53) is [`Error::Unsupported`]. A draft's tilted faces go in through solidcore's
@@ -34,18 +30,20 @@ use solidcore::nurbs::knots::Side;
 use solidcore::offset::offset_executive::p2::{
     OffsetNotifications, OffsetOptions, ShellCopyIdentities, ShellOptions, api_offset_brep_full, api_shell_brep_full,
 };
+use solidcore::offset::offset_faces::{OffsetFacesExecutive, OffsetFacesRefusal};
 use solidcore::query::api_queries::{BrepRef, face_bounding_box, face_classify_uv, face_closest_point_in_shape, face_internal_point};
 use solidcore::query::brep::{BrepIdentity, BrepQuery, LiveBrepObjects};
 use solidcore::surface::cone::Cone;
 use solidcore::surface::surface::{Surface, SurfaceKind};
 use solidcore::sweep::topology_sweep::store::SweepIdentities;
 use solidcore::topology::brep::local_operation::local_operation;
-use solidcore::topology::brep::{p1 as brep_p1, p2 as brep_p2, p3 as brep_p3};
+use solidcore::topology::brep::{p1 as brep_p1, p2 as brep_p2};
 use solidcore::topology::face::p2 as face_p2;
 use solidcore::topology::topology::{NotifyRecords, Topology};
 use solidcore::topology::{Brep, BrepId, EdgeId, FaceId, FaceuseId, RegionId};
 
 use super::blend::{Miss, on_copy, p3, pick, points_ok, status as blend_status, tolerance_ok};
+use super::boolean::{domain, named};
 use super::{Body, answer};
 use crate::{Error, Result};
 
@@ -273,17 +271,16 @@ fn leaves_cavity(k: &mut Kernel, b: &mut Brep, open: &[FaceId], wall: f64) -> so
     Ok(false)
 }
 
-/// An object name in key domain `domain`: each B-rep the offset executive touches (the source,
-/// its working copy, the result, the merge's bodies) names its objects in its own domain, as
-/// solidcore's offset fixture does, so their notification records never collide.
-fn named(entity: EntityRef, domain: u64) -> ObjectRef {
-    let r = brep_p3::topology_ref(0, entity);
-    ObjectRef { type_code: r.type_code, key: ObjectKey(domain + r.type_code as u64 * 1_000_000 + (r.key.0 & 0xffff_ffff)) }
+// Each B-rep the offset executive touches (the source, its working copy, the result, the merge's
+// bodies) names its objects in its own key domain ([`named`]), as solidcore's offset fixture does,
+// so their notification records never collide. Curves and lists have domains of their own.
+const SOURCE: u64 = domain(1);
+const RESULT: u64 = domain(2);
+const WORKING: u64 = domain(3);
+/// The merge's B-rep `brep`: the domains of its objects, its curves and its lists.
+fn merge_domain(brep: BrepId, which: u64) -> u64 {
+    domain(16 + u64::from(brep.index()) * 3 + which)
 }
-
-const SOURCE: u64 = 100_000_000_000;
-const RESULT: u64 = 200_000_000_000;
-const WORKING: u64 = 600_000_000_000;
 
 fn source_key(e: EntityRef) -> ObjectRef {
     named(e, SOURCE)
@@ -302,15 +299,15 @@ fn curve_in(domain: u64, edge: EdgeId, type_code: i64) -> ObjectRef {
 }
 
 fn result_curve(edge: EdgeId, type_code: i64) -> ObjectRef {
-    curve_in(300_000_000_000, edge, type_code)
+    curve_in(domain(4), edge, type_code)
 }
 
 fn source_curve(edge: EdgeId, type_code: i64) -> ObjectRef {
-    curve_in(400_000_000_000, edge, type_code)
+    curve_in(domain(5), edge, type_code)
 }
 
 fn working_curve(edge: EdgeId, type_code: i64) -> ObjectRef {
-    curve_in(650_000_000_000, edge, type_code)
+    curve_in(domain(6), edge, type_code)
 }
 
 fn lists_in(domain: u64, region: RegionId) -> [ObjectRef; 2] {
@@ -318,15 +315,15 @@ fn lists_in(domain: u64, region: RegionId) -> [ObjectRef; 2] {
 }
 
 fn source_lists(result: bool, region: RegionId) -> [ObjectRef; 2] {
-    lists_in(if result { 510_000_000_000 } else { 500_000_000_000 }, region)
+    lists_in(domain(if result { 8 } else { 7 }), region)
 }
 
 fn working_lists(region: RegionId) -> [ObjectRef; 2] {
-    lists_in(900_000_000_000, region)
+    lists_in(domain(9), region)
 }
 
 fn merge_curve(brep: BrepId, edge: EdgeId, type_code: i64) -> ObjectRef {
-    ObjectRef { key: ObjectKey(700_000_000_000 + u64::from(brep.index()) * 1_000_000_000 + u64::from(edge.index())), type_code }
+    ObjectRef { key: ObjectKey(merge_domain(brep, 1) + u64::from(edge.index())), type_code }
 }
 
 /// Identities of the B-reps the merge makes, disjoint from the keys above.
@@ -334,7 +331,7 @@ struct MergeBodies;
 
 impl SweepIdentities for MergeBodies {
     fn topology(&self, brep: BrepId, entity: EntityRef) -> ObjectRef {
-        named(entity, 1_000_000_000_000 + u64::from(brep.index()) * 100_000_000_000)
+        named(entity, merge_domain(brep, 0))
     }
     fn owned_auxiliary_objects(&self, brep: BrepId, model: &Brep) -> Vec<ObjectKey> {
         model.edges().iter().filter(|(_, e)| e.curve.is_some()).map(|(edge, _)| merge_curve(brep, edge, 0).key).collect()
@@ -346,7 +343,7 @@ impl SweepIdentities for MergeBodies {
         Ok(merge_curve(brep, edge, type_code))
     }
     fn source_lists(&self, brep: BrepId, region: RegionId) -> solidcore::Result<[ObjectRef; 2]> {
-        Ok(lists_in(800_000_000_000 + u64::from(brep.index()) * 1_000_000_000, region))
+        Ok(lists_in(merge_domain(brep, 2), region))
     }
 }
 
@@ -461,9 +458,8 @@ pub(crate) fn shell(body: &Body, points: &[[f64; 3]], tolerance: f64, thickness:
     })
 }
 
-/// `smlib_offset_faces`: its checks, the pick, the solid check and (moving faces in) the cavity
-/// check, then not supported: the face move is the fork's `SmOffsetFacesExecutive` (a96ce9f),
-/// which solidcore does not have.
+/// `smlib_offset_faces`: its checks, the pick, the solid check, (moving faces in) the cavity
+/// check, then `move_faces`.
 pub(crate) fn offset_faces(body: &Body, points: &[[f64; 3]], tolerance: f64, distance: f64) -> Result<Body> {
     if !points_ok(points, false) || !tolerance_ok(tolerance) || !distance_ok(distance) {
         return Err(Error::Argument);
@@ -484,8 +480,27 @@ pub(crate) fn offset_faces(body: &Body, points: &[[f64; 3]], tolerance: f64, dis
                 return Ok(Err(Error::NoRoom));
             }
         }
-        // `move_faces`: SmOffsetFacesExecutive::OffsetFaces (fork a96ce9f).
-        Ok(Err(Error::Unsupported))
+        match move_faces(k, &mut w, &picked, distance) {
+            Ok(()) => finish(w, true),
+            Err(e) => Ok(Err(e)),
+        }
+    })
+}
+
+/// `move_faces`: moves the picked faces of `b` (in place) `distance` along their outward normals:
+/// each gets its surface's offset, and the local operation extends or trims the faces around them
+/// to meet it; the tangent blends on them follow (`SmOffsetFacesExecutive`: taken off, the faces
+/// moved, put back at their own sizes). A blend that no longer fits is [`Error::NoRoom`], one that
+/// cannot be put back as it was [`Error::Unsupported`], one that would need a continuation that
+/// cannot be made exactly [`Error::NotExact`], a move that moved nothing [`Error::NoEffect`].
+fn move_faces(k: &mut Kernel, b: &mut Brep, picked: &[FaceId], distance: f64) -> Out<()> {
+    let mut exec = OffsetFacesExecutive::new();
+    exec.offset_faces(k, b, picked, distance).map_err(|e| match exec.refusal() {
+        OffsetFacesRefusal::NoRoom => Error::NoRoom,
+        OffsetFacesRefusal::Unsupported => Error::Unsupported,
+        OffsetFacesRefusal::NotExact => Error::NotExact,
+        OffsetFacesRefusal::NoEffect => Error::NoEffect,
+        OffsetFacesRefusal::None => status(e),
     })
 }
 

@@ -44,4 +44,23 @@ impl Brep {
             Err(s) => Err(error(s)),
         }
     }
+
+    /// The manifold solid `self` cut in two by the sheet `sheet` as it is (its faces joined edge
+    /// to edge; it must cross the body to cut it), as [`Brep::split_body`] cuts it: its faces'
+    /// surfaces turned to agree with face `face`'s (in SMLib's face order), the part behind that
+    /// normal and the part in front. A `sheet` that is no sheet, or a `face` it does not have, is
+    /// [`Error::Argument`].
+    pub fn split_body_by_sheet(&self, sheet: &Brep, face: usize) -> Result<Option<(Brep, Brep)>> {
+        if route::Op::Split.backend() == route::Backend::Solidcore {
+            return core::split::split_body_by_sheet(self.core()?, sheet.core()?, face)
+                .map(|r| r.map(|(b, f)| (Brep::made_core(b), Brep::made_core(f))));
+        }
+        init()?;
+        let face = i64::try_from(face).map_err(|_| Error::Argument)?;
+        match ffi::split::split_body_by_sheet(self.cpp()?, sheet.cpp()?, face) {
+            Ok((b, f)) => Ok(Some((Brep::made(b), Brep::made(f)))),
+            Err(ffi::ops::ERR_NO_CUT) => Ok(None),
+            Err(s) => Err(error(s)),
+        }
+    }
 }
