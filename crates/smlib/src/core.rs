@@ -227,6 +227,8 @@ pub(crate) fn fixes() -> UpstreamFixes {
     f.fillet_cleanup_removes_input_slits = true;
     f.fillet_rail_end_on_continued_surface = true;
     f.glue_vertices_joins_every_region = true;
+    f.fillet_nx1_tangent_side_edge_same_convexity = true;
+    f.fillet_removal_takes_ring_fillets = true;
     f
 }
 
