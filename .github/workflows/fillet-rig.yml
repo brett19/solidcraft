@@ -97,7 +97,7 @@ jobs:
         run: cargo build --release --locked -p solidcraft-cli --features smlib
       - name: Run the fillet cases against the known-failing list
         run: >-
-          cargo run -q --locked -p xtask -- kernel-cases --area fillets
+          cargo run -q --locked -p xtask -- kernel-cases --kernel smlib --area fillets
           --cli target/release/solidcraft-cli --out "$RUNNER_TEMP/fillet-rig"
           --known-failing tests/kernel-cases/fillets/KNOWN_FAILING
       - name: Keep the results

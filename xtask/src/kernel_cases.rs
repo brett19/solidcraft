@@ -1,17 +1,18 @@
 //! `cargo xtask kernel-cases`: the kernel regression rig. Runs every case in
-//! `tests/kernel-cases/<area>/<id>/` through `solidcraft-cli kernel-cases` on SMLib, one process
-//! per case (so a crash or a hang is that case's result, not the run's), and writes
-//! `docs/kernel-cases.md`: results per case, coverage per area and per source, and the issues and
-//! PRs looked at and skipped. Each case is graded against its own answer.
+//! `tests/kernel-cases/<area>/<id>/` through `solidcraft-cli kernel-cases` on solidcore, or the
+//! C++ SMLib kernel when asked for, one process per case (so a crash or a hang is that case's result, not the run's), and writes
+//! its report: results per case, coverage per area and per source, and the issues and PRs looked
+//! at and skipped. Each case is graded against its own answer.
 //!
 //! The run's output folder (`--out`, default `target/kernel-cases`) holds `results.json`, every
 //! case's full result, and `dumps/<area>-<case>/`, the inputs of each SMLib call a case's run
 //! failed in (`solidcraft-cli kernel-cases --dumps`), for replay.
 //!
-//! `--kernel smlib|solidcore|both` picks the backend each case's process runs on
-//! (`SOLIDCRAFT_KERNEL`). A solidcore run keeps its results, dumps and report in `<out>/solidcore/`;
-//! `both` runs every case on each, keeps `docs/kernel-cases.md` as the SMLib report and writes the
-//! side by side to `docs/kernel-cases-backends.md` and `<out>/backends.json`.
+//! `--kernel solidcore|smlib|both` (default solidcore) picks the backend each case's process runs
+//! on (`SOLIDCRAFT_KERNEL`). A solidcore run keeps its results, dumps and report in
+//! `<out>/solidcore/`; an smlib run writes `docs/kernel-cases.md`; `both` runs every case on each,
+//! keeps `docs/kernel-cases.md` as the SMLib report and writes the side by side to
+//! `docs/kernel-cases-backends.md` and `<out>/backends.json`.
 //!
 //! `--route <op>=solidcore[,…]` scores single operation families instead: the "solidcore" side runs
 //! on SMLib (`SOLIDCRAFT_KERNEL=smlib`) with only those families moved to solidcore
@@ -43,7 +44,7 @@ pub(crate) struct Options {
     pub(crate) jobs: usize,
     /// The run's output folder: `results.json` and the SMLib dumps (`dumps/`).
     out: PathBuf,
-    /// The backends each case runs on (`--kernel`, default SMLib alone).
+    /// The backends each case runs on (`--kernel`, default solidcore alone).
     pub(crate) kernels: Vec<&'static str>,
     /// `--route`: the operation families the solidcore side moves to solidcore, on SMLib for the
     /// rest; empty, solidcore answers every family.
@@ -85,10 +86,9 @@ impl Options {
 }
 
 /// The operation families `--route` may name: `Op::ALL` in crates/smlib/src/route.rs, as
-/// `Op::id` spells them (a test keeps the two together). `file` is not one: `.smb` files stay on
-/// SMLib.
-const ROUTE_OPS: [&str; 13] =
-    ["convert", "primitive", "transform", "measure", "check", "boolean", "blend", "offset", "split", "sweep", "history", "ssi", "flat"];
+/// `Op::id` spells them (a test keeps the two together).
+const ROUTE_OPS: [&str; 14] =
+    ["convert", "primitive", "transform", "measure", "check", "boolean", "blend", "offset", "split", "sweep", "history", "ssi", "flat", "file"];
 
 /// `--route boolean=solidcore,measure=solidcore`: the families, in table order, each once.
 fn parse_routes(text: &str) -> Result<Vec<String>, String> {
@@ -115,8 +115,8 @@ pub(crate) fn options(rest: &[&str], out: &str) -> Result<Options, String> {
     let jobs = arg("--jobs").map(|j| j.parse::<usize>().map_err(|e| format!("--jobs: {e}"))).transpose()?.unwrap_or(4).clamp(1, 32);
     let out = arg("--out").map_or_else(|| root().join(out), PathBuf::from);
     let kernels = match arg("--kernel").as_deref() {
-        None | Some("smlib") => vec![BACKENDS[0]],
-        Some("solidcore") => vec![BACKENDS[1]],
+        Some("smlib") => vec![BACKENDS[0]],
+        None | Some("solidcore") => vec![BACKENDS[1]],
         Some("both") => BACKENDS.to_vec(),
         Some(k) => return Err(format!("--kernel: unknown backend '{k}' (smlib, solidcore or both)")),
     };
@@ -268,9 +268,9 @@ fn run_case(o: &Options, case: &Path, kernel: &str) -> Value {
     }
 }
 
-/// Every case on SMLib.
+/// Every case on the run's one backend (the ladder's: it refuses `--kernel both`).
 pub(crate) fn run_all(o: &Options, list: &[PathBuf]) -> Vec<Value> {
-    run_on(o, list, &["smlib"]).into_iter().next().unwrap_or_default()
+    run_on(o, list, &o.kernels).into_iter().next().unwrap_or_default()
 }
 
 /// Every case on each backend, one job pool for all the runs; the results per backend, in order.
@@ -566,8 +566,8 @@ fn side_by_side(smlib: &[Value], solidcore: &[Value], labels: [&str; 2]) -> (Val
 
 pub fn run(rest: &[&str]) -> Result<(), String> {
     if rest.contains(&"--ladder") {
-        if options(rest, "target/kernel-ladder")?.kernels != ["smlib"] {
-            return Err("--kernel: the ladder runs on smlib only".into());
+        if options(rest, "target/kernel-ladder")?.kernels.len() != 1 {
+            return Err("--kernel: the ladder runs on one backend, smlib or solidcore".into());
         }
         return crate::kernel_ladder::run(rest);
     }
@@ -895,16 +895,27 @@ mod tests {
     fn route_ops_are_the_routing_tables_families() {
         let text = std::fs::read_to_string(root().join("crates/smlib/src/route.rs")).unwrap_or_default();
         let ids: Vec<&str> = text.lines().filter_map(|l| l.trim().strip_prefix("Op::")?.split_once(" => \"")?.1.strip_suffix("\",")).collect();
-        assert_eq!(ids.iter().filter(|id| **id != "file").copied().collect::<Vec<_>>(), ROUTE_OPS, "{ids:?}");
+        assert_eq!(ids, ROUTE_OPS, "{ids:?}");
     }
 
-    /// `--known-failing` grades the SMLib side, so a run with no SMLib side is refused.
+    /// `--known-failing` grades the SMLib side, so a run with no SMLib side is refused: the
+    /// default, solidcore, needs `--kernel smlib` or `both` said.
     #[test]
     fn the_gate_needs_an_smlib_side() {
-        for ok in [&["--known-failing", "/k"][..], &["--kernel", "smlib", "--known-failing", "/k"], &["--kernel", "both", "--known-failing", "/k"]] {
+        for ok in [&["--kernel", "smlib", "--known-failing", "/k"][..], &["--kernel", "both", "--known-failing", "/k"]] {
             assert_eq!(options(ok, "x").map(|o| o.known_failing), Ok(Some(PathBuf::from("/k"))), "{ok:?}");
         }
         assert!(options(&["--kernel", "solidcore", "--known-failing", "/k"], "x").is_err());
+        assert!(options(&["--known-failing", "/k"], "x").is_err());
+    }
+
+    /// With no `--kernel`, a run is on solidcore; the C++ kernel is asked for.
+    #[test]
+    fn the_rig_defaults_to_solidcore() {
+        assert_eq!(options(&[], "x").unwrap().kernels, ["solidcore"]);
+        assert_eq!(options(&["--kernel", "smlib"], "x").unwrap().kernels, ["smlib"]);
+        assert_eq!(options(&["--kernel", "both"], "x").unwrap().kernels, ["smlib", "solidcore"]);
+        assert_eq!(options(&[], "x").unwrap().env("solidcore"), [("SOLIDCRAFT_KERNEL", "solidcore".to_string())]);
     }
 
     fn gate_on(text: &str, cases: &[(&str, &str)]) -> Result<String, String> {
