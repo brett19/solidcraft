@@ -220,7 +220,6 @@ pub(crate) fn fixes() -> UpstreamFixes {
     f.fillet_trace_from_tangent_point_toward_next = true;
     f.fillet_tangent_point_one_sided_step = true;
     f.fillet_rails_meet_at_one_end_point = true;
-    f.fillet_trace_reaches_rails = true;
     f.delete_vertex_joins_seam_iso_curve = true;
     f.box_face_failures_propagate = true;
     f.ellipse_adjust_step_interval_keeps_turns = true;
@@ -247,6 +246,12 @@ pub(crate) fn fixes() -> UpstreamFixes {
 /// `good_drop_result_distances_in_order` (WR-56, fork 0b4de8c) port fork commits that are not in
 /// `SMLIB_REV`; `corner_patch_face_side_twist` (WR-613, fork 7fd9fb0) ports a fork commit that is
 /// not published.
+///
+/// `fillet_trace_reaches_rails` (WR-609, WR-610) is the one the fork does carry (a9277fd, 6e77631):
+/// it is left off for now because at solidcore 6a2e8c68f it moves a refusal SMLib's own check makes
+/// at other radii (a round's UV trim with coincident control points) onto the r2 round of
+/// fillets/1207-fillet-bar-top-edge-after-boss-arc-round, which the C++ fork builds. Off, rig c
+/// agrees with the fork on two more cases.
 #[cfg(test)]
 const HELD_BACK: &[&str] = &[
     "precise_properties_trim_base_v",
@@ -263,6 +268,7 @@ const HELD_BACK: &[&str] = &[
     "fillet_split_edge_keeps_near_half",
     "good_drop_result_distances_in_order",
     "corner_patch_face_side_twist",
+    "fillet_trace_reaches_rails",
 ];
 
 fn fresh() -> Kernel {
