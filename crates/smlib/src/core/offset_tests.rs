@@ -677,7 +677,7 @@ fn a_draft_past_the_neighbours_meeting_is_unsupported_as_on_cpp() {
 /// makes it.
 #[cfg(feature = "native")]
 #[test]
-#[ignore = "thicken_planar_side_walls fails it: Unported \"SmFace handle of a surface's face\" (write-up review-1031/bugs/thicken-l-sheet-unported.md, not filed yet)"]
+#[ignore = "with thicken_planar_side_walls, solidcore#1950: Unported \"SmFace handle of a surface's face\"; #1963 is past the pin"]
 fn an_l_sheet_thickens_as_on_cpp() {
     use crate::sweeps::{Curve, DraftCorner};
     use crate::{Brep, ffi};
