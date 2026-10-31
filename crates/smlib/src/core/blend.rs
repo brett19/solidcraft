@@ -542,6 +542,13 @@ fn picked_on(b: &Brep, e: EdgeId) -> Option<(solidcore::geom::attribute::Attribu
     a.application_value::<Picked>().map(|p| (h, p.0))
 }
 
+/// Whether the rounds that overflow go first ([`overflow_first`]), held back: solidcore's
+/// `SubtractRemovalRegion` loses the attributes of target edges the subtraction replaces, so a picked
+/// edge the overflow only shortened reads as removed whole and is silently left unrounded (the rig's
+/// fillets/5158-fillet-adjacent-plate-edges-as-thick-as-plate, 1706.89 against 1681.90). Off, the
+/// rounds are blended together, and those that need the order are refused.
+const OVERFLOW_GOES_FIRST: bool = false;
+
 /// `overflow_first`: the rounds of [`blend_call`] when blends of several edges overflow their
 /// faces (`round_edges` stopped in the copy `w` of `body`, `picked` its picked edges, `each` their
 /// sizes). The blends that overflow on their own (each edge's alone, classified in `w`, which
@@ -760,7 +767,7 @@ fn blend_call(
         // overflow their faces across cliffs and others fit, the overflowing ones are built
         // first, on a fresh copy, and the others then round what is left of their edges. An edge
         // the overflow removes whole is gone (`dropped`); one it cuts keeps the rest.
-        let may_go_first = back.is_empty() && open == Corners::Filled && picked.len() > 1;
+        let may_go_first = OVERFLOW_GOES_FIRST && back.is_empty() && open == Corners::Filled && picked.len() > 1;
         let mut stopped = None;
         let first = may_go_first.then_some(OverflowFirst { classify_only: false, stopped: &mut stopped });
         let done = blend_edges_stopping(k, &mut w, &picked, &each, section, None, &back, (open == Corners::Open).then_some(&mut patches), first)?;
