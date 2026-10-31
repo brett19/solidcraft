@@ -244,37 +244,44 @@ macro_rules! primitive {
             #[test]
             $(#[$mass])?
             fn mass_properties_match_the_cpp_kernel() {
+                let _cpp = crate::route::on_cpp();
                 mass_properties_parity($name);
             }
             #[cfg(feature = "native")]
             #[test]
             $(#[$area])?
             fn area_matches_the_cpp_kernel() {
+                let _cpp = crate::route::on_cpp();
                 area_parity($name);
             }
             #[cfg(feature = "native")]
             #[test]
             fn bounds_match_the_cpp_kernel() {
+                let _cpp = crate::route::on_cpp();
                 bounds_parity($name);
             }
             #[cfg(feature = "native")]
             #[test]
             fn solid_count_matches_the_cpp_kernel() {
+                let _cpp = crate::route::on_cpp();
                 solid_count_parity($name);
             }
             #[cfg(feature = "native")]
             #[test]
             fn manifold_matches_the_cpp_kernel() {
+                let _cpp = crate::route::on_cpp();
                 manifold_parity($name);
             }
             #[cfg(feature = "native")]
             #[test]
             fn distances_match_the_cpp_kernel() {
+                let _cpp = crate::route::on_cpp();
                 distance_parity($name);
             }
             #[cfg(feature = "native")]
             #[test]
             fn check_matches_the_cpp_kernel() {
+                let _cpp = crate::route::on_cpp();
                 check_parity($name);
             }
         }

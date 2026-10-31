@@ -371,11 +371,13 @@ macro_rules! cases {
             #[test]
             $(#[$ign])?
             fn solidcore_matches_the_cpp_kernel() {
+                let _cpp = crate::route::on_cpp();
                 super::parity(stringify!($m));
             }
             #[cfg(feature = "native")]
             #[test]
             fn the_cpp_kernel_matches_the_closed_form() {
+                let _cpp = crate::route::on_cpp();
                 let _ = super::cpp_case(stringify!($m));
             }
         }
@@ -768,12 +770,14 @@ mod history {
     /// new.
     #[test]
     fn tags_cross_a_fillet() {
+        let _cpp = crate::route::on_cpp();
         check(Blend::Round, 2.0);
     }
 
     /// A 2 mm chamfer on the same edge: the same faces kept, trimmed and made as the round.
     #[test]
     fn tags_cross_a_chamfer() {
+        let _cpp = crate::route::on_cpp();
         check(Blend::Chamfer, 2.0);
     }
 }

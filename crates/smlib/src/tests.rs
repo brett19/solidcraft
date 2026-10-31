@@ -27,9 +27,75 @@ fn bad_arguments_are_errors() {
     assert_eq!(b.volume(f64::INFINITY).unwrap_err(), Error::Argument);
 }
 
+/// `.smb` files on solidcore, in both forms and with a curved body, and a missing or corrupt file
+/// is an error, not a panic.
+#[test]
+fn solidcore_reads_back_the_files_it_writes() {
+    use std::f64::consts::PI;
+    let dir = std::env::temp_dir().join(format!("solidcraft-smlib-core-file-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let cylinder = core::make_cylinder([1.0, 2.0, 3.0], 2.0, 5.0).map(Brep::made_core).unwrap();
+    for ascii in [false, true] {
+        let path = dir.join(format!("cylinder-{ascii}.smb"));
+        core::file::write(cylinder.core().unwrap(), &path, ascii).unwrap();
+        let back = core::file::read(&path, ascii).map(Brep::made_core).unwrap();
+        let v = core::volume(back.core().unwrap(), 1e-7).unwrap();
+        assert!((v - PI * 4.0 * 5.0).abs() < 1e-5, "ascii {ascii}: {v}");
+        assert_eq!(core::counts(back.core().unwrap()).unwrap(), core::counts(cylinder.core().unwrap()).unwrap(), "ascii {ascii}");
+    }
+    let body = cylinder.core().unwrap();
+    assert!(core::file::write(body, &dir.join("missing/x.smb"), false).is_err());
+    assert!(core::file::read(&dir.join("missing.smb"), false).is_err());
+    let junk = dir.join("junk.smb");
+    std::fs::write(&junk, b"not a B-rep file").unwrap();
+    assert!(core::file::read(&junk, false).is_err());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// ASCII that is no B-rep file is refused like binary. It comes back as an empty body today:
+/// default-solidcore/bugs/ascii-junk-reads-as-empty.md.
+#[test]
+#[ignore = "solidcore: an ASCII file of junk reads as an empty B-rep instead of an error"]
+fn solidcore_refuses_an_ascii_file_of_junk() {
+    let dir = std::env::temp_dir().join(format!("solidcraft-smlib-core-junk-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let junk = dir.join("junk.smb");
+    std::fs::write(&junk, b"not a B-rep file").unwrap();
+    let r = core::file::read(&junk, true);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(r.is_err());
+}
+
+/// A file either kernel wrote reads on the other, with the same measure.
+#[cfg(feature = "native")]
+#[test]
+fn each_kernel_reads_the_files_of_the_other() {
+    use std::f64::consts::PI;
+    let dir = std::env::temp_dir().join(format!("solidcraft-smlib-cross-file-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let want = PI * 4.0 * 5.0;
+    for ascii in [false, true] {
+        let from_core = dir.join(format!("core-{ascii}.smb"));
+        let body = core::make_cylinder([0.0; 3], 2.0, 5.0).unwrap();
+        core::file::write(&body, &from_core, ascii).unwrap();
+        crate::init().unwrap();
+        let on_cpp = ffi::read(&c_path(&from_core).unwrap(), ascii).map(Brep::made).unwrap();
+        let v = ffi::volume(on_cpp.cpp().unwrap(), 1e-7).unwrap();
+        assert!((v - want).abs() < 1e-5, "C++ on solidcore's file, ascii {ascii}: {v}");
+        let from_cpp = dir.join(format!("cpp-{ascii}.smb"));
+        let cpp = ffi::make_cylinder(&[0.0; 3], 2.0, 5.0).map(Brep::made).unwrap();
+        crate::check(ffi::write(cpp.cpp().unwrap(), &c_path(&from_cpp).unwrap(), ascii)).unwrap();
+        let on_core = core::file::read(&from_cpp, ascii).unwrap();
+        let v = core::volume(&on_core, 1e-7).unwrap();
+        assert!((v - want).abs() < 1e-5, "solidcore on C++'s file, ascii {ascii}: {v}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[cfg(feature = "native")]
 #[test]
 fn native_files_round_trip_and_failures_dump_their_inputs() {
+    let _cpp = route::on_cpp();
     let dir = std::env::temp_dir().join(format!("solidcraft-smlib-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let b = Brep::make_box([0.0; 3], [2.0, 3.0, 4.0]).unwrap();
@@ -92,6 +158,7 @@ fn call_lines_give_the_function_and_the_c_api_time() {
 #[cfg(feature = "native")]
 #[test]
 fn every_call_is_a_profiler_span_timed_by_the_c_api() {
+    let _cpp = route::on_cpp();
     solidcraft_profile::set_enabled(true);
     let mark = solidcraft_profile::mark();
     // the C API's own box, whatever `Op::Primitive` routes to

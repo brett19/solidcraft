@@ -587,6 +587,8 @@ fn runner_output(
 #[test]
 fn smlib_global_intersect_at_1e_6() {
     use solidcraft_smlib::ssi::{Method, intersect};
+    // This scores the C++ kernel's intersector: it opts in (this binary builds no other bodies).
+    solidcraft_smlib::route::set_choice(solidcraft_smlib::route::Choice::Only(solidcraft_smlib::route::Backend::Smlib));
     let t0 = std::time::Instant::now();
     let cases = all_cases();
     // SMLib serialises its calls, so the cases run one after another; only the scoring is parallel.

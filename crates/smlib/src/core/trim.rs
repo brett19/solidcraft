@@ -36,7 +36,7 @@ use solidcore::kernel::Kernel;
 use solidcore::nurbs::b_spline_surface::p1::SurfParamType;
 use solidcore::nurbs::b_spline_surface_n_lib::p2::EvaluateFlags;
 use solidcore::nurbs::b_spline_surface_n_lib::p2::OrientType;
-use solidcore::query::api_queries::{edge_closest_point, face_closest_point_in_shape};
+use solidcore::query::api_queries::{edge_closest_point, face_closest_point_in_shape, face_internal_point};
 use solidcore::query::brep::{BrepQuery, LiveBrepObjects};
 use solidcore::surface::cone::p1::Cone;
 use solidcore::surface::surface::Surface;
@@ -847,4 +847,13 @@ pub(crate) fn extend_sheet(sheet: &Body, point: [f64; 3], tol: f64, distance: f6
         Ok(Ok(r))
     })?
     .map(Body::new)
+}
+
+/// A point inside each face, in the body's face order (`smlib_brep_face_points`:
+/// `SmFace::CalculateAnInternalPoint`).
+pub(crate) fn face_points(body: &Body) -> Result<Vec<[f64; 3]>> {
+    super::with_body("smlib_brep_face_points", body, |k, b| {
+        let faces = b.face_list().to_vec();
+        faces.into_iter().map(|f| face_internal_point(k, b, f).map(|p| [p.x, p.y, p.z])).collect()
+    })
 }

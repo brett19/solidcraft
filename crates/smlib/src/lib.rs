@@ -79,6 +79,9 @@ pub enum Error {
     Version(i32),
     /// This build has no SMLib (the `native` feature is off).
     NotBuilt,
+    /// The kernel the call is routed to has no such operation (what it is). Nothing falls back
+    /// to the other kernel.
+    NotOnSolidcore(&'static str),
     /// A B-rep record SMLib cannot take (see [`import::Unsupported`]).
     Record(import::Unsupported),
     /// solidcore reported an error (the call, then its message).
@@ -121,6 +124,7 @@ impl std::fmt::Display for Error {
             Error::Exception => write!(f, "SMLib raised an internal exception"),
             Error::Version(v) => write!(f, "SMLib C API version {v}, expected {}", ffi::ABI_VERSION),
             Error::NotBuilt => write!(f, "not supported yet: this build has no SMLib"),
+            Error::NotOnSolidcore(what) => write!(f, "not supported yet on solidcore: {what}"),
             Error::Record(u) => write!(f, "{u}"),
             Error::Solidcore(e) => write!(f, "solidcore: {e}"),
             Error::Internal(e) => write!(f, "solidcore failed internally in {e}"),
@@ -295,12 +299,20 @@ impl Brep {
 
     /// Reads a native SMLib `.smb` file.
     pub fn read(path: &Path, ascii: bool) -> Result<Brep> {
+        if route::Op::File.backend() == route::Backend::Solidcore {
+            c_path(path)?;
+            return core::file::read(path, ascii).map(Brep::made_core);
+        }
         init()?;
         ffi::read(&c_path(path)?, ascii).map(Brep::made).map_err(error)
     }
 
     /// Writes this body to a native SMLib `.smb` file.
     pub fn write(&self, path: &Path, ascii: bool) -> Result<()> {
+        if route::Op::File.backend() == route::Backend::Solidcore {
+            c_path(path)?;
+            return core::file::write(self.core()?, path, ascii);
+        }
         check(ffi::write(self.cpp()?, &c_path(path)?, ascii))
     }
 
