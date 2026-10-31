@@ -5,16 +5,16 @@
 //!
 //! [`check`] fails with "not supported yet" while a test it reaches is unported in solidcore.
 
+use solidcore::error::EntityRef;
 use solidcore::geom::assert_array::{AssertArray, AssertReport, labels, obj_type_string};
 use solidcore::geom::attribute::{AttributeStore, ObjectKey};
-use solidcore::error::EntityRef;
 use solidcore::geom::tol::{SmallTopoType, brep_zone_tol_3d, context_xsect_tol_3d};
-use solidcore::intersect::point_class::PointClassType;
 use solidcore::heal::gap::GapFunction;
+use solidcore::intersect::point_class::PointClassType;
 use solidcore::mass::integrator::properties::{MassPropertyBehavior, PropertyAttributes, brep_properties, face_properties};
 use solidcore::nurbs::b_spline_surface_n_lib::p2::OrientType;
-use solidcore::query::brep::BrepClassifier;
 use solidcore::query::api_queries::{brep_bounding_box, brep_is_manifold_solid, brep_material_census, face_bounding_box};
+use solidcore::query::brep::BrepClassifier;
 use solidcore::topology::NamingScheme;
 use solidcore::topology::brep::p1 as bl;
 use solidcore::topology::brep::validation::{CheckLevel as SolidcoreCheckLevel, check_brep};
