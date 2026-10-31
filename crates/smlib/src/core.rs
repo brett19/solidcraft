@@ -69,6 +69,8 @@ pub(crate) fn fixes() -> UpstreamFixes {
     f.fillet_retry_radius_as_first = true;
     f.fillet_rail_rim_on_face = true;
     f.fillet_refuse_rails_leaving_faces = true;
+    f.fillet_cliff_overflow = true;
+    f.fillet_3x2_tangent_side_edge_roles = true;
     f.fillet_refuse_face_consuming_blends = true;
     f.fillet_refuse_non_manifold_result = true;
     f.fillet_refuse_crossing_rails = true;

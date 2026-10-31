@@ -392,7 +392,7 @@ cases!(
     fillet_cylinder_rim,
     setback_corner,
     fillet_variable_linear,
-    fillet_over_a_cliff: ignore = "solidcore#960: no cliff overflow (fork 8ba4667) at 6a2e8c68f: the rail leaves its face (NoRoom), Unsupported",
+    fillet_over_a_cliff,
     fillet_too_large,
     chamfer_hole_rim_touching_a_face,
     pick_near_nothing,
@@ -406,15 +406,24 @@ fn fork_only_blends_are_not_supported_yet() {
         let b = BLOCK.core();
         // 1 to 2 and back to 1: a corner at the middle.
         let bent = fillet_variable(&b, TOP_FRONT, TOL, [0.0, 0.0, 10.0], 1, &[0.0, 0.0, 0.5, 1.0, 1.0], &[1.0, 2.0, 1.0]).err();
-        // A round over a cliff (fork 8ba4667): solidcore refuses every rail leaving its face.
-        let cliff = blend(&Shape::Box([0.0; 3], [10.0; 3]).core(), Blend::Round, &[[5.0, 0.0, 10.0]], &[12.0], TOL, &[], &[], Corners::Filled).err();
-        assert_eq!(cliff, Some(Error::Unsupported));
         // A pick that fails still says so first.
         let far = chamfer_sides(&b, &[[100.0; 3]], TOL, 2.0, ChamferSecond::Distance(3.0), [0.0, 0.0, 1.0]).err();
         (bent, far)
     });
     assert_eq!(r.0, Some(Error::Unsupported));
     assert_eq!(r.1, Some(Error::NoMatch { point: 0 }));
+}
+
+/// A cliff overflow the fork refuses too (`fixes.fillet_cliff_overflow`, solidcore#960): the
+/// three edges at a 20 mm cube's corner rounded r20, their fillet's boundary on two faces'
+/// surfaces, has no room, as on the fork, not "not supported".
+#[test]
+fn a_cliff_overflow_the_fork_refuses_has_no_room() {
+    let r = timed("cliff_refused", || {
+        let corner = [[10.0, 0.0, 0.0], [0.0, 10.0, 0.0], [0.0, 0.0, 10.0]];
+        blend(&Shape::Box([0.0; 3], [20.0; 3]).core(), Blend::Round, &corner, &[20.0; 3], TOL, &[], &[], Corners::Filled).err()
+    });
+    assert_eq!(r, Some(Error::NoRoom));
 }
 
 /// The corner of r5 rounds at (60, 40, 20) on a 60 x 40 x 20 box, set back 8 and left open: the

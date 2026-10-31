@@ -28,6 +28,7 @@ use std::sync::PoisonError;
 use solidcore::EntityRef;
 use solidcore::SolidError;
 use solidcore::blend::fillet_executive::p1::{FilletLaw, FilletLawKind};
+use solidcore::blend::fillet_executive::p3::NoRoomReason;
 use solidcore::blend::fillet_executive::session::FilletSession;
 use solidcore::blend::fillet_geom::p1::{FilletCornerType, FilletErrorType};
 use solidcore::blend::fillet_solver::p1::{FilletSurfaceGenerator, FilletSurfaceGeneratorType};
@@ -247,12 +248,6 @@ fn face_set(b: &Brep) -> solidcore::Result<HashSet<FaceId>> {
     Ok(brep_p1::faces(b, None)?.into_iter().collect())
 }
 
-/// solidcore's refusal of a blend whose rail leaves the face it rolls on (its port of fork
-/// fc43974, `refuse_blends_larger_than_faces`). It notes only `FilletErrorType::NoRoom` and this
-/// comment, as its other blend-too-large refusals do, so the comment is all that tells it apart
-/// (asked for a typed error on solidcore#960).
-const RAIL_LEAVES_FACE: &str = "Fillet Error: a rail leaves the face it rolls on (the blend is larger than the faces allow)";
-
 /// `blend_failure`: a blend the executive found larger than its faces allow
 /// (`SM_FILERR_NO_ROOM`) is [`Error::NoRoom`]; a filleted vertex no corner type handles
 /// (`SM_FILERR_CORNER_UNSUPPORTED`, which solidcore notes under
@@ -261,10 +256,12 @@ const RAIL_LEAVES_FACE: &str = "Fillet Error: a rail leaves the face it rolls on
 /// make is why a later step fails, so that note stands for it whatever the later step noted
 /// (as solidcore's own `FilletSession::do_fillet` keeps it).
 ///
-/// Except a blend whose rail leaves its face: there the fork decides between building the
-/// blend over the cliff (`SmFilletCliffOverflow.cpp`, fork 8ba4667) and refusing it, which
-/// solidcore does not port, refusing every such blend. Its answer is the fork's only by chance,
-/// so it is [`Error::Unsupported`].
+/// Except a blend whose rail leaves its face refused as [`NoRoomReason::RailLeavesFace`]: that
+/// is solidcore without `fixes.fillet_cliff_overflow`, refusing every such blend where the fork
+/// decides between building it over the cliff (`SmFilletCliffOverflow.cpp`, fork 8ba4667) and
+/// refusing it. Its answer is the fork's only by chance, so it is [`Error::Unsupported`]. With
+/// the cliff overflow on, solidcore makes the fork's choice, and its refusals (each with its own
+/// reason) are [`Error::NoRoom`] like the fork's.
 fn blend_failure(s: &FilletSession<'_>, e: SolidError, corner: bool) -> Error {
     let info = s.error_info();
     if e.is_unported() {
@@ -273,7 +270,7 @@ fn blend_failure(s: &FilletSession<'_>, e: SolidError, corner: bool) -> Error {
         Error::CornerUnsupported
     } else if info.code != FilletErrorType::NoRoom as i32 {
         status(e)
-    } else if info.comment == RAIL_LEAVES_FACE {
+    } else if info.no_room_reason() == Some(NoRoomReason::RailLeavesFace) {
         Error::Unsupported
     } else {
         Error::NoRoom
