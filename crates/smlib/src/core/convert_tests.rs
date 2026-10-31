@@ -366,3 +366,280 @@ fn a_sealed_void_matches_the_cpp_kernel() {
         outer_first(&h.cpp_arrays().unwrap(), &format!("{at}, C++ export"));
     }
 }
+
+/// C++ bodies through solidcore and back. Three crossings of the same C++ arrays are held equal,
+/// ints exactly and reals to 1e-12 (the record too, where the record can say it):
+/// - the C++ kernel's own: its import of them, exported again;
+/// - solidcore's: `from_arrays`, then `to_arrays`;
+/// - both: solidcore's arrays imported by the C++ kernel and exported again.
+///
+/// The first is the reference, not the arrays that went in: a crossing itself moves a few reals on
+/// the C++ kernel too (UV trims made at export, about 1e-7 on a shelled box), so those are held to
+/// the arrays that went in only at [`FIRST_CROSSING`]. Tolerances are excepted: they cross on
+/// purpose as each entity's own (`own_tolerances`, TOLERANCE as twice the B-rep's) where the C++
+/// export writes the largest over them all, so that a body does not grow its tolerance at every
+/// crossing (`tolerances_cross_the_arrays_per_entity`); on a body an operation made the numbers
+/// cannot agree. So is EXTENT, the bounding box padded by those tolerances.
+#[cfg(feature = "native")]
+mod cpp_round_trip {
+    use serde_json::Value;
+    use solidcraft_geom::brep as b;
+
+    use super::{close, from_arrays, native, rel, to_arrays, volume};
+    use crate::flat::{self, EDGE_TOLERANCE, EXTENT, Flat, TOLERANCE, VERTEX_TOLERANCE};
+    use crate::import::Arrays;
+    use crate::sweeps::{Curve, DraftCorner, SweepFrame};
+    use crate::{Brep, ffi};
+
+    const PICK_TOL: f64 = 1e-6;
+
+    /// How far any crossing, the C++ kernel's own included, may move a real of the arrays that
+    /// went in.
+    const FIRST_CROSSING: f64 = 1e-6;
+
+    fn cpp_box(o: [f64; 3], s: [f64; 3]) -> Brep {
+        crate::init().unwrap();
+        Brep::made(ffi::make_box(&o, &s).unwrap())
+    }
+
+    fn cpp_cylinder(o: [f64; 3], r: f64, h: f64) -> Brep {
+        crate::init().unwrap();
+        Brep::made(ffi::make_cylinder(&o, r, h).unwrap())
+    }
+
+    fn cut(a: &Brep, b: &Brep) -> Brep {
+        Brep::made(ffi::ops::boolean(a.cpp().unwrap(), b.cpp().unwrap(), ffi::ops::BOOLEAN_SUBTRACT).unwrap())
+    }
+
+    /// `f` with the sweeps on the C++ kernel, whatever the route.
+    fn on_cpp(f: impl FnOnce() -> crate::Result<Brep>) -> Brep {
+        crate::init().unwrap();
+        crate::sweeps::ON_CPP.with(|c| c.set(true));
+        let r = f();
+        crate::sweeps::ON_CPP.with(|c| c.set(false));
+        r.unwrap()
+    }
+
+    /// The record as JSON, every `tolerance` (the B-rep's, an edge's, a vertex's) gone.
+    fn without_tolerances(rec: &b::Brep) -> Value {
+        fn strip(v: &mut Value) {
+            match v {
+                Value::Object(m) => {
+                    m.remove("tolerance");
+                    m.values_mut().for_each(strip);
+                }
+                Value::Array(a) => a.iter_mut().for_each(strip),
+                _ => {}
+            }
+        }
+        let mut v = serde_json::to_value(rec).unwrap();
+        strip(&mut v);
+        v
+    }
+
+    /// `want` and `got` agree: ints exact, reals within `tol`, tolerances and EXTENT excepted.
+    fn same_arrays(at: &str, want: &Arrays, got: &Arrays, tol: f64) {
+        assert_eq!(want.ints.keys().collect::<Vec<_>>(), got.ints.keys().collect::<Vec<_>>(), "{at}: int arrays");
+        for (id, v) in &want.ints {
+            assert_eq!(v, &got.ints[id], "{at}: int array {id}");
+        }
+        assert_eq!(want.reals.keys().collect::<Vec<_>>(), got.reals.keys().collect::<Vec<_>>(), "{at}: real arrays");
+        for (id, v) in &want.reals {
+            if [TOLERANCE, EXTENT, EDGE_TOLERANCE, VERTEX_TOLERANCE].contains(id) {
+                assert_eq!(v.len(), got.reals[id].len(), "{at}: real array {id} length");
+                continue;
+            }
+            let (x, y) = (serde_json::to_value(v).unwrap(), serde_json::to_value(&got.reals[id]).unwrap());
+            close(&x, &y, tol, &format!("{at}: real array {id}"));
+        }
+    }
+
+    /// [`same_arrays`], and their records the same, valid and with tolerances excepted.
+    fn same_records(at: &str, want: &Arrays, got: &Arrays, tol: f64) -> b::Brep {
+        same_arrays(at, want, got, tol);
+        let ((w, _), (g, _)) = (native(want).unwrap(), native(got).unwrap());
+        w.validate().unwrap();
+        g.validate().unwrap();
+        close(&without_tolerances(&w), &without_tolerances(&g), tol, at);
+        w
+    }
+
+    /// The three crossings of `theirs`: the C++ kernel's own, solidcore's, and solidcore's arrays
+    /// back through the C++ kernel.
+    fn crossings(theirs: &Arrays) -> [Arrays; 3] {
+        let own = Flat::from_arrays(theirs).unwrap().import().unwrap().cpp_arrays().unwrap();
+        let ours = to_arrays(&from_arrays(theirs).unwrap()).unwrap();
+        let back = Flat::from_arrays(&ours).unwrap().import().unwrap().cpp_arrays().unwrap();
+        [own, ours, back]
+    }
+
+    /// Arrays the record cannot say (wire and point shells): the crossings' arrays only.
+    fn crosses_as_arrays(name: &str, theirs: &Arrays) {
+        let [own, ours, back] = crossings(theirs);
+        same_arrays(&format!("{name}, solidcore's arrays"), &own, &ours, 1e-12);
+        same_arrays(&format!("{name}, back through C++"), &own, &back, 1e-12);
+    }
+
+    /// `cpp` across: returns its record, for the case to say what it holds.
+    fn crosses(name: &str, cpp: &Brep) -> b::Brep {
+        let theirs = cpp.cpp_arrays().unwrap();
+        let [own, ours, back] = crossings(&theirs);
+        same_records(&format!("{name}, solidcore's arrays"), &own, &ours, 1e-12);
+        same_records(&format!("{name}, back through C++"), &own, &back, 1e-12);
+        same_records(&format!("{name}, the arrays that went in"), &theirs, &ours, FIRST_CROSSING)
+    }
+
+    /// [`crosses`], and solidcore measures the C++ kernel's volume.
+    fn crosses_with_volume(name: &str, cpp: &Brep) -> b::Brep {
+        let rec = crosses(name, cpp);
+        let body = from_arrays(&cpp.cpp_arrays().unwrap()).unwrap();
+        let (v, want) = (volume(&body, 1e-8).unwrap(), ffi::volume(cpp.cpp().unwrap(), 1e-8).unwrap());
+        assert!(rel(v, want) < 1e-7, "{name}: solidcore {v} vs C++ {want}");
+        rec
+    }
+
+    fn has_face(rec: &b::Brep, f: impl Fn(&b::Face) -> bool) -> bool {
+        rec.faces.iter().any(f)
+    }
+
+    /// A 20 mm box with three edges at one corner rounded: rolling-ball faces and a corner patch,
+    /// on an operation's tolerances.
+    #[test]
+    fn a_filleted_box() {
+        let a = cpp_box([0.0; 3], [20.0; 3]);
+        let edges = [[10.0, 0.0, 0.0], [0.0, 10.0, 0.0], [0.0, 0.0, 10.0]];
+        let f = Brep::made(ffi::ops::pick_op(ffi::ops::Pick::Fillet, a.cpp().unwrap(), &edges, PICK_TOL, 2.0).unwrap());
+        let rec = crosses_with_volume("filleted box", &f);
+        assert!(rec.faces.len() > 6, "{}", rec.faces.len());
+    }
+
+    /// A plate with a round hole: inner loops, and a cylinder face looking at its axis.
+    #[test]
+    fn a_holed_plate() {
+        let p = cut(&cpp_box([0.0; 3], [40.0, 30.0, 5.0]), &cpp_cylinder([20.0, 15.0, -1.0], 6.0, 7.0));
+        let rec = crosses_with_volume("holed plate", &p);
+        assert!(has_face(&rec, |f| f.loops.len() > 1), "no inner loop");
+    }
+
+    /// A square swept along a cubic B-spline path: B-spline walls that are nothing analytic.
+    #[test]
+    fn a_swept_nurbs_face() {
+        let c = [[-2.0, -2.0, 0.0], [2.0, -2.0, 0.0], [2.0, 2.0, 0.0], [-2.0, 2.0, 0.0]];
+        let square: Vec<Curve> = (0..4).map(|i| Curve::Line { start: c[i], end: c[(i + 1) % 4] }).collect();
+        let points = [[0.0, 0.0, 0.0, 1.0], [0.0, 10.0, 20.0, 1.0], [10.0, -10.0, 40.0, 1.0], [10.0, 0.0, 60.0, 1.0]];
+        let path = [Curve::Nurbs { degree: 3, points: points.to_vec(), knots: vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0] }];
+        let s = on_cpp(|| Brep::sweep(&square, &path, SweepFrame::Follow, true));
+        let rec = crosses_with_volume("swept square", &s);
+        assert!(has_face(&rec, |f| matches!(f.surface, b::Surface::Spline { .. } | b::Surface::RationalSpline { .. })), "no NURBS face");
+    }
+
+    /// A cylinder sliced by a plane leaning 45 degrees: the cut's edge an ellipse.
+    #[test]
+    fn an_ellipse_edge() {
+        let cyl = cpp_cylinder([0.0, 0.0, -30.0], 5.0, 60.0);
+        let (s, c) = std::f64::consts::FRAC_PI_4.sin_cos();
+        // About y through the origin; the box's underside is the plane z = 0 turned.
+        let turn = [[c, 0.0, s, 0.0], [0.0, 1.0, 0.0, 0.0], [-s, 0.0, c, 0.0], [0.0, 0.0, 0.0, 1.0]];
+        let tool = Brep::made(ffi::transform(cpp_box([-50.0, -50.0, 0.0], [100.0; 3]).cpp().unwrap(), &turn).unwrap());
+        let rec = crosses_with_volume("leaning cut", &cut(&cyl, &tool));
+        assert!(rec.edges.iter().any(|e| matches!(e.curve, b::Curve::Ellipse { .. })), "no ellipse edge");
+    }
+
+    /// A 20 mm box with a 10 mm void sealed inside: two shells in the solid's region.
+    #[test]
+    fn a_sealed_void() {
+        let v = cut(&cpp_box([-10.0; 3], [20.0; 3]), &cpp_box([-5.0; 3], [10.0; 3]));
+        let rec = crosses_with_volume("sealed void", &v);
+        assert!(rec.regions.iter().any(|r| r.shells.len() == 2), "{:?}", rec.regions);
+        assert!(rec.regions.iter().any(|r| r.void), "{:?}", rec.regions);
+    }
+
+    /// One planar face, and an open extrusion: a sheet's shells, no solid.
+    #[test]
+    fn sheets() {
+        let c = [[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [10.0, 6.0, 0.0], [0.0, 6.0, 0.0]];
+        let rect: Vec<Curve> = (0..4).map(|i| Curve::Line { start: c[i], end: c[(i + 1) % 4] }).collect();
+        let rec = crosses("planar sheet", &on_cpp(|| Brep::planar_faces(&rect)));
+        assert_eq!(rec.faces.len(), 1);
+        let open = on_cpp(|| Brep::extrude(&rect, [0.0, 0.0, 1.0], 5.0, 0.0, DraftCorner::default(), false));
+        let rec = crosses("open extrusion", &open);
+        assert_eq!(rec.faces.len(), 4);
+    }
+
+    /// A C++ box's arrays with one wire edge of each kind (a line, a whole circle, a half ellipse,
+    /// a cubic B-spline) and one point, each a shell of its own in the infinite region. The C API
+    /// gives no body without a face (`take`), so these lie beside a box.
+    fn box_with_wires_and_a_point() -> Arrays {
+        let tau = std::f64::consts::TAU;
+        let mut a = cpp_box([20.0; 3], [5.0; 3]).cpp_arrays().unwrap();
+        let first_new = a.ints[&flat::VERTEX_POINT_TYPE].len() as i64;
+        a.ints.get_mut(&flat::REGION_SHELL_COUNT).unwrap()[0] += 5;
+        for (id, v) in
+            [(flat::SHELL_FACEUSE_COUNT, [0, 0, 0, 0, 0]), (flat::SHELL_WIRE_EDGE_COUNT, [1, 1, 1, 1, 0]), (flat::SHELL_POINT_TYPE, [0, 0, 0, 0, 1])]
+        {
+            a.ints.get_mut(&id).unwrap().splice(1..1, v);
+        }
+        a.ints.insert(
+            flat::WIRE_EDGE_CURVE_TYPE,
+            [flat::CURVE_LINE, flat::CURVE_CIRCLE, flat::CURVE_ELLIPSE, flat::CURVE_NURBS].map(i64::from).to_vec(),
+        );
+        a.ints.insert(flat::WIRE_EDGE_VERTICES, [0, 1, 2, 2, 3, 4, 5, 6].map(|v| first_new + v).to_vec());
+        a.ints.insert(flat::WIRE_EDGE_NURBS_VERTEX_COUNT, vec![4]);
+        a.ints.insert(flat::WIRE_EDGE_NURBS_ORDER, vec![4]);
+        let points = [[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [4.0, 0.0, 5.0], [3.0, 0.0, -5.0], [-3.0, 0.0, -5.0], [0.0, 9.0, 0.0], [9.0, 9.0, 3.0]];
+        a.ints.get_mut(&flat::VERTEX_POINT_TYPE).unwrap().extend([1; 7]);
+        a.reals.get_mut(&flat::VERTEX_POSITION).unwrap().extend(points.concat());
+        let base = a.reals[&TOLERANCE][0];
+        a.reals.get_mut(&VERTEX_TOLERANCE).unwrap().extend([base; 7]);
+        let reals: [(i32, Vec<f64>); 17] = [
+            (flat::SHELL_POINT_POSITION, vec![1.0, 2.0, 3.0]),
+            (flat::WIRE_EDGE_RANGE, vec![0.0, 10.0, 0.0, tau, 0.0, std::f64::consts::PI, 0.0, 1.0]),
+            (flat::WIRE_EDGE_LINE_ORIGIN, vec![0.0; 3]),
+            (flat::WIRE_EDGE_LINE_DIRECTION, vec![1.0, 0.0, 0.0]),
+            (flat::WIRE_EDGE_CIRCLE_CENTER, vec![0.0, 0.0, 5.0]),
+            (flat::WIRE_EDGE_CIRCLE_AXIS, vec![0.0, 0.0, 1.0]),
+            (flat::WIRE_EDGE_CIRCLE_REF_DIRECTION, vec![1.0, 0.0, 0.0]),
+            (flat::WIRE_EDGE_CIRCLE_RADIUS, vec![4.0]),
+            (flat::WIRE_EDGE_ELLIPSE_CENTER, vec![0.0, 0.0, -5.0]),
+            (flat::WIRE_EDGE_ELLIPSE_AXIS, vec![0.0, 0.0, 1.0]),
+            (flat::WIRE_EDGE_ELLIPSE_REF_DIRECTION, vec![1.0, 0.0, 0.0]),
+            (flat::WIRE_EDGE_ELLIPSE_X_RADIUS, vec![3.0]),
+            (flat::WIRE_EDGE_ELLIPSE_Y_RADIUS, vec![2.0]),
+            (flat::WIRE_EDGE_NURBS_CVS, [points[5], [3.0, 12.0, 0.0], [6.0, 6.0, 2.0], points[6]].concat()),
+            (flat::WIRE_EDGE_NURBS_KNOTS, vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0]),
+            (flat::WIRE_EDGE_NURBS_WEIGHTS, Vec::new()),
+            (EXTENT, vec![-3.0, 0.0, -5.0, 25.0, 25.0, 25.0]),
+        ];
+        a.reals.extend(reals);
+        a
+    }
+
+    /// Wire edges no face uses and a point shell. The record says no such shell from SMLib, so
+    /// arrays only.
+    #[test]
+    fn wire_edges_and_a_point_shell() {
+        let theirs = Flat::from_arrays(&box_with_wires_and_a_point()).unwrap().import().unwrap().cpp_arrays().unwrap();
+        assert_eq!(theirs.ints[&flat::WIRE_EDGE_CURVE_TYPE].len(), 4);
+        assert_eq!(theirs.reals[&flat::SHELL_POINT_POSITION], [1.0, 2.0, 3.0]);
+        crosses_as_arrays("wire edges and a point", &theirs);
+    }
+
+    /// Two boxes apart, united: two lumps.
+    #[test]
+    fn a_multi_lump_body() {
+        let (a, b) = (cpp_box([0.0; 3], [10.0; 3]), cpp_box([30.0, 0.0, 0.0], [5.0; 3]));
+        let u = Brep::made(ffi::ops::boolean(a.cpp().unwrap(), b.cpp().unwrap(), ffi::ops::BOOLEAN_UNION).unwrap());
+        let rec = crosses_with_volume("two lumps", &u);
+        assert_eq!(ffi::ops::solid_count(u.cpp().unwrap()).unwrap(), 2);
+        assert_eq!(rec.faces.len(), 12);
+    }
+
+    /// A rounded box shelled: faces on the offsets of its rounds, on the operation's tolerances.
+    #[test]
+    fn a_shelled_rounded_box() {
+        let a = cpp_box([0.0; 3], [20.0; 3]);
+        let r = ffi::ops::pick_op(ffi::ops::Pick::Fillet, a.cpp().unwrap(), &[[10.0, 0.0, 0.0]], PICK_TOL, 2.0).unwrap();
+        let s = Brep::made(ffi::ops::pick_op(ffi::ops::Pick::Shell, &r, &[[10.0, 10.0, 20.0]], PICK_TOL, -1.0).unwrap());
+        crosses_with_volume("shelled rounded box", &s);
+    }
+}
