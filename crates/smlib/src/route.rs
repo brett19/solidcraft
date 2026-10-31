@@ -1,16 +1,17 @@
-//! Which kernel answers each operation: the C++ SMLib fork, or solidcore, its Rust port.
+//! Which kernel answers each operation: solidcore, the Rust port of SMLib, unless the C++ SMLib
+//! fork is asked for.
 //!
-//! [`Op::route`] is the routing table. An operation moves to solidcore only once solidcore
-//! matches the C++ kernel on the kernel-case rig (`cargo xtask kernel-cases --kernel both`), and
-//! the commit that moves it records the scores. A call that fails on solidcore fails: there is no
-//! fallback to C++ at run time, which would hide solidcore's bugs.
+//! [`Op::route`] is the routing table, and every family on it runs on solidcore. The C++ kernel is
+//! an opt-in: for a test, a rig or a user who wants the old behaviour. A call that fails on solidcore
+//! fails, and a path solidcore has no answer for says it is not supported: there is no fallback to
+//! C++ at run time, which would hide solidcore's bugs.
 //!
 //! `SOLIDCRAFT_KERNEL=smlib|solidcore` sends every operation to one kernel for the whole process
 //! (the rig, the test matrix); otherwise the preference ([`set_choice`]) does, and its default
 //! follows the table.
 //!
-//! `SOLIDCRAFT_KERNEL_ROUTES=<op>=<backend>[,…]` (for example `boolean=solidcore,measure=solidcore`)
-//! then moves single families on top of that choice, so the rig can score one family at a time
+//! `SOLIDCRAFT_KERNEL_ROUTES=<op>=<backend>[,…]` (for example `boolean=smlib,measure=smlib`) then
+//! moves single families on top of that choice, so the rig can score one family at a time
 //! ([`Overrides`]). `.smb` files stay on SMLib whatever either says.
 
 use std::sync::OnceLock;
@@ -40,7 +41,7 @@ impl Backend {
     }
 }
 
-/// The operation families the table routes, in the order they move to solidcore.
+/// The operation families the table routes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Op {
     /// A schema 4 record into a kernel body, and back (`from_record`, `to_native`).
@@ -122,18 +123,13 @@ impl Op {
         Op::ALL.iter().position(|op| *op == self).unwrap_or(0)
     }
 
-    /// The routing table: the kernel each family runs on when nothing overrides it. A family
-    /// stays on SMLib until the rig shows solidcore's parity for it.
+    /// The routing table: the kernel each family runs on when nothing overrides it. Every family
+    /// is on solidcore; the C++ kernel is asked for ([`Choice`], [`Overrides`]), never defaulted to.
     pub fn route(self) -> Backend {
         match self {
-            // At parity on the rig, routed alone: 469 of 469 cases agree (solidcore 3546c9bc); as
-            // the default, 449 of 479 pass against SMLib-only 445, none worse.
-            Op::Primitive => Backend::Solidcore,
-            // On the rig, routed alone: 450 of 479 pass against SMLib's 449; 478 agree, and the
-            // other (fillets/1557) fails on SMLib and passes on solidcore. As the default with
-            // primitives (solidcore 3c17ddb1): 450 of 479 against SMLib-only 449, none worse.
-            Op::Convert => Backend::Solidcore,
-            Op::Transform
+            Op::Convert
+            | Op::Primitive
+            | Op::Transform
             | Op::Measure
             | Op::Check
             | Op::Boolean
@@ -143,8 +139,8 @@ impl Op {
             | Op::Sweep
             | Op::History
             | Op::Ssi
-            | Op::Flat
-            | Op::File => Backend::Smlib,
+            | Op::Flat => Backend::Solidcore,
+            Op::File => Backend::Smlib,
         }
     }
 
