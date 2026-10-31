@@ -316,6 +316,8 @@ static KERNEL: Mutex<Option<Kernel>> = Mutex::new(None);
 pub(crate) fn run<T>(call: &'static str, f: impl FnOnce(&mut Kernel) -> std::result::Result<T, solidcore::SolidError>) -> Result<T> {
     let mut guard = KERNEL.lock().unwrap_or_else(PoisonError::into_inner);
     let k = guard.get_or_insert_with(fresh);
+    // A profiler span per call, as the C API's calls are: where the kernel's time goes.
+    let _span = solidcraft_profile::span("solidcore", call);
     match catch_unwind(AssertUnwindSafe(|| f(k))) {
         Ok(Ok(v)) => Ok(v),
         Ok(Err(e)) => Err(Error::Solidcore(format!("{call}: {e}"))),
