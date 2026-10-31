@@ -20,8 +20,7 @@
 //! continue.
 //!
 //! An untrim of a face out of its body (`in_place` false) copies the face into a body of its own
-//! through `SmBrep::CopyFaces` with the merge; solidcore's copies nothing yet (the merge copy's
-//! failure is ignored), so that path is [`Error::Unsupported`] until it does.
+//! through `SmBrep::CopyFaces` with the merge (solidcore#1872), which keeps its attributes.
 
 use std::sync::PoisonError;
 
@@ -322,9 +321,8 @@ pub(crate) fn untrim_face(body: &Body, point: [f64; 3], tol: f64, holes: Option<
                 Ok((c, _)) => c,
                 Err(e) => return Ok(Err(status(e))),
             };
-            // solidcore's CopyFaces through the merge copies nothing yet (its merge copy's
-            // failure is ignored): not supported until it does.
-            let [f] = copied.as_slice() else { return Ok(Err(Error::Unsupported)) };
+            // The capi's `copied.GetSize() != 1`: `SMLIB_ERR_EMPTY`.
+            let [f] = copied.as_slice() else { return Ok(Err(Error::Empty)) };
             w.refresh_cached_topology();
             (w, Some(*f))
         };
