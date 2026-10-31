@@ -673,6 +673,25 @@ fn a_draft_past_the_neighbours_meeting_is_unsupported_as_on_cpp() {
     assert_eq!(draft(prism.core().unwrap(), &tip, TOL, origin, z, z, angle).err(), Some(Error::Unsupported));
 }
 
+/// A flat L of two faces thickened by 2 with mitred walls: 2 x 10 x (20 + 22), as the C++ kernel
+/// makes it.
+#[cfg(feature = "native")]
+#[test]
+#[ignore = "thicken_planar_side_walls fails it: Unported \"SmFace handle of a surface's face\" (write-up review-1031/bugs/thicken-l-sheet-unported.md, not filed yet)"]
+fn an_l_sheet_thickens_as_on_cpp() {
+    use crate::sweeps::{Curve, DraftCorner};
+    use crate::{Brep, ffi};
+    crate::init().unwrap();
+    let l = [Curve::Line { start: [0.0; 3], end: [20.0, 0.0, 0.0] }, Curve::Line { start: [20.0, 0.0, 0.0], end: [20.0, 20.0, 0.0] }];
+    crate::sweeps::ON_CPP.with(|c| c.set(true));
+    let sheet = Brep::extrude(&l, [0.0, 0.0, 1.0], 10.0, 0.0, DraftCorner::default(), false).unwrap();
+    crate::sweeps::ON_CPP.with(|c| c.set(false));
+    let cpp = ffi::ops::thicken(sheet.cpp().unwrap(), 2.0, false).unwrap();
+    assert!(rel(ffi::volume(&cpp, 1e-8).unwrap(), 840.0) < 1e-9);
+    let core = thicken(sheet.core().unwrap(), 2.0, false).unwrap();
+    assert!(rel(volume(&core, 1e-8).unwrap(), 840.0) < 1e-9);
+}
+
 /// Face and edge tags (`Brep::tagged`) through offsets routed to solidcore, as on C++: the box is
 /// tagged on the C++ kernel, its solidcore body converted from that and tagged the same way, and
 /// the two results' histories must be the same.
