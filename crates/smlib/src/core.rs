@@ -229,6 +229,13 @@ pub(crate) fn fixes() -> UpstreamFixes {
     f.glue_vertices_joins_every_region = true;
     f.fillet_nx1_tangent_side_edge_same_convexity = true;
     f.fillet_removal_takes_ring_fillets = true;
+    // The fork's commits that reached `SMLIB_REV` at eaa998a (tangency-labs/smlib#68, #69, #70).
+    f.fillet_trim_inside_by_best_dot = true;
+    f.fillet_half_degree_crease = true;
+    f.fillet_split_edge_keeps_near_half = true;
+    f.good_drop_result_distances_in_order = true;
+    f.face_tight_box_searches_trim = true;
+    f.curve_loop_normal_from_area = true;
     f
 }
 
@@ -236,32 +243,28 @@ pub(crate) fn fixes() -> UpstreamFixes {
 /// them on would part this backend from the C++ one. `precise_properties_trim_base_v`
 /// (solidcore#1664, WR-563), `bspline_trim_keeps_rational_end_spans` (solidcore#1711, WR-575) and
 /// `fillet_blend_curve_revolved_on_arc` (solidcore#1759, WR-581, an own design waiting for the
-/// fork's fix) have no fork commit. `face_tight_box_searches_trim` (solidcore#1811, WR-588) is the
-/// fork's beb6061, which landed after `SMLIB_REV` (tangency-labs/smlib#68). `fillet_trim_status`
-/// (solidcore#674, WR-604) has no fork commit. `temporary_radius_setup_errors` (solidcore#644, #458),
-/// `ellipse_step_interval_checks` (solidcore#686, #428) and `perspective_sphere_offsets`
-/// (solidcore#684, WR-608, #525) are the port's own fixes with no fork commit; the C++ build keeps
-/// upstream's behaviour there, as for `curve_loop_normal_from_area` (solidcore#1779, WR-587, #1776).
-/// `fillet_trim_inside_by_best_dot` (WR-611, fork de4dae6), `fillet_half_degree_crease` (WR-621,
-/// fork 2e8758b), `fillet_split_edge_keeps_near_half` (WR-612, fork ceb3272) and
-/// `good_drop_result_distances_in_order` (WR-56, fork 0b4de8c) port fork commits that are not in
-/// `SMLIB_REV`; `corner_patch_face_side_twist` (WR-613, fork 7fd9fb0) ports a fork commit that is
-/// not published.
+/// fork's fix) have no fork commit. `fillet_trim_status` (solidcore#674, WR-604) has no fork
+/// commit. `temporary_radius_setup_errors` (solidcore#644, #458), `ellipse_step_interval_checks`
+/// (solidcore#686, #428) and `perspective_sphere_offsets` (solidcore#684, WR-608, #525) are the
+/// port's own fixes with no fork commit; the C++ build keeps upstream's behaviour there.
+/// `corner_patch_face_side_twist` (WR-613, fork 7fd9fb0) ports a fork commit that is not
+/// published.
+///
+/// On since `SMLIB_REV` eaa998a: `fillet_trim_inside_by_best_dot` (fork de4dae6),
+/// `fillet_half_degree_crease` (2e8758b), `fillet_split_edge_keeps_near_half` (ceb3272),
+/// `good_drop_result_distances_in_order` (0b4de8c, landed as eaa998a), `curve_loop_normal_from_area`
+/// (be45e8d) and `face_tight_box_searches_trim` (beb6061; the fork's follow-up 326de73, dividing a
+/// cell at the surface's knots, is not in solidcore yet, so a screw sweep's tight box can still
+/// differ).
 #[cfg(test)]
 const HELD_BACK: &[&str] = &[
     "precise_properties_trim_base_v",
     "bspline_trim_keeps_rational_end_spans",
     "fillet_blend_curve_revolved_on_arc",
-    "face_tight_box_searches_trim",
     "fillet_trim_status",
     "temporary_radius_setup_errors",
     "ellipse_step_interval_checks",
     "perspective_sphere_offsets",
-    "curve_loop_normal_from_area",
-    "fillet_trim_inside_by_best_dot",
-    "fillet_half_degree_crease",
-    "fillet_split_edge_keeps_near_half",
-    "good_drop_result_distances_in_order",
     "corner_patch_face_side_twist",
 ];
 
