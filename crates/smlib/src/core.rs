@@ -251,6 +251,8 @@ pub(crate) fn fixes() -> UpstreamFixes {
 /// not published.
 #[cfg(test)]
 const HELD_BACK: &[&str] = &[
+    // WR-619, #1794: "own design, not in the fork" (no commit in fork 68fb9162).
+    "boolean_union_refuses_solid_leak",
     "precise_properties_trim_base_v",
     "bspline_trim_keeps_rational_end_spans",
     "fillet_blend_curve_revolved_on_arc",
