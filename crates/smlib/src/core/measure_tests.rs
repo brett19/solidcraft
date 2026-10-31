@@ -274,6 +274,7 @@ primitive!(torus, "torus");
 
 /// The head of each report line, `<reporting type>::Test #<n>`, or the whole line for the capi's
 /// own lines (a failed status without a report, a skipped AssertValid).
+#[cfg(feature = "native")]
 fn tests_of(text: &str) -> Vec<&str> {
     text.lines().map(|l| l.find(" #").and_then(|i| l[i + 2..].find(' ').map(|j| &l[..i + 2 + j])).unwrap_or(l)).collect()
 }
@@ -374,5 +375,31 @@ fn a_sealed_void_measures_its_volume() {
         assert_eq!(solid_count(&b).unwrap(), 1, "{at}");
         #[cfg(feature = "native")]
         same(m.volume, theirs, theirs, &format!("{at} volume"));
+    }
+}
+
+/// Two 10 mm squares apart in z = 0, one body of two faces with a shell each (as the top and
+/// front of a box offset apart across their edge make, kernel case
+/// `surfaces/cov-offset-two-faces-across-a-sharp-edge-come-apart`): `SmBrep` test 21,
+/// "Suspicious Shell Count", warns of it, and the capi's check (`advisory`) counts no warning.
+#[test]
+fn faces_apart_with_a_shell_each_check_valid() {
+    use solidcore::geom::axis2_placement::Axis2Placement;
+    use solidcore::geom::vector3d::Vec3;
+    use solidcore::primitive::primitive_creation::p1::create_rectangle;
+
+    use super::boolean::boolean2d;
+    use super::run;
+    use crate::BooleanOp;
+
+    let square = |x: f64| {
+        let frame = Axis2Placement::new(Vec3::new(x, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0));
+        run("create_rectangle", |k| create_rectangle(k, 0.0, 10.0, 10.0, &frame)).map(Body::new).unwrap()
+    };
+    let b = boolean2d(&square(0.0), &square(20.0), BooleanOp::Union).unwrap().unwrap();
+    assert_eq!(counts(&b).unwrap()[0], 2);
+    for level in [CheckLevel::Basic, CheckLevel::Geometry, CheckLevel::All] {
+        let r = check(&b, level).unwrap();
+        assert!(r.is_valid(), "{level:?}: {r}");
     }
 }

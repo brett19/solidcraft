@@ -190,10 +190,10 @@ macro_rules! cases {
 }
 
 cases!(
-    every_hole_taken_away: ignore = "solidcore's CopyFaces through the merge copies nothing: an untrim out of its body is not supported yet",
-    the_hole_at_a_point_taken_away: ignore = "solidcore's CopyFaces through the merge copies nothing: an untrim out of its body is not supported yet",
-    outer_boundary_back_hole_kept: ignore = "solidcore's CopyFaces through the merge copies nothing: an untrim out of its body is not supported yet",
-    outer_boundary_back_holes_gone: ignore = "solidcore's CopyFaces through the merge copies nothing: an untrim out of its body is not supported yet",
+    every_hole_taken_away,
+    the_hole_at_a_point_taken_away,
+    outer_boundary_back_hole_kept,
+    outer_boundary_back_holes_gone,
     a_hole_of_a_solid_in_place,
     a_point_near_no_face,
     sheet_every_hole_taken_away,

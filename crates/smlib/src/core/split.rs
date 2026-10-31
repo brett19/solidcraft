@@ -30,6 +30,7 @@ use solidcore::kernel::Kernel;
 use solidcore::nurbs::b_spline_curve::p1::KnotType;
 use solidcore::nurbs::b_spline_surface::p1::{BSplineSurface, BSplineSurfaceForm, CanonicalSurfaceData};
 use solidcore::nurbs::math::CPoint;
+use solidcore::query::brep::BrepFaceServices;
 use solidcore::query::face::p1::calculate_bounding_box;
 use solidcore::surface::cone::p1::Cone;
 use solidcore::surface::plane::p1::Plane;
@@ -43,6 +44,7 @@ use solidcore::topology::brep::p3::{new_brep, with_kernel_callbacks};
 use solidcore::topology::brep::p8::create_face_from_surface;
 use solidcore::topology::brep::p10::merge_curves_on_surface_through_surface;
 use solidcore::topology::brep::planar_section::face_planar_section_curves;
+use solidcore::topology::brep_cache::CacheObject;
 use solidcore::topology::edge::NotifyEnv;
 use solidcore::topology::face::p2 as face_p2;
 use solidcore::topology::{Brep, EdgeId, FaceId};
@@ -269,7 +271,21 @@ fn cut_face(k: &mut Kernel, b: &mut Brep, env: &mut NotifyEnv<'_>, face: FaceId,
         let uv = (section.uv_curves.len() == section.curves_3d.len()).then_some(section.uv_curves);
         return merge(k, b, env, section.curves_3d, uv);
     }
-    let found = match surface.global_surface_intersect(k, &domain, &tool.surface, &tool.domain, [true, true], Some(approx), None) {
+    // `face->GetSurface()` reaches its face's trimmed cache: the solve runs through the B-rep's
+    // face services, as solidcore's own face intersections do (a face-owned surface has no cache
+    // of its own).
+    let mut services = BrepFaceServices::new(&mut *b);
+    let found = match surface.global_surface_intersect_with_context(
+        k,
+        [Some(CacheObject::Surface(face)), None],
+        &mut services,
+        &domain,
+        &tool.surface,
+        &tool.domain,
+        [true, true],
+        Some(approx),
+        None,
+    ) {
         Ok(f) => f,
         Err(e) => return Ok(Err(status(e))),
     };
