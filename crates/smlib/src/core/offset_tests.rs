@@ -18,7 +18,7 @@ use solidcore::geom::vector3d::Vec3;
 use solidcore::primitive::api_curves::create_line_segment;
 use solidcore::sweep::api_brep::create_linear_sweep;
 
-use super::offset::{draft, offset_faces, offset_sheet, shell, thicken};
+use super::offset::{draft, mark_moved, moved_faces, offset_faces, offset_sheet, shell, thicken};
 use super::{Body, area, bounds, counts, make_box, make_cylinder, make_sphere, run, to_arrays, volume};
 use crate::export::native;
 use crate::{BooleanOp, Error};
@@ -573,6 +573,84 @@ fn a_solidcore_error_in_a_pick_is_an_error() {
     assert!(matches!(other, Err(SolidError::InvalidInput { .. })), "{other:?}");
     let unported = pick(&all, &points, 1.0, 1e-6, |i, _| answer(if i == 0 { Err(SolidError::unported("Sm::X", "u")) } else { Ok(0.5) }));
     assert!(matches!(unported, Err(SolidError::Unported { .. })), "{unported:?}");
+}
+
+/// The capi's `moved_faces` reading: no mark, no move (SMLIB_ERR_NO_EFFECT); a mark is read once,
+/// and gone.
+#[test]
+fn a_draft_with_no_marked_face_left_has_no_effect() {
+    let body = make_box([0.0; 3], [10.0; 3]).unwrap();
+    super::with_body("marks", &body, |_, w| {
+        assert!(!moved_faces(w)?, "no face marked");
+        let f = w.face_list()[0];
+        mark_moved(w, &[f])?;
+        assert!(moved_faces(w)?, "a face marked");
+        assert!(!moved_faces(w)?, "the mark removed");
+        Ok(())
+    })
+    .unwrap();
+}
+
+/// A draft leaves no mark of its own on what it returns, on a plane or on a cylinder turned cone.
+#[test]
+fn a_draft_leaves_no_mark() {
+    let z = [0.0, 0.0, 1.0];
+    let bx = make_box([0.0; 3], [20.0, 30.0, 10.0]).unwrap();
+    let plane = draft(&bx, &[[10.0, 0.0, 5.0]], TOL, [0.0; 3], z, z, 0.1).unwrap();
+    let cyl = make_cylinder([0.0; 3], 5.0, 10.0).unwrap();
+    let cone = draft(&cyl, &[[5.0, 0.0, 5.0]], TOL, [0.0; 3], z, z, 0.1).unwrap();
+    for b in [plane, cone] {
+        super::with_body("marks", &b, |_, w| {
+            assert!(!moved_faces(w)?);
+            Ok(())
+        })
+        .unwrap();
+    }
+}
+
+/// `moved_faces` on both kernels: drafts so small they leave a plane or cylinder where it was
+/// still moved a face (SMLib's mark and solidcore's both stay on it), an angle that brings a wall
+/// onto the plane of the wall above it leaves the two faces apart, and no draft here is
+/// SMLIB_ERR_NO_EFFECT on either: the same answer, volume and counts. The C++ check holds a local
+/// operation to what it promised and no body found so far trips it.
+#[cfg(feature = "native")]
+#[test]
+fn a_draft_moves_a_face_as_on_cpp() {
+    use crate::sweeps::{Curve, DraftCorner};
+    use crate::{Brep, ffi};
+    crate::init().unwrap();
+    let z = [0.0, 0.0, 1.0];
+    let make = |h: ffi::Handle| Brep::made(h);
+    let plate = make(ffi::make_box(&[0.0; 3], &[40.0, 40.0, 10.0]).unwrap());
+    let rod = make(ffi::make_cylinder(&[20.0, 20.0, -5.0], 5.0, 30.0).unwrap());
+    let holed = make(ffi::ops::boolean(plate.cpp().unwrap(), rod.cpp().unwrap(), ffi::ops::BOOLEAN_SUBTRACT).unwrap());
+    let pinned = make(ffi::ops::boolean(plate.cpp().unwrap(), rod.cpp().unwrap(), ffi::ops::BOOLEAN_UNION).unwrap());
+    let t = 5f64.to_radians().tan();
+    // A wall x = 20 up to z = 10, then a wall leaning in 5 degrees: the lower wall turned 5
+    // degrees about z = 10 lies on the upper one's plane.
+    let p = [[0.0, 0.0, 0.0], [20.0, 0.0, 0.0], [20.0, 0.0, 10.0], [20.0 - 10.0 * t, 0.0, 20.0], [0.0, 0.0, 20.0]];
+    let profile: Vec<Curve> = (0..5).map(|i| Curve::Line { start: p[i], end: p[(i + 1) % 5] }).collect();
+    crate::sweeps::ON_CPP.with(|c| c.set(true));
+    let leaning = Brep::extrude(&profile, [0.0, 1.0, 0.0], 10.0, 0.0, DraftCorner::default(), true).unwrap();
+    crate::sweeps::ON_CPP.with(|c| c.set(false));
+    let five = 5f64.to_radians();
+    let cases: [(&str, &Brep, [f64; 3], [f64; 3], f64); 7] = [
+        ("tiny on a plane", &plate, [20.0, 0.0, 5.0], [0.0; 3], 1e-14),
+        ("tiny on a hole", &holed, [25.0, 20.0, 5.0], [0.0, 0.0, 5.0], 1e-14),
+        ("tiny on a pin", &pinned, [25.0, 20.0, 20.0], [0.0, 0.0, 5.0], -1e-14),
+        ("small on a hole", &holed, [25.0, 20.0, 5.0], [0.0, 0.0, 5.0], 1e-6),
+        ("onto the wall above", &leaning, [20.0, 5.0, 5.0], [0.0, 0.0, 10.0], five),
+        ("away from the wall above", &leaning, [20.0, 5.0, 5.0], [0.0, 0.0, 10.0], -five),
+        ("hinged far off", &plate, [20.0, 0.0, 5.0], [0.0, 0.0, 1000.0], five),
+    ];
+    for (name, b, at, origin, angle) in cases {
+        let cpp = ffi::ops::draft(b.cpp().unwrap(), &[at], TOL, &origin, &z, &z, angle).unwrap();
+        let (v, n) = (ffi::volume(&cpp, 1e-8).unwrap(), ffi::counts(&cpp).unwrap().map(|x| usize::try_from(x).unwrap()));
+        let core = draft(b.core().unwrap(), &[at], TOL, origin, z, z, angle).unwrap();
+        let w = volume(&core, 1e-8).unwrap();
+        assert!(rel(w, v) < 1e-9, "{name}: solidcore {w} vs C++ {v}");
+        assert_eq!(counts(&core).unwrap(), n, "{name}");
+    }
 }
 
 /// Face and edge tags (`Brep::tagged`) through offsets routed to solidcore, as on C++: the box is
