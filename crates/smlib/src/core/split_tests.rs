@@ -292,3 +292,62 @@ mod history {
         assert_eq!(core.canonical(), cpp.canonical());
     }
 }
+
+/// A one-face sheet on a B-spline surface (as SolidCraft's extrude of a sketch spline makes it:
+/// the cubic through (0, 0), (13, -8), (27, 8), (40, 0) in x and z, straight along y over
+/// [0, 40]) cut by four plane strips standing on the square [12, 28]^2: the strips meet the
+/// face inside its bounds, so the face's surface is intersected through its face's trimmed
+/// cache. The square comes out as a face of its own, the sheet holed by it.
+#[test]
+fn a_spline_sheet_is_cut_by_strips_inside_it() {
+    use solidcore::geom::tol::USE_DEFAULT;
+    use solidcore::geom::vector3d::Vec3;
+    use solidcore::nurbs::b_spline_curve::p1::KnotType;
+    use solidcore::nurbs::b_spline_surface::p1::{BSplineSurface, BSplineSurfaceForm, CanonicalSurfaceData};
+    use solidcore::surface::surface::Surface;
+    use solidcore::topology::brep::p3::new_brep;
+    use solidcore::topology::brep::p8::create_face_from_surface;
+    // Control points u-major: the curve's four, each at y = 0 and y = 40.
+    let curve = [[0.0, 0.0], [13.0, -8.0], [27.0, 8.0], [40.0, 0.0]];
+    let pts: Vec<Vec3> = curve.iter().flat_map(|[x, z]| [Vec3::new(*x, 0.0, *z), Vec3::new(*x, 40.0, *z)]).collect();
+    let sheet = super::run("sheet", |k| {
+        let surface = Surface::from(BSplineSurface::create_canonical(&CanonicalSurfaceData {
+            u_degree: 3,
+            v_degree: 1,
+            control_points: &pts,
+            form: BSplineSurfaceForm::Unspecified,
+            u_multiplicities: &[4, 4],
+            v_multiplicities: &[2, 2],
+            u_knots: &[0.0, 1.0],
+            v_knots: &[0.0, 40.0],
+            knot_type: KnotType::Unspecified,
+            weights: None,
+            uv_domain: None,
+        })?);
+        let mut b = new_brep(k, USE_DEFAULT, USE_DEFAULT)?;
+        let natural = surface.natural_uv_domain_with_nurb(k)?;
+        super::sweep::build_faces(&mut b, |s, fenv| create_face_from_surface(k, s, Some(surface), &natural, fenv))?;
+        b.refresh_cached_topology();
+        Ok(b)
+    })
+    .map(Body::new)
+    .unwrap();
+    assert_eq!(counts(&sheet).unwrap(), [1, 4, 4]);
+    let whole = area(&sheet, 1e-8).unwrap();
+    // The strip standing on the line from `o` along `d` (16 long), reaching past the sheet in z.
+    let strip = |o: [f64; 3], d: [f64; 3]| Spec::Plane { origin: o, xaxis: Z, yaxis: d, u: [-60.0, 60.0], v: [0.0, 16.0] };
+    let tools = [
+        strip([12.0, 12.0, 0.0], X),
+        strip([28.0, 12.0, 0.0], Y),
+        strip([28.0, 28.0, 0.0], [-1.0, 0.0, 0.0]),
+        strip([12.0, 28.0, 0.0], [0.0, -1.0, 0.0]),
+    ];
+    let tools: Vec<&Spec> = tools.iter().collect();
+    let (cut, made) = split_faces(&sheet, &[0], &tools).unwrap().expect("the strips cut the sheet");
+    valid("spline sheet", &cut);
+    // The square's face and the holed sheet: four edges and vertices round each.
+    assert_eq!(counts(&cut).unwrap(), [2, 8, 8]);
+    assert_eq!(made, [1]);
+    // Cutting moves no surface: the pieces cover the sheet.
+    assert!(rel(area(&cut, 1e-8).unwrap(), whole) < 1e-9);
+}
