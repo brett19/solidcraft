@@ -34,6 +34,8 @@ enum Shape {
     Box([f64; 3], [f64; 3]),
     Cylinder([f64; 3], f64, f64),
     Sphere([f64; 3], f64),
+    /// A frustum about +Z: base centre, base radius, top radius, height.
+    Frustum([f64; 3], f64, f64, f64),
     /// A sheet: the line from the first point to the second swept along `dir` by `dist`.
     LineSheet([f64; 3], [f64; 3], [f64; 3], f64),
     /// A sheet: the arc about +Z through `center` of `radius` from 0 to `degrees`, swept along
@@ -54,6 +56,7 @@ impl Shape {
             Shape::Box(o, s) => make_box(o, s).unwrap(),
             Shape::Cylinder(o, r, h) => make_cylinder(o, r, h).unwrap(),
             Shape::Sphere(o, r) => make_sphere(o, r).unwrap(),
+            Shape::Frustum(o, a, b, h) => super::make_cone(o, a, b, h).unwrap(),
             Shape::LineSheet(a, b, dir, dist) => run("sheet", |k| {
                 let c = Curve::from(create_line_segment(v3(a), v3(b))?);
                 create_linear_sweep(k, &[Some(&c)], v3(dir), dist, false)
@@ -212,6 +215,16 @@ fn case(name: &str) -> Case {
                 Expect::Volume(PI * h * (big * big + big * small + small * small) / 3.0),
             )
         }
+        // A cone r 10 at its base to 8 at its top, 20 tall, drafted 5° about its base turns its
+        // generators 5° more (fork d51a723): r 10 + 20 tan(atan(-0.1) - 5°) at the top.
+        "draft_a_cone_about_the_pull" => {
+            let (big, h, a) = (10.0, 20.0, 5f64.to_radians());
+            let small = big + h * ((-0.1f64).atan() - a).tan();
+            c(
+                Op::Draft(Shape::Frustum([0.0; 3], big, 8.0, h), vec![[0.0, 9.0, 10.0]], [0.0; 3], [0.0, 0.0, 1.0], [0.0, 0.0, 1.0], a),
+                Expect::Volume(PI * h * (big * big + big * small + small * small) / 3.0),
+            )
+        }
         // The top is square to the pull, not along it.
         "draft_a_face_across_the_pull" => {
             c(Op::Draft(BLOCK, vec![TOP], [0.0; 3], [0.0, 0.0, 1.0], [0.0, 0.0, 1.0], 0.1), Expect::Fails(Error::Unsupported))
@@ -337,6 +350,7 @@ fn cpp_case(name: &str) -> Got {
             Shape::Box(o, z) => ffi::make_box(&o, &z).map(Brep::made).unwrap(),
             Shape::Cylinder(o, r, h) => ffi::make_cylinder(&o, r, h).map(Brep::made).unwrap(),
             Shape::Sphere(o, r) => ffi::make_sphere(&o, r).map(Brep::made).unwrap(),
+            Shape::Frustum(o, a, b, h) => ffi::make_cone(&o, a, b, h).map(Brep::made).unwrap(),
             Shape::LineSheet(a, b, dir, dist) => Brep::extrude(&[line(a, b)], dir, dist, 0.0, DraftCorner::default(), false).unwrap(),
             Shape::ArcSheet(o, r, degrees, h) => {
                 let arc = crate::sweeps::Curve::Arc {
@@ -444,6 +458,7 @@ cases!(
     draft_one_side_out,
     draft_one_side_hinged_at_the_top,
     draft_a_curved_face,
+    draft_a_cone_about_the_pull,
     draft_a_face_across_the_pull,
 );
 

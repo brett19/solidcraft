@@ -10,8 +10,8 @@
 //! solid as the capi does since tangency-labs/smlib#17.
 //!
 //! A draft tilts planes and, since tangency-labs/smlib#27, turns a cylinder about the pull into
-//! a cone (solidcore's `Cone::lean_cylinder`, solidcore#1545); a cone that is not a cylinder
-//! (smlib#53) is [`Error::Unsupported`]. A draft's tilted faces go in through solidcore's
+//! a cone (solidcore's `Cone::lean_cylinder`, solidcore#1545), and since smlib#53 a cone about the
+//! pull into the cone its generators turned make. A draft's tilted faces go in through solidcore's
 //! `SmBrep::LocalOperation` ([`local_operation`]). The capi's check that it moved some face
 //! (`moved_faces`) marks the replacement surfaces; solidcore names a surface by its owning face, so
 //! the mark goes on the picked faces, which it stays with through the operation (solidcore#1875).
@@ -26,6 +26,8 @@ use solidcore::geom::vector3d::{Point3, Vec3};
 use solidcore::intersect::point_class::PointClassType;
 use solidcore::kernel::Kernel;
 use solidcore::math::Point2;
+use solidcore::nurbs::b_spline_curve::ControlPointForm;
+use solidcore::nurbs::b_spline_surface::p1::SurfParamType;
 use solidcore::nurbs::b_spline_surface_n_lib::p2::OrientType;
 use solidcore::nurbs::knots::Side;
 use solidcore::offset::offset_executive::p2::{
@@ -576,17 +578,18 @@ fn outward_normal(k: &Kernel, b: &Brep, f: FaceId, fu: FaceuseId, at: Point3) ->
     Ok(Some(n))
 }
 
-/// `drafted_cone` (tangency-labs/smlib#27): the cone a face on the cylinder `cyl` about the pull
-/// (its outward normal `n` at `inside`) becomes drafted by `angle` about its circle on the neutral
-/// plane (through `origin`, normal `normal`), so that it leans in going along `pull`: its radius
-/// R - s h tan(angle) at height h along the pull from that circle, s = 1 where the face looks
-/// away from the axis (a pin), -1 where it looks towards it (a hole). The capi moves the
-/// cylinder's NURB control points radially and lets `CopyAndAddAnalytics` find the cone;
-/// solidcore's `Cone::lean_cylinder` (solidcore#1545) is that edit, keeping the cylinder's
-/// parameters so the face's UV trims stay valid. [`Error::Unsupported`] when the pull does not
-/// run along the axis, the axis lies in the neutral plane, or the cone would close within the
-/// face's span. A cone that is not a cylinder (`drafted_cone`'s turned generators,
-/// tangency-labs/smlib#53) is [`Error::Unsupported`] too: `lean_cylinder` takes cylinders only.
+/// `drafted_cone` (tangency-labs/smlib#27, #53): the cone a face on the cone or cylinder `cyl` about
+/// the pull (its outward normal `n` at `inside`) becomes drafted by `angle` about its circle on the
+/// neutral plane (through `origin`, normal `normal`), so that it leans in going along `pull`: its
+/// generators turned by `angle` in their planes through the axis, about that circle. With R0 the
+/// radius on the neutral plane and t the slope of the radius going along the pull (0 for a
+/// cylinder), the radius h along the pull from that circle is R0 + h tan(atan(t) - s angle), s = 1
+/// where the face looks away from the axis (a pin), -1 where it looks towards it (a hole). It is
+/// the surface's own NURB with each control point moved radially by the new radius over the old at
+/// its height, so it keeps the surface's parameters and the face's UV trims stay valid: for a
+/// cylinder solidcore's `Cone::lean_cylinder` (solidcore#1545), for a cone the same edit on
+/// [`Cone::base_mut`]. [`Error::Unsupported`] when the pull does not run along the axis, the axis
+/// lies in the neutral plane, or the cone would close within the face's span.
 #[allow(clippy::too_many_arguments)] // the capi's drafted_cone
 fn drafted_cone(
     k: &Kernel,
@@ -598,10 +601,6 @@ fn drafted_cone(
     pull: Vec3,
     angle: f64,
 ) -> solidcore::Result<Out<Cone>> {
-    let bot = cyl.bot_radius();
-    if (bot - cyl.top_radius()).abs() > 1e-12 * (1.0 + bot) {
-        return Ok(Err(Error::Unsupported));
-    }
     let frame = cyl.canonical().origin;
     let z = frame.x_axis().cross(frame.y_axis());
     let len = z.length();
@@ -618,18 +617,46 @@ fn drafted_cone(
     if toward.abs() < 1e-12 {
         return Ok(Err(Error::Unsupported));
     }
-    // The hinge circle's centre: the axis on the neutral plane, at the cylinder's height v0.
+    // The hinge circle's centre: the axis on the neutral plane, at the cone's height v0.
     let v0 = (origin - axis).dot(normal) / toward;
     let centre = axis + z * v0;
     let radial = (inside - centre) - pull * (inside - centre).dot(pull);
     let s = if radial.dot(n) >= 0.0 { 1.0 } else { -1.0 };
-    // The radius changes by -s tan(angle) per unit along the pull, so by -s tan(angle) (z . pull)
-    // per unit of the cylinder's height, from its radius at v0.
-    let slope = -s * angle.tan() * sense;
-    if !slope.is_finite() {
+    // The cone's radius is linear in its height along z; along the pull it changes by `slope` per
+    // unit, and drafted by `turned`.
+    let r0 = cyl.radius(v0);
+    let slope = (cyl.radius(1.0) - cyl.radius(0.0)) * sense;
+    let turned = (slope.atan() - s * angle).tan();
+    if !(r0 > 0.0) || !turned.is_finite() {
         return Ok(Err(Error::Unsupported));
     }
-    Ok(answer(cyl.lean_cylinder(k, slope, v0))?.ok_or(Error::Unsupported))
+    if cyl.is_cylinder() {
+        return Ok(answer(cyl.lean_cylinder(k, turned * sense, v0))?.ok_or(Error::Unsupported));
+    }
+    let mut cone = cyl.clone();
+    let net = cone.base_mut();
+    let (nu, nv) = (net.number_control_points(SurfParamType::U), net.number_control_points(SurfParamType::V));
+    for i in 0..nu {
+        for j in 0..nv {
+            let Some((p, w)) = answer(net.control_point(ControlPointForm::EuclideanRational, i, j))? else {
+                return Ok(Err(Error::Unsupported));
+            };
+            let h = (p - centre).dot(pull);
+            let (was, now) = (cyl.radius(v0 + h * sense), r0 + h * turned);
+            if !(was > 0.0 && now > 0.0) {
+                return Ok(Err(Error::Unsupported));
+            }
+            let foot = centre + pull * h;
+            if answer(net.set_control_point(ControlPointForm::EuclideanRational, i, j, foot + (p - foot) * (now / was), w))?.is_none() {
+                return Ok(Err(Error::Unsupported));
+            }
+        }
+    }
+    // `CopyAndAddAnalytics`: the cone's analytic data from its edited NURB.
+    if answer(cone.rebuild_step_from_nurb_parameters(k))?.is_none() {
+        return Ok(Err(Error::Unsupported));
+    }
+    Ok(Ok(cone))
 }
 
 /// The capi's `Before` mark on what `SmBrep::LocalOperation` is to move: above the history's tag.
