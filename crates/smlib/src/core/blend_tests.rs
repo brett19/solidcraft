@@ -894,3 +894,72 @@ fn rounds_on_the_871_part() {
         assert!(crefused.is_err());
     }
 }
+
+/// The fork's `tabbed_plate_rounds_mitred_on_the_arcs_continuation`: a plate 2 thick, its outline an
+/// R25 arc to the sides x = +-4 of a tab whose top is 4 wide with R2 corners, every top edge of the
+/// outline rounded r 0.5. The arc's round and the tab side's are mitred on the arc wall's
+/// continuation. Removed: the outline's area less the area of the outline moved in by
+/// d = r (1 - cos phi), at the height r sin phi into the round (midpoint rule, 8192 steps; the area
+/// by Green's theorem). With SMLib built, the C++ kernel gives the same.
+#[test]
+fn tabbed_plate_rounds_mitred_on_the_arcs_continuation() {
+    use super::sweep::extrude;
+    use crate::sweeps::{Curve, DraftCorner};
+    const Z: [f64; 3] = [0.0, 0.0, 1.0];
+    let theta = (4.0_f64 / 25.0).acos();
+    let y = 609.0_f64.sqrt();
+    let cy = 280.0 / 9.0;
+    let line = |a: [f64; 2], b: [f64; 2]| Curve::Line { start: [a[0], a[1], 0.0], end: [b[0], b[1], 0.0] };
+    let arc = |c: [f64; 2], radius, start, end| Curve::Arc { center: [c[0], c[1], 0.0], axis: Z, reference: [1.0, 0.0, 0.0], radius, start, end };
+    let outline = [
+        arc([0.0, 0.0], 25.0, PI - theta, 2.0 * PI + theta),
+        line([4.0, y], [4.0, cy]),
+        arc([2.0, cy], 2.0, 0.0, PI / 2.0),
+        line([2.0, cy + 2.0], [-2.0, cy + 2.0]),
+        arc([-2.0, cy], 2.0, PI / 2.0, PI),
+        line([-4.0, cy], [-4.0, y]),
+    ];
+    let area = |da: f64, dt: f64| {
+        let (big, rho) = (25.0 - da, 2.0 - dt);
+        let tab = rho * rho * PI + 2.0 * rho * (2.0 + cy) + 4.0 * (cy + rho);
+        let yc = (big * big - (4.0 - dt) * (4.0 - dt)).sqrt();
+        let at = yc.atan2(4.0 - dt);
+        0.5 * (big * big * (PI + 2.0 * at) + tab) + (4.0 - dt) * (cy - yc)
+    };
+    let (r, dphi) = (0.5, (PI / 2.0) / 8192.0);
+    let want: f64 = (0..8192)
+        .map(|i| {
+            let phi = (f64::from(i) + 0.5) * dphi;
+            let d = r * (1.0 - phi.cos());
+            (area(0.0, 0.0) - area(d, d)) * r * phi.cos() * dphi
+        })
+        .sum();
+    let top = [
+        [0.0, -25.0, 2.0],
+        [4.0, 27.8945, 2.0],
+        [3.41421356, 32.5253247, 2.0],
+        [0.0, cy + 2.0, 2.0],
+        [-3.41421356, 32.5253247, 2.0],
+        [-4.0, 27.8945, 2.0],
+    ];
+    let plate = extrude(&outline, Z, 2.0, 0.0, DraftCorner::default(), true).unwrap();
+    assert!(rel(volume(&plate, 1e-8).unwrap(), 2.0 * area(0.0, 0.0)) < 1e-10);
+    let round = blend(&plate, Blend::Round, &top, &[r; 6], TOL, &[], &[], Corners::Filled).unwrap();
+    let removed = volume(&plate, 1e-8).unwrap() - volume(&round, 1e-8).unwrap();
+    assert!(rel(removed, want) < 1e-6, "removed {removed}, expected {want}");
+    let (rec, _) = native(&to_arrays(&round).unwrap()).unwrap();
+    rec.validate().unwrap();
+    assert!(super::is_manifold_solid(&round).unwrap());
+    assert!(super::check(&round, crate::check::CheckLevel::All).unwrap().is_valid());
+    #[cfg(feature = "native")]
+    {
+        use crate::{Brep, ffi};
+        crate::init().unwrap();
+        let list = crate::sweeps::List::of(&outline).unwrap();
+        let cpp = ffi::sweeps::extrude(&list.raw(), &Z, 2.0, 0.0, ffi::sweeps::DRAFT_CORNER_CURVATURE, true, &mut [f64::NAN; 3]).unwrap();
+        let cround = ffi::ops::blend(ffi::ops::BLEND_ROUND, Brep::made(cpp).cpp().unwrap(), &top, &[r; 6], TOL).unwrap();
+        let cv = ffi::volume(&cround, 1e-8).unwrap();
+        assert!(rel(volume(&round, 1e-8).unwrap(), cv) < 1e-9);
+        assert_eq!(counts(&round).unwrap(), ffi::counts(&cround).unwrap().map(|x| usize::try_from(x).unwrap()));
+    }
+}

@@ -834,3 +834,45 @@ fn offset_faces_close_a_step_wall() {
         assert!(rel(got, v) < 1e-9 && rel(area, a) < 1e-9, "d {d}: V {got} A {area}");
     }
 }
+
+/// Rig case shell/4492's rounded box: four mitred rounds, r 3, come off a 40 x 30 x 10 box's top
+/// together and follow it. From height 0 the outline is the 34 x 24 top moved out by the round's
+/// w(z) = sqrt(9 - (z - axis)^2), or 3 below the axis. With the fork's values at +19, and a body
+/// whose rounds go all the way down at -7. With SMLib built, the C++ kernel gives the same.
+#[test]
+fn mitred_rounds_follow_a_moved_top() {
+    use super::blend::{Corners, blend};
+    use crate::Blend;
+    let edges = [[20.0, 0.0, 10.0], [20.0, 30.0, 10.0], [0.0, 15.0, 10.0], [40.0, 15.0, 10.0]];
+    let top = [20.0, 15.0, 10.0];
+    let rounded = blend(&make_box([0.0; 3], [40.0, 30.0, 10.0]).unwrap(), Blend::Round, &edges, &[3.0; 4], TOL, &[], &[], Corners::Filled).unwrap();
+    let analytic = |d: f64| {
+        let (height, axis, n) = (10.0 + d, 7.0 + d, 20000);
+        (0..n)
+            .map(|i| {
+                let z = height * (f64::from(i) + 0.5) / f64::from(n);
+                let w = if z < axis { 3.0 } else { (9.0 - (z - axis) * (z - axis)).max(0.0).sqrt() };
+                (34.0 + 2.0 * w) * (24.0 + 2.0 * w) * height / f64::from(n)
+            })
+            .sum::<f64>()
+    };
+    let moves = [(19.0, [10, 20, 12]), (1.0, [10, 20, 12]), (-1.0, [10, 20, 12]), (-6.9, [10, 20, 12]), (-7.0, [6, 12, 8])];
+    for (d, n) in moves {
+        let moved = offset_faces(&rounded, &[top], 0.1, d).unwrap();
+        let v = volume(&moved, 1e-8).unwrap();
+        assert_eq!(counts(&moved).unwrap(), n, "d {d}");
+        assert!(rel(v, analytic(d)) < 1e-6, "d {d}: {v} vs {}", analytic(d));
+    }
+    #[cfg(feature = "native")]
+    {
+        use crate::ffi;
+        crate::init().unwrap();
+        let b = ffi::make_box(&[0.0; 3], &[40.0, 30.0, 10.0]).unwrap();
+        let round = ffi::ops::blend(ffi::ops::BLEND_ROUND, &b, &edges, &[3.0; 4], TOL).unwrap();
+        for (d, _) in moves {
+            let cpp = ffi::ops::pick_op(ffi::ops::Pick::OffsetFaces, &round, &[top], 0.1, d).unwrap();
+            let ours = offset_faces(&rounded, &[top], 0.1, d).unwrap();
+            assert!(rel(volume(&ours, 1e-8).unwrap(), ffi::volume(&cpp, 1e-8).unwrap()) < 1e-9, "d {d}");
+        }
+    }
+}

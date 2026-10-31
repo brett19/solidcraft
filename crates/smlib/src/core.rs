@@ -250,6 +250,7 @@ pub(crate) fn fixes() -> UpstreamFixes {
     f.planar_path_sweep_statuses = true;
     f.planar_path_profile_placement_statuses = true;
     f.fillet_trim_status = true;
+    f.perspective_sphere_offsets = true;
     f
 }
 
@@ -258,8 +259,8 @@ pub(crate) fn fixes() -> UpstreamFixes {
 /// (solidcore#1664, WR-563), `bspline_trim_keeps_rational_end_spans` (solidcore#1711, WR-575) and
 /// `fillet_blend_curve_revolved_on_arc` (solidcore#1759, WR-581, an own design waiting for the
 /// fork's fix) have no fork commit. `temporary_radius_setup_errors` (solidcore#644, #458), `ellipse_step_interval_checks`
-/// (solidcore#686, #428) and `perspective_sphere_offsets` (solidcore#684, WR-608, #525) are the
-/// port's own fixes with no fork commit; the C++ build keeps upstream's behaviour there.
+/// (solidcore#686, #428) are the port's own fixes with no fork commit; the C++ build keeps
+/// upstream's behaviour there.
 /// `corner_patch_face_side_twist` (WR-613, fork 7fd9fb0) ports a fork commit that is not
 /// published.
 ///
@@ -290,7 +291,9 @@ pub(crate) fn fixes() -> UpstreamFixes {
 /// no tangent is no tangency), `fillet_edge_curve_domain_statuses` (`sm_CheckEdgeCurveDomains`: a
 /// failed trim keeps the edge's curve), `offset_tangent_gap_statuses` (`HaveTangentGaps`: a failed
 /// sample shows no gap) and `ssi_alignment_statuses` (`ALIGN_DIR_WITH_PREVIOUS_POINT`: no angle, no
-/// alignment). `translation_sweep_regularize` (solidcore#1937) has no fork commit.
+/// alignment). `translation_sweep_regularize` (solidcore#1937) has no fork commit, and the fork keeps
+/// upstream's `gap_samples_use_trimmed_spans` (WR-89: `BuildSampleSet` spans from the first knot) and
+/// `twist_simple_duw_sign` (WR-46: `EvaluateSimple`'s Duw y is -per cos).
 #[cfg(test)]
 const HELD_BACK: &[&str] = &[
     "precise_properties_trim_base_v",
@@ -298,7 +301,6 @@ const HELD_BACK: &[&str] = &[
     "fillet_blend_curve_revolved_on_arc",
     "temporary_radius_setup_errors",
     "ellipse_step_interval_checks",
-    "perspective_sphere_offsets",
     "corner_patch_face_side_twist",
     "boolean_union_refuses_solid_leak",
     "curve_loop_start_after_previous_end",
@@ -316,6 +318,8 @@ const HELD_BACK: &[&str] = &[
     "offset_tangent_gap_statuses",
     "ssi_alignment_statuses",
     "translation_sweep_regularize",
+    "gap_samples_use_trimmed_spans",
+    "twist_simple_duw_sign",
 ];
 
 fn fresh() -> Kernel {
