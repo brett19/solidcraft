@@ -646,7 +646,7 @@ mod history {
 
     /// Two overlapping squares combined as regions of one plane.
     #[test]
-    #[ignore = "solidcore's boolean_2d carries no attributes through its merge (#1462's scope; write-up review-1031/bugs/boolean2d-drops-history.md, not filed yet)"]
+    #[ignore = "solidcore#1462 (PR #1977): boolean_2d carries no attributes through its merge"]
     fn a_boolean2d_has_the_cpp_history() {
         use crate::sweeps::Curve;
         let square = |x: f64, y: f64, s: f64, operand: usize| {

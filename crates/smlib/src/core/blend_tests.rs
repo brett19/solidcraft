@@ -515,7 +515,7 @@ fn rounds_at_a_concave_face_corner_are_mitred() {
 /// The back and left top edges are each trimmed 8 by those rounds: (0, 30)-(32, 30) and (0, 8)-(0, 30)
 /// at z = 10, and each piece keeps its edge's attribute (`Behavior::Copy`), as on the fork.
 #[test]
-#[ignore = "solidcore bug: SubtractRemovalRegion loses the attributes of target edges it replaces (next-pin/bugs/cliff-overflow-loses-edge-attributes.md)"]
+#[ignore = "solidcore#1980 (PR #1977): SubtractRemovalRegion loses the attributes of target edges it replaces"]
 fn an_edge_tag_crosses_a_cliff_overflow() {
     use solidcore::blend::fillet_executive::session::FilletSession;
     use solidcore::boolean::api_brep::boolean_difference;
@@ -562,7 +562,7 @@ fn an_edge_tag_crosses_a_cliff_overflow() {
 /// 21000 - (50 d² + 4/3 d³) = 19265.666666667 (the fork, and the same body through the flat
 /// arrays). Refused: error 3, Corner Edge Computation Failure.
 #[test]
-#[ignore = "solidcore bug: next-pin/bugs/chamfer-boolean-body-keep-operand-uv-trims.md"]
+#[ignore = "solidcore#1981 (PR #1996)"]
 fn pocket_chamfer_on_a_boolean_body() {
     use solidcore::blend::fillet_executive::session::FilletSession;
     use solidcore::boolean::api_brep::boolean_difference;

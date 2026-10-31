@@ -775,7 +775,7 @@ mod history {
     }
 
     #[test]
-    #[ignore = "solidcore's stitch in the shell drops the flat sheet's edge tags (write-up review-1031/bugs/thicken-flat-sheet-edge-tags.md, not filed yet)"]
+    #[ignore = "solidcore#1973 (PR #1977): the stitch in the shell drops the flat sheet's edge tags"]
     fn tags_cross_a_thicken_of_a_flat_sheet() {
         thicken_parity(false);
     }

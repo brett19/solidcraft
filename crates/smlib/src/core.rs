@@ -254,22 +254,33 @@ pub(crate) fn fixes() -> UpstreamFixes {
     f
 }
 
-/// Opt-in fixes left off because the C++ fork (`SMLIB_REV`) does not carry them yet, so turning
-/// them on would part this backend from the C++ one. `precise_properties_trim_base_v`
-/// (solidcore#1664, WR-563), `bspline_trim_keeps_rational_end_spans` (solidcore#1711, WR-575) and
-/// `fillet_blend_curve_revolved_on_arc` (solidcore#1759, WR-581, an own design waiting for the
-/// fork's fix) have no fork commit. `temporary_radius_setup_errors` (solidcore#644, #458), `ellipse_step_interval_checks`
-/// (solidcore#686, #428) are the port's own fixes with no fork commit; the C++ build keeps
-/// upstream's behaviour there.
-/// `corner_patch_face_side_twist` (WR-613, fork 7fd9fb0) ports a fork commit that is not
-/// published.
+/// Opt-in fixes left off because the C++ fork (`SMLIB_REV`) does not behave as they do, so turning
+/// them on would part this backend from the C++ one. Each was read in the fork's source at 2fc375f.
 ///
-/// `boolean_union_refuses_solid_leak` (solidcore#1794, WR-619) is solidcore's own design;
-/// `curve_loop_start_after_previous_end` (WR-96), `loop_use_reports_open_gaps` (WR-93),
-/// `face_points_span_domain` (WR-86),
-/// `drop_curve_v_domain_degeneracy` (WR-100) and `mirror_curve_keeps_euclidean_control_points`
-/// (WR-98) are the port's fixes of upstream defects: none has a fork commit, and the C++ build
-/// keeps upstream's behaviour there.
+/// Upstream's defect is still there: `precise_properties_trim_base_v` (WR-563: `SmODEAreaIFEO` starts
+/// at the domain's lowest v), `fillet_blend_curve_revolved_on_arc` (WR-581: `CalcTorusFilletGeom` takes
+/// circular and linear sections only), `ellipse_step_interval_checks` (WR-211: `AdjustSTEPInterval`
+/// tests no inverted or collapsed interval), `boolean_union_refuses_solid_leak` (WR-619: STEP 6 deletes
+/// without testing regions), `curve_loop_start_after_previous_end` (WR-96), `loop_use_reports_open_gaps`
+/// (WR-93), `face_points_span_domain` (WR-86), `drop_curve_v_domain_degeneracy` (WR-100),
+/// `mirror_curve_keeps_euclidean_control_points` (WR-98), `geometric_g2_continuity` (WR-380: a normal
+/// compared with itself), `fillet_corner_variable_radius_rail_on_opposite_fillet` (WR-645: no test of
+/// the rail against the opposite fillet), `sphere_from_arcs_common_centre` (WR-103: `rOrigin` refers to
+/// the origin it is compared with), `dupin_bottom_hyperbola_axis` (WR-69: k2 for both axes),
+/// `extent3d_contains_both_segment_endpoints` (WR-3: `ContainsLineSeg3d` ors its two points),
+/// `gap_samples_use_trimmed_spans` (WR-89: `BuildSampleSet` spans from the first knot),
+/// `twist_simple_duw_sign` (WR-46: `EvaluateSimple`'s Duw y is -per cos) and
+/// `translation_sweep_regularize` (solidcore#1937: nothing regularizes after the sweep).
+///
+/// The fork deals with it another way: `bspline_trim_keeps_rational_end_spans` (WR-575: the fork keeps
+/// a short span of a UV curve, and still removes a 3D conic's) and `corner_patch_face_side_twist`
+/// (WR-613: the fork refines the patch, `corner_blend_coons_patch_tangent_to_sides`).
+///
+/// The fork carries on softly where these refuse: `temporary_radius_setup_errors` (#458: a scope guard
+/// cannot report), `fillet_corner_statuses` (`sm_TestG1Continuity`: no tangent is no tangency),
+/// `fillet_edge_curve_domain_statuses` (`sm_CheckEdgeCurveDomains`: a failed trim keeps the edge's
+/// curve), `offset_tangent_gap_statuses` (`HaveTangentGaps`: a failed sample shows no gap) and
+/// `ssi_alignment_statuses` (`ALIGN_DIR_WITH_PREVIOUS_POINT`: no angle, no alignment).
 ///
 /// On since `SMLIB_REV` eaa998a: `fillet_trim_inside_by_best_dot` (fork de4dae6),
 /// `fillet_half_degree_crease` (2e8758b), `fillet_split_edge_keeps_near_half` (ceb3272) and
