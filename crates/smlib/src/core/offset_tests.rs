@@ -707,6 +707,69 @@ mod history {
         assert_eq!(core.canonical(), cpp.canonical());
     }
 
+    /// A flat sheet and a half-round open extrusion, tagged on the C++ kernel.
+    fn tagged_sheet(curved: bool) -> Brep {
+        use std::f64::consts::PI;
+
+        use crate::sweeps::{Curve, DraftCorner};
+        crate::init().unwrap();
+        crate::sweeps::ON_CPP.with(|c| c.set(true));
+        let b = if curved {
+            let arc = [Curve::Arc { center: [0.0; 3], axis: [0.0, 0.0, 1.0], reference: [1.0, 0.0, 0.0], radius: 10.0, start: 0.0, end: PI }];
+            Brep::extrude(&arc, [0.0, 0.0, 1.0], 20.0, 0.0, DraftCorner::default(), false)
+        } else {
+            let c = [[0.0, 0.0, 0.0], [20.0, 0.0, 0.0], [20.0, 10.0, 0.0], [0.0, 10.0, 0.0]];
+            let l: Vec<Curve> = (0..4).map(|i| Curve::Line { start: c[i], end: c[(i + 1) % 4] }).collect();
+            Brep::planar_faces(&l)
+        };
+        crate::sweeps::ON_CPP.with(|c| c.set(false));
+        b.unwrap().tagged(0).unwrap()
+    }
+
+    /// A sheet thickened to one side and to both: both faces stand for the sheet's (the histories
+    /// `offset_backend` reads), its edges and their offsets for its edges, the walls for nothing.
+    fn thicken_parity(curved: bool) {
+        for symmetric in [false, true] {
+            let a = tagged_sheet(curved);
+            let cpp = Brep::made(ffi::ops::thicken(a.cpp().unwrap(), 2.0, symmetric).unwrap()).history().unwrap();
+            let core = Brep::made_core(super::thicken(a.core().unwrap(), 2.0, symmetric).unwrap()).history().unwrap();
+            assert_eq!(core.canonical(), cpp.canonical(), "symmetric {symmetric}");
+        }
+    }
+
+    #[test]
+    fn tags_cross_a_thicken_of_a_curved_sheet() {
+        thicken_parity(true);
+    }
+
+    #[test]
+    #[ignore = "solidcore's stitch in the shell drops the flat sheet's edge tags (write-up review-1031/bugs/thicken-flat-sheet-edge-tags.md, not filed yet)"]
+    fn tags_cross_a_thicken_of_a_flat_sheet() {
+        thicken_parity(false);
+    }
+
+    /// A sheet moved along its normal, flat and curved: each face stands for itself.
+    #[test]
+    fn tags_cross_a_sheet_offset() {
+        for curved in [false, true] {
+            let a = tagged_sheet(curved);
+            let cpp = Brep::made(ffi::sheets::offset_sheet(a.cpp().unwrap(), 1.5).unwrap()).history().unwrap();
+            let core = Brep::made_core(super::offset_sheet(a.core().unwrap(), 1.5).unwrap()).history().unwrap();
+            assert_eq!(core.canonical(), cpp.canonical(), "curved {curved}");
+        }
+    }
+
+    /// A cylinder hollowed, its top open: the walls round closed edges, on a curved face.
+    #[test]
+    fn tags_cross_a_shell_of_a_cylinder() {
+        crate::init().unwrap();
+        let a = Brep::made(ffi::make_cylinder(&[0.0; 3], 10.0, 20.0).unwrap()).tagged(0).unwrap();
+        let top = [[0.0, 0.0, 20.0]];
+        let cpp = Brep::made(ffi::ops::pick_op(ffi::ops::Pick::Shell, a.cpp().unwrap(), &top, super::TOL, -2.0).unwrap()).history().unwrap();
+        let core = Brep::made_core(super::shell(a.core().unwrap(), &top, super::TOL, -2.0).unwrap()).history().unwrap();
+        assert_eq!(core.canonical(), cpp.canonical());
+    }
+
     /// A 5 degree draft of the front about the bottom plane: the front tilts, its neighbours'
     /// edges move with it.
     #[test]

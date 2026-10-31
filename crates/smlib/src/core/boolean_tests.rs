@@ -555,4 +555,118 @@ mod history {
     fn a_copy_onto_a_tagged_edge_has_the_cpp_history() {
         parity(&tagged_box([0.0; 3], [10.0; 3], 0), &tagged_box([10.0, 0.0, 0.0], [10.0; 3], 1), BooleanOp::Subtract);
     }
+
+    fn tagged_cylinder(origin: [f64; 3], radius: f64, height: f64, operand: usize) -> Brep {
+        crate::init().unwrap();
+        Brep::made(ffi::make_cylinder(&origin, radius, height).unwrap()).tagged(operand).unwrap()
+    }
+
+    /// A 40 x 40 x 10 plate with a round hole r 5 at (20, 20), made before tagging: its hole's rims
+    /// are whole circles, edges closed on themselves.
+    fn holed_plate(operand: usize) -> Brep {
+        crate::init().unwrap();
+        let plate = ffi::make_box(&[0.0; 3], &[40.0, 40.0, 10.0]).unwrap();
+        let rod = ffi::make_cylinder(&[20.0, 20.0, -5.0], 5.0, 20.0).unwrap();
+        Brep::made(ffi::ops::boolean(&plate, &rod, ffi::ops::BOOLEAN_SUBTRACT).unwrap()).tagged(operand).unwrap()
+    }
+
+    /// Faces of operand 0 with this change, in a history.
+    fn of_first(h: &Raw, c: solidcraft_geom::brep::history::Change) -> usize {
+        h.faces.iter().filter(|f| f.origins.iter().all(|o| o.0 == 0) && !f.origins.is_empty() && f.change == c).count()
+    }
+
+    /// A hole through a block: the tool's and the block's faces meet along whole circles.
+    #[test]
+    fn a_round_hole_has_the_cpp_history() {
+        parity(&tagged_box([0.0; 3], [40.0, 40.0, 10.0], 0), &tagged_cylinder([20.0, 20.0, -5.0], 5.0, 20.0, 1), BooleanOp::Subtract);
+    }
+
+    /// A corner cut far from the hole: the hole's wall keeps its two whole circles, each a closed
+    /// edge still where it lay (`moved`'s `open.is_empty()`), so it is Kept on both kernels.
+    #[test]
+    fn a_face_bounded_by_closed_edges_is_kept() {
+        use solidcraft_geom::brep::history::Change;
+        let (a, b) = (holed_plate(0), tagged_box([35.0, 35.0, -5.0], [10.0, 10.0, 20.0], 1));
+        let cpp = Brep::made(ffi::ops::boolean(a.cpp().unwrap(), b.cpp().unwrap(), ffi::ops::BOOLEAN_SUBTRACT).unwrap()).history().unwrap();
+        let core = Brep::made_core(super::boolean(a.core().unwrap(), b.core().unwrap(), BooleanOp::Subtract).unwrap().unwrap()).history().unwrap();
+        assert_eq!(core.canonical(), cpp.canonical());
+        // The hole's wall and the two sides the corner misses.
+        assert_eq!(of_first(&core, Change::Kept), 3, "{core:?}");
+    }
+
+    /// A bar laid on the plate over the hole, imprinted: the bar's sides cross the hole's upper rim
+    /// and cut that closed edge by vertices; the top is split, the wall's rim stays where it lay.
+    #[test]
+    fn an_imprint_cutting_a_closed_edge_has_the_cpp_history() {
+        let (a, b) = (holed_plate(0), tagged_box([-5.0, 18.0, 10.0], [50.0, 4.0, 5.0], 1));
+        let cpp = Brep::made(ffi::ops::imprint(a.cpp().unwrap(), b.cpp().unwrap()).unwrap()).history().unwrap();
+        let core = Brep::made_core(super::imprint(a.core().unwrap(), b.core().unwrap()).unwrap().unwrap()).history().unwrap();
+        assert_eq!(core.canonical(), cpp.canonical());
+    }
+
+    /// A cylinder and a sphere cut by a slab across their seams (each kernel's angle 0, along +x):
+    /// each curved face is split in two across its seam.
+    #[test]
+    fn a_curved_face_split_across_its_seam_has_the_cpp_history() {
+        use solidcraft_geom::brep::history::Change;
+        let slab = || tagged_box([-20.0, -1.0, -20.0], [40.0, 2.0, 40.0], 1);
+        let sphere = Brep::made(ffi::make_sphere(&[0.0, 0.0, 0.0], 7.0).unwrap()).tagged(0).unwrap();
+        for (name, a) in [("cylinder", tagged_cylinder([0.0, 0.0, -5.0], 5.0, 10.0, 0)), ("sphere", sphere)] {
+            parity(&a, &slab(), BooleanOp::Subtract);
+            let cpp = Brep::made(ffi::ops::boolean(a.cpp().unwrap(), slab().cpp().unwrap(), ffi::ops::BOOLEAN_SUBTRACT).unwrap()).history().unwrap();
+            assert!(of_first(&cpp, Change::Split) >= 2, "{name}: {cpp:?}");
+        }
+    }
+
+    /// A chain of three overlapping boxes in one `union_all`.
+    #[test]
+    fn a_union_of_three_has_the_cpp_history() {
+        let (a, b, c) = (tagged_box([0.0; 3], [10.0; 3], 0), tagged_box([5.0; 3], [10.0; 3], 1), tagged_box([10.0; 3], [10.0; 3], 2));
+        let cpp = Brep::made(ffi::ops::boolean_union_all(&[a.cpp().unwrap(), b.cpp().unwrap(), c.cpp().unwrap()]).unwrap()).history().unwrap();
+        let core = Brep::made_core(super::union_all(&[a.core().unwrap(), b.core().unwrap(), c.core().unwrap()]).unwrap()).history().unwrap();
+        assert_eq!(core.canonical(), cpp.canonical());
+        assert_eq!(core.faces.iter().flat_map(|f| f.origins.iter().map(|o| o.0)).max(), Some(2), "{core:?}");
+    }
+
+    /// A row of four boxes sharing their top and bottom planes, united in pairs and the pairs
+    /// united: each top merged with its neighbour's stands for two faces, and the merge of those
+    /// stands for all four, both sources carrying several origins.
+    #[test]
+    fn a_merge_of_several_origins_on_each_side_has_the_cpp_history() {
+        let boxes: Vec<Brep> = (0..4u32).map(|i| tagged_box([f64::from(i) * 10.0, 0.0, 0.0], [10.0; 3], i as usize)).collect();
+        let c = |x: usize, y: usize| ffi::ops::boolean(boxes[x].cpp().unwrap(), boxes[y].cpp().unwrap(), ffi::ops::BOOLEAN_UNION).unwrap();
+        let (ab, cd) = (c(0, 1), c(2, 3));
+        let cpp = Brep::made(ffi::ops::boolean(&ab, &cd, ffi::ops::BOOLEAN_UNION).unwrap()).history().unwrap();
+        let s = |x: usize, y: usize| super::boolean(boxes[x].core().unwrap(), boxes[y].core().unwrap(), BooleanOp::Union).unwrap().unwrap();
+        let (ab, cd) = (s(0, 1), s(2, 3));
+        let core = Brep::made_core(super::boolean(&ab, &cd, BooleanOp::Union).unwrap().unwrap()).history().unwrap();
+        assert_eq!(core.canonical(), cpp.canonical());
+        assert!(core.faces.iter().any(|f| f.origins.len() == 4), "{core:?}");
+    }
+
+    /// Two overlapping squares combined as regions of one plane.
+    #[test]
+    #[ignore = "solidcore's boolean_2d carries no attributes through its merge (#1462's scope; write-up review-1031/bugs/boolean2d-drops-history.md, not filed yet)"]
+    fn a_boolean2d_has_the_cpp_history() {
+        use crate::sweeps::Curve;
+        let square = |x: f64, y: f64, s: f64, operand: usize| {
+            crate::init().unwrap();
+            let c = [[x, y, 0.0], [x + s, y, 0.0], [x + s, y + s, 0.0], [x, y + s, 0.0]];
+            let l: Vec<Curve> = (0..4).map(|i| Curve::Line { start: c[i], end: c[(i + 1) % 4] }).collect();
+            crate::sweeps::ON_CPP.with(|f| f.set(true));
+            let b = Brep::planar_faces(&l).unwrap();
+            crate::sweeps::ON_CPP.with(|f| f.set(false));
+            b.tagged(operand).unwrap()
+        };
+        let (a, b) = (square(0.0, 0.0, 10.0, 0), square(5.0, 5.0, 10.0, 1));
+        for (op, code) in [
+            (BooleanOp::Union, ffi::ops::BOOLEAN_UNION),
+            (BooleanOp::Subtract, ffi::ops::BOOLEAN_SUBTRACT),
+            (BooleanOp::Intersect, ffi::ops::BOOLEAN_INTERSECT),
+        ] {
+            let cpp = Brep::made(ffi::ops::boolean2d(a.cpp().unwrap(), b.cpp().unwrap(), code).unwrap()).history().unwrap();
+            let core = Brep::made_core(super::boolean2d(a.core().unwrap(), b.core().unwrap(), op).unwrap().unwrap()).history().unwrap();
+            assert_eq!(core.canonical(), cpp.canonical(), "{op:?}");
+        }
+    }
 }
