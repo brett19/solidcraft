@@ -43,6 +43,10 @@ on:
         description: "SignPath signing policy for the Windows files (empty: the repository variable, else test-signing)"
         type: string
         default: ""
+      solidcore_only:
+        description: "Build without the C++ SMLib kernel (no smlib feature, no scripts/fetch-smlib.sh): solidcore only"
+        type: boolean
+        default: false
   # The release gate (release-gate.yml): a dry run (draft false) of every package and its checks.
   # The event stays the caller's (workflow_dispatch), so a call runs as a dispatched dry run does.
   # The gate passes no secrets, so nothing is signed (the signing steps skip without their
@@ -62,6 +66,10 @@ on:
         description: "SignPath signing policy for the Windows files (empty: the repository variable, else test-signing)"
         type: string
         default: ""
+      solidcore_only:
+        description: "Build without the C++ SMLib kernel (no smlib feature, no scripts/fetch-smlib.sh): solidcore only"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -73,6 +81,8 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
+  # packaging/env.sh and packaging/windows/package.ps1 read it (empty: the usual build, with SMLib).
+  SOLIDCRAFT_SOLIDCORE_ONLY: ${{ inputs.solidcore_only && '1' || '' }}
 
 jobs:
   version:
@@ -102,6 +112,10 @@ jobs:
             # Unique SemVer without committing daily version bumps to main.
             VERSION="${VERSION%%-*}-nightly.$(TZ=America/New_York date +%Y%m%d).$GITHUB_RUN_NUMBER.$GITHUB_RUN_ATTEMPT"
           fi
+          if [ -n "$SOLIDCRAFT_SOLIDCORE_ONLY" ]; then
+            # Test builds without SMLib: never mistakable for a release of the same number.
+            VERSION="${VERSION%%-*}-solidcore.g${GITHUB_SHA::9}"
+          fi
           if ! printf '%s' "$VERSION" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?$'; then
             echo "::error::Cargo.toml must contain a version like 1.2.3 or 1.2.3-rc.1"
             exit 1
@@ -127,9 +141,13 @@ jobs:
         with:
           key: release-icons
       - name: Fetch SMLib (crates/smlib/SMLIB_REV)
+        if: ${{ !inputs.solidcore_only }}
         shell: bash
         run: scripts/fetch-smlib.sh
-      - run: cargo build --release --locked -p solidcraft-cli
+      - shell: bash
+        run: |
+          . packaging/env.sh
+          cargo build --release --locked -p solidcraft-cli ${APP_FEATURES[@]+"${APP_FEATURES[@]}"}
       - run: |
           . packaging/env.sh
           make_icons target/release/solidcraft-cli icons
@@ -169,6 +187,7 @@ jobs:
         with:
           key: release-linux-${{ matrix.arch }}
       - name: Fetch SMLib (crates/smlib/SMLIB_REV)
+        if: ${{ !inputs.solidcore_only }}
         shell: bash
         run: scripts/fetch-smlib.sh
       - name: Build and package (AppImage, deb, rpm, tar.gz)
@@ -351,7 +370,7 @@ jobs:
           cpu: 4
           mem: 12288
           # Passed into the VM by name; never templated into the script below.
-          envs: "SOLIDCRAFT_VERSION SOLIDCRAFT_BUILD_DATE"
+          envs: "SOLIDCRAFT_VERSION SOLIDCRAFT_BUILD_DATE SOLIDCRAFT_SOLIDCORE_ONLY"
           prepare: |
             pkg install -y bash git curl pkgconf libxkbcommon wayland libX11 libXcursor libXrandr libXi libxcb mesa-libs vulkan-loader
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
@@ -396,6 +415,7 @@ jobs:
         with:
           key: release-macos-${{ matrix.arch }}
       - name: Fetch SMLib (crates/smlib/SMLIB_REV)
+        if: ${{ !inputs.solidcore_only }}
         shell: bash
         run: scripts/fetch-smlib.sh ${{ matrix.target }}
       - name: Build
@@ -497,6 +517,7 @@ jobs:
         with:
           key: release-windows-${{ matrix.arch }}
       - name: Fetch SMLib (crates/smlib/SMLIB_REV)
+        if: ${{ !inputs.solidcore_only }}
         shell: bash
         run: scripts/fetch-smlib.sh ${{ matrix.target }}
       - name: Install WiX
@@ -631,6 +652,7 @@ jobs:
         with:
           key: release-web
       - name: Fetch SMLib (crates/smlib/SMLIB_REV)
+        if: ${{ !inputs.solidcore_only }}
         shell: bash
         run: scripts/fetch-smlib.sh wasm32-unknown-unknown
       - name: Install trunk

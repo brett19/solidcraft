@@ -37,7 +37,7 @@ echo "==> SolidCraft $VERSION for FreeBSD $ARCH"
 # The release VM has 12 GB; full parallelism on the biggest crates runs it out of memory.
 export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-4}"
 if [ "$SKIP_BUILD" = 0 ]; then
-  (cd "$ROOT" && cargo build --release --locked -p solidcraft -p solidcraft-cli)
+  (cd "$ROOT" && cargo build --release --locked -p solidcraft -p solidcraft-cli ${APP_FEATURES[@]+"${APP_FEATURES[@]}"})
 fi
 WORK="$CARGO_TARGET_DIR/freebsd-package"
 STAGE="$WORK/$BASENAME"

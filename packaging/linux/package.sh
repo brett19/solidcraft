@@ -45,10 +45,10 @@ echo "==> SolidCraft $VERSION for Linux $ARCH ($FORMATS)"
 
 if [ "$SKIP_BUILD" = 0 ]; then
   if [ -n "${CROSS_TARGET:-}" ]; then
-    (cd "$ROOT" && cargo build --release --locked -p solidcraft -p solidcraft-cli --target "$CROSS_TARGET")
+    (cd "$ROOT" && cargo build --release --locked -p solidcraft -p solidcraft-cli ${APP_FEATURES[@]+"${APP_FEATURES[@]}"} --target "$CROSS_TARGET")
     BIN="$CARGO_TARGET_DIR/$CROSS_TARGET/release"
   else
-    (cd "$ROOT" && cargo build --release --locked -p solidcraft -p solidcraft-cli)
+    (cd "$ROOT" && cargo build --release --locked -p solidcraft -p solidcraft-cli ${APP_FEATURES[@]+"${APP_FEATURES[@]}"})
     BIN="$CARGO_TARGET_DIR/release"
   fi
 else

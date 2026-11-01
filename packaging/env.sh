@@ -37,6 +37,15 @@ export DIST
 
 export SOLIDCRAFT_BUILD_DATE="${SOLIDCRAFT_BUILD_DATE:-${SOLVECRAFT_BUILD_DATE:-$(date -u +%Y-%m-%d)}}"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
+# SOLIDCRAFT_SOLIDCORE_ONLY=1 builds without the C++ SMLib kernel: no `smlib` feature (and no
+# scripts/fetch-smlib.sh), each app with its other default features. APP_FEATURES holds the cargo
+# arguments for `-p solidcraft -p solidcraft-cli`; WEB_FEATURES those for solidcraft-web (trunk).
+APP_FEATURES=()
+WEB_FEATURES=()
+if [ -n "${SOLIDCRAFT_SOLIDCORE_ONLY:-}" ]; then
+  APP_FEATURES=(--no-default-features --features solidcraft/raytrace-cpu,solidcraft/bundled-render-library,solidcraft/profile,solidcraft-cli/raytrace-cpu,solidcraft-cli/profile)
+  WEB_FEATURES=(--no-default-features --features profile)
+fi
 # The reverse-DNS id: Flatpak app id, desktop, metainfo and MIME file names, icon name and the
 # window's Wayland app_id / X11 class. Earlier releases used ai.storyteller.solidcraft (0.8 until
 # the move to Tangency Labs) and ai.storyteller.solvecraft (before 0.8); the Flatpak repository

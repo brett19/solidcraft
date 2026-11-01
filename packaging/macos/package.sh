@@ -132,7 +132,7 @@ if [ -n "$BUILD_ONLY" ]; then
     *) echo "unknown --build-only target $BUILD_ONLY" >&2; exit 2 ;;
   esac
   echo "==> SolidCraft $VERSION for macOS ($BUILD_ONLY, build only)"
-  (cd "$ROOT" && cargo build --release --locked -p solidcraft -p solidcraft-cli --target "$BUILD_ONLY")
+  (cd "$ROOT" && cargo build --release --locked -p solidcraft -p solidcraft-cli ${APP_FEATURES[@]+"${APP_FEATURES[@]}"} --target "$BUILD_ONLY")
   exit 0
 fi
 
@@ -140,7 +140,7 @@ echo "==> SolidCraft $VERSION for macOS ($ARCH)"
 if [ "$SKIP_BUILD" = 0 ]; then
   args=()
   for t in "${TARGETS[@]}"; do args+=(--target "$t"); done
-  (cd "$ROOT" && cargo build --release --locked -p solidcraft -p solidcraft-cli "${args[@]}")
+  (cd "$ROOT" && cargo build --release --locked -p solidcraft -p solidcraft-cli ${APP_FEATURES[@]+"${APP_FEATURES[@]}"} "${args[@]}")
 fi
 
 rm -rf "$WORK"

@@ -13,7 +13,7 @@ set -euo pipefail
 
 if [ "${1:-}" != "--skip-build" ]; then
   command -v trunk >/dev/null || { echo "error: trunk not found (cargo install trunk --locked)" >&2; exit 1; }
-  (cd "$ROOT/apps/solidcraft-web" && trunk build --release)
+  (cd "$ROOT/apps/solidcraft-web" && trunk build --release ${WEB_FEATURES[@]+"${WEB_FEATURES[@]}"})
 fi
 
 SITE="$ROOT/dist/web"

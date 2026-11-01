@@ -71,7 +71,12 @@ if (-not $SkipBuild -and $Phase -ne 'package') {
   # proc-macros are unaffected.
   $flagVar = 'CARGO_TARGET_' + ($Target.ToUpper() -replace '-', '_') + '_RUSTFLAGS'
   [Environment]::SetEnvironmentVariable($flagVar, '-C target-feature=+crt-static')
-  Invoke-Native "cargo build ($Target)" { cargo build --release --locked -p solidcraft -p solidcraft-cli --target $Target }
+  # SOLIDCRAFT_SOLIDCORE_ONLY=1: without the C++ SMLib kernel (packaging/env.sh).
+  $Features = @()
+  if ($env:SOLIDCRAFT_SOLIDCORE_ONLY) {
+    $Features = @('--no-default-features', '--features', 'solidcraft/raytrace-cpu,solidcraft/bundled-render-library,solidcraft/profile,solidcraft-cli/raytrace-cpu,solidcraft-cli/profile')
+  }
+  Invoke-Native "cargo build ($Target)" { cargo build --release --locked -p solidcraft -p solidcraft-cli --target $Target @Features }
 }
 $Bin = Join-Path $TargetDir "$Target\release"
 $Stage = Join-Path $TargetDir "windows-package\$Arch"
