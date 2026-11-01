@@ -152,11 +152,16 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: release-icons
+          # Test builds keep what a failed or cancelled job compiled.
+          cache-on-failure: ${{ inputs.test_build }}
+      # make_icons copies the committed exports and doesn't run the CLI, so test builds skip
+      # building it: the icons are ready in seconds and Windows stops waiting on a whole build.
       - name: Fetch SMLib (crates/smlib/SMLIB_REV)
-        if: ${{ !inputs.solidcore_only }}
+        if: ${{ !inputs.solidcore_only && !inputs.test_build }}
         shell: bash
         run: scripts/fetch-smlib.sh
       - shell: bash
+        if: ${{ !inputs.test_build }}
         run: |
           . packaging/env.sh
           cargo build --release --locked -p solidcraft-cli ${CLI_FEATURES[@]+"${CLI_FEATURES[@]}"}
@@ -199,6 +204,8 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: release-linux-${{ matrix.arch }}
+          # Test builds keep what a failed or cancelled job compiled.
+          cache-on-failure: ${{ inputs.test_build }}
       - name: Fetch SMLib (crates/smlib/SMLIB_REV)
         if: ${{ !inputs.solidcore_only }}
         shell: bash
@@ -430,6 +437,8 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: release-macos-${{ matrix.arch }}
+          # Test builds keep what a failed or cancelled job compiled.
+          cache-on-failure: ${{ inputs.test_build }}
       - name: Fetch SMLib (crates/smlib/SMLIB_REV)
         if: ${{ !inputs.solidcore_only }}
         shell: bash
@@ -532,9 +541,21 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      # Test builds compile on a Dev Drive (ReFS, scanned asynchronously by Defender) mounted at
+      # target/, so the paths the later steps use don't change.
+      - name: Dev Drive for target/
+        if: ${{ inputs.test_build }}
+        uses: samypr100/setup-dev-drive@562171fe8df7401fdf582d766cd3b6ab80d5b1a0 # v4.1.0
+        with:
+          drive-size: 60GB
+          drive-format: ReFS
+          mount-path: ${{ github.workspace }}/target
+          trusted-dev-drive: true
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: release-windows-${{ matrix.arch }}
+          # Test builds keep what a failed or cancelled job compiled.
+          cache-on-failure: ${{ inputs.test_build }}
       - name: Fetch SMLib (crates/smlib/SMLIB_REV)
         if: ${{ !inputs.solidcore_only }}
         shell: bash
@@ -670,6 +691,8 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: release-web
+          # Test builds keep what a failed or cancelled job compiled.
+          cache-on-failure: ${{ inputs.test_build }}
       - name: Fetch SMLib (crates/smlib/SMLIB_REV)
         if: ${{ !inputs.solidcore_only }}
         shell: bash
