@@ -143,6 +143,9 @@ jobs:
     needs: version
     if: needs.version.outputs.build == 'true'
     runs-on: ubuntu-22.04
+    env:
+      # Test builds: the icons need no SMLib, and its Linux prebuilt needs a newer glibc than 22.04's.
+      SOLIDCRAFT_SOLIDCORE_ONLY: ${{ (inputs.solidcore_only || inputs.test_build) && '1' || '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@stable
@@ -171,7 +174,8 @@ jobs:
     needs: version
     if: needs.version.outputs.build == 'true'
     # The oldest GitHub-hosted image, so the binaries only need glibc >= 2.35.
-    runs-on: ${{ matrix.runner }}
+    # Test builds keep SMLib, whose Linux prebuilt links against glibc 2.38+ (__isoc23_*): 24.04.
+    runs-on: ${{ inputs.test_build && (matrix.arch == 'x86_64' && 'ubuntu-24.04' || 'ubuntu-24.04-arm') || matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
@@ -368,6 +372,8 @@ jobs:
     env:
       SOLIDCRAFT_VERSION: ${{ needs.version.outputs.version }}
       SOLIDCRAFT_BUILD_DATE: ${{ needs.version.outputs.date }}
+      # Test builds: SMLib has no FreeBSD prebuilt, so FreeBSD gets the solidcore kernel only.
+      SOLIDCRAFT_SOLIDCORE_ONLY: ${{ (inputs.solidcore_only || inputs.test_build) && '1' || '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Build and package in a FreeBSD VM (tar.gz)

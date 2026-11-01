@@ -82,7 +82,7 @@ jobs:
             echo
             echo "- Built from \`fork-builds\` at $GITHUB_SHA, which is \`solidcore\` at \`$base\` plus the fork-only build workflow."
             echo "- solidcore pin: \`$pin\`"
-            echo "- The C++ SMLib kernel is included as an option: choose it in the preferences or with \`SOLIDCRAFT_KERNEL=smlib\` to compare."
+            echo "- The C++ SMLib kernel is included as an option: choose it in the preferences or with \`SOLIDCRAFT_KERNEL=smlib\` to compare. The FreeBSD package has the solidcore kernel only (SMLib has no FreeBSD prebuilt)."
             echo "- Nothing is signed: Windows SmartScreen and macOS Gatekeeper will warn (on macOS, right-click > Open, or \`xattr -dr com.apple.quarantine\`)."
             echo "- Not a SolidCraft release; tangency-labs/solidcraft does not publish or support it."
             echo
