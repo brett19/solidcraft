@@ -107,11 +107,11 @@ fn case(name: &str) -> Case {
             }
             c(Op::Blend(BLOCK, Blend::Round, edges, r), Expect::Volume(v))
         }
-        // Each section of a curvature-continuous round is the quintic from contact to contact
-        // whose inner control points lie a third and two thirds of the way to the corner the
-        // contacts' tangents make (fork fd3b6a7). On the unit square's sides it takes
-        // ½∮(x dy - y dx) = 113/756 from the corner: abc - 113/756 r² L.
-        "fillet_curvature_one_edge" => c(Op::Blend(BLOCK, Blend::Curvature, vec![TOP_FRONT], r), Expect::Volume(ABC - 113.0 / 756.0 * r * r * 30.0)),
+        // The curvature section's default thumbweight is equal area (fork 6148773): on the
+        // round's rails it takes off what the ball's circle does, abc - (1 - π/4) r² L.
+        "fillet_curvature_one_edge" => {
+            c(Op::Blend(BLOCK, Blend::Curvature, vec![TOP_FRONT], r), Expect::Volume(ABC - (1.0 - PI / 4.0) * r * r * 30.0))
+        }
         // abc - d² L / 2.
         "chamfer_one_edge" => c(Op::Blend(BLOCK, Blend::Chamfer, vec![TOP_FRONT], r), Expect::Volume(ABC - r * r * 30.0 / 2.0)),
         // abc - d1 d2 L / 2: 2 back along the top (the face leaning most along +z), 3 down the
@@ -152,12 +152,13 @@ fn case(name: &str) -> Case {
         // = abc - (1 - π/4) L (r0² + r0 r1 + r1²) / 3. The round is a B-spline surface fitted to
         // those sections, which both kernels build 2.5e-7 short of it (and within 1e-9 of each
         // other), within the solver's fitting tolerance.
+        // The union of the balls, r from 1 to 3 along the 30 mm edge: in each plane across the
+        // edge, the area between the corner and where each ray from it first enters a ball
+        // (Gauss-Legendre in the ray's angle, Simpson along the edge, converged to 1e-8 of the
+        // body), 27.857434; the balls' great circles would take (1 - π/4) L (r0² + r0 r1 + r1²) / 3,
+        // 27.898239.
         "fillet_variable_linear" => {
-            let (r0, r1, l) = (1.0, 3.0, 30.0);
-            c(
-                Op::Variable(BLOCK, TOP_FRONT, [0.0, 0.0, 10.0], 1, vec![0.0, 0.0, 1.0, 1.0], vec![r0, r1]),
-                Expect::Near(ABC - (1.0 - PI / 4.0) * l * (r0 * r0 + r0 * r1 + r1 * r1) / 3.0, 1e-6),
-            )
+            c(Op::Variable(BLOCK, TOP_FRONT, [0.0, 0.0, 10.0], 1, vec![0.0, 0.0, 1.0, 1.0], vec![1.0, 3.0]), Expect::Near(ABC - 27.857434, 1e-6))
         }
         // A round of 12 on a 10 mm cube's top front edge is larger than either face beside it:
         // the fork builds it over the cliffs, on the faces' continuations, and cuts away all of
@@ -660,6 +661,43 @@ fn a_setback_corner_left_open_returns_its_hole() {
         blend_holes(&b, Blend::Round, &edges[..2], &[5.0; 2], 0.1, &[[60.0, 40.0, 20.0]], &[8.0], Corners::Open).err()
     });
     assert_eq!(refused, Some(Error::CornerRefused { corner: 0 }));
+}
+
+/// A curvature-continuous round is refused on solidcore, whose only curvature section is the
+/// blend-curve quintic (113/756 r² off a square corner, not the equal-area (1 - π/4) r²), until
+/// its pin has the Gⁿ section generator (solidcore#2250).
+#[test]
+fn a_curvature_round_is_refused_until_solidcore_has_the_equal_area_section() {
+    let b = BLOCK.core();
+    let r = blend(&b, Blend::Curvature, &[TOP_FRONT], &[2.0], TOL, &[], &[], Corners::Filled).err();
+    assert_eq!(r, Some(Error::Unported(super::blend::CURVATURE_SECTION)));
+    assert!(r.is_some_and(|e| e.to_string().contains("solidcore#2250")));
+    let set_back = blend(&b, Blend::Curvature, &[TOP_FRONT], &[2.0], TOL, &[[0.0, 0.0, 10.0]], &[3.0], Corners::Filled).err();
+    assert_eq!(set_back, Some(Error::Unported(super::blend::CURVATURE_SECTION)));
+    // A pick that misses is still named first.
+    assert_eq!(blend(&b, Blend::Curvature, &[[90.0; 3]], &[2.0], TOL, &[], &[], Corners::Filled).err(), Some(Error::NoMatch { point: 0 }));
+}
+
+/// A variable round whose radius changes is refused on solidcore: the round is the union of its
+/// balls, and solidcore's takes their great circles (1 to 3 along 30 mm: 27.8982 off, not
+/// 27.8574), until its pin has that round (solidcore#2250). A constant round is untouched.
+#[test]
+fn a_variable_round_is_refused_until_solidcore_has_the_balls_union() {
+    let b = BLOCK.core();
+    let linear = fillet_variable(&b, TOP_FRONT, TOL, [0.0, 0.0, 10.0], 1, &[0.0, 0.0, 1.0, 1.0], &[1.0, 3.0]).err();
+    assert_eq!(linear, Some(Error::Unported(super::blend::VARIABLE_ROUND)));
+    assert!(linear.is_some_and(|e| e.to_string().contains("solidcore#2250")));
+    let cubic = [0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
+    let bulge = fillet_variable(&b, TOP_FRONT, TOL, [0.0, 0.0, 10.0], 3, &cubic, &[1.0, 2.0, 2.0, 1.0]).err();
+    assert_eq!(bulge, Some(Error::Unported(super::blend::VARIABLE_ROUND)));
+    // A law of one radius too: the variable round's own surface, not the constant round's.
+    let constant = fillet_variable(&b, TOP_FRONT, TOL, [0.0, 0.0, 10.0], 1, &[0.0, 0.0, 1.0, 1.0], &[2.0, 2.0]).err();
+    assert_eq!(constant, Some(Error::Unported(super::blend::VARIABLE_ROUND)));
+    // A pick that misses is still named first.
+    assert_eq!(fillet_variable(&b, [90.0; 3], TOL, [0.0; 3], 1, &[0.0, 0.0, 1.0, 1.0], &[1.0, 3.0]).err(), Some(Error::NoMatch { point: 0 }));
+    // A plain round is untouched.
+    let round = blend(&b, Blend::Round, &[TOP_FRONT], &[2.0], TOL, &[], &[], Corners::Filled).unwrap();
+    assert!((ABC - volume(&round, 1e-8).unwrap() - (1.0 - PI / 4.0) * 4.0 * 30.0).abs() < 1e-6);
 }
 
 /// The capi's argument checks, before any kernel call.
