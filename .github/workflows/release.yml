@@ -269,7 +269,8 @@ jobs:
   arch:
     name: Arch Linux ${{ matrix.arch }}
     needs: [version, linux]
-    if: needs.version.outputs.build == 'true'
+    # Not for test builds: the shared arch-package action reads <x.y.z>-solidcore.g<sha> as 0.0.0.
+    if: needs.version.outputs.build == 'true' && !inputs.test_build
     # makepkg only repackages the tarball's prebuilt binaries, so both architectures build here.
     runs-on: ubuntu-24.04
     strategy:
@@ -509,6 +510,9 @@ jobs:
           - { arch: arm64, target: aarch64-pc-windows-msvc }
     env:
       SOLIDCRAFT_VERSION: ${{ needs.version.outputs.version }}
+      # Test builds: SMLib's Windows prebuilt uses the DLL C runtime (/MD: __imp_fopen unresolved), and
+      # these binaries link it statically (+crt-static), so Windows gets the solidcore kernel only.
+      SOLIDCRAFT_SOLIDCORE_ONLY: ${{ (inputs.solidcore_only || inputs.test_build) && '1' || '' }}
       # Authenticode signing through SignPath Foundation (docs/releasing.md, "Windows signing").
       # Only when the API token secret exists: forks and repositories without it build unsigned,
       # exactly as before. `if:` can't read secrets, so the check goes through this variable.
