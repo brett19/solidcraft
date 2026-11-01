@@ -1,8 +1,8 @@
-# Fork-only (brett19/solidcraft): unofficial, unsigned test builds of the solidcore branch, with
-# the pure-Rust solidcore kernel only (no C++ SMLib: no smlib feature, no scripts/fetch-smlib.sh).
+# Fork-only (brett19/solidcraft): unofficial, unsigned test builds of the solidcore branch: the
+# pure-Rust solidcore kernel is the default, and the C++ SMLib kernel is included as an option.
 # Every package release.yml builds, published as a GitHub pre-release tagged solidcore-<sha>.
 # The fork-builds branch follows solidcore by merges; it never goes upstream.
-name: Fork builds (solidcore only)
+name: Fork builds (solidcore)
 
 on:
   push:
@@ -29,7 +29,8 @@ jobs:
     with:
       draft: false
       packages_only: true
-      solidcore_only: true
+      solidcore_only: false
+      test_build: true
 
   publish:
     name: Publish the pre-release
@@ -77,11 +78,11 @@ jobs:
           done
           ls artifacts/solidcraft-web-*.zip >/dev/null 2>&1 || missing+=("web zip")
           {
-            echo "**Unofficial, unsigned test build of the \`solidcore\` branch with the solidcore kernel only.**"
+            echo "**Unofficial, unsigned test build of the \`solidcore\` branch: the solidcore kernel is the default.**"
             echo
             echo "- Built from \`fork-builds\` at $GITHUB_SHA, which is \`solidcore\` at \`$base\` plus the fork-only build workflow."
             echo "- solidcore pin: \`$pin\`"
-            echo "- The C++ SMLib kernel is not included: no \`smlib\` feature, nothing from \`scripts/fetch-smlib.sh\`. Choosing the SMLib kernel option (or \`SOLIDCRAFT_KERNEL=smlib\`) makes every operation answer \"not supported yet: this build has no SMLib\"."
+            echo "- The C++ SMLib kernel is included as an option: choose it in the preferences or with \`SOLIDCRAFT_KERNEL=smlib\` to compare."
             echo "- Nothing is signed: Windows SmartScreen and macOS Gatekeeper will warn (on macOS, right-click > Open, or \`xattr -dr com.apple.quarantine\`)."
             echo "- Not a SolidCraft release; tangency-labs/solidcraft does not publish or support it."
             echo
@@ -93,7 +94,7 @@ jobs:
           } >notes.md
           cat notes.md
           echo "TAG=solidcore-$short" >>"$GITHUB_ENV"
-          echo "TITLE=solidcore test build $short (unofficial, unsigned, solidcore kernel only)" >>"$GITHUB_ENV"
+          echo "TITLE=solidcore test build $short (unofficial, unsigned)" >>"$GITHUB_ENV"
       - name: Publish
         working-directory: artifacts
         run: |

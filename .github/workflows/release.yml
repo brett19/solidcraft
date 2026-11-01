@@ -47,6 +47,10 @@ on:
         description: "Build without the C++ SMLib kernel (no smlib feature, no scripts/fetch-smlib.sh): solidcore only"
         type: boolean
         default: false
+      test_build:
+        description: "A test build of the solidcore branch: version <x.y.z>-solidcore.g<sha>, never mistakable for a release"
+        type: boolean
+        default: false
   # The release gate (release-gate.yml): a dry run (draft false) of every package and its checks.
   # The event stays the caller's (workflow_dispatch), so a call runs as a dispatched dry run does.
   # The gate passes no secrets, so nothing is signed (the signing steps skip without their
@@ -70,6 +74,10 @@ on:
         description: "Build without the C++ SMLib kernel (no smlib feature, no scripts/fetch-smlib.sh): solidcore only"
         type: boolean
         default: false
+      test_build:
+        description: "A test build of the solidcore branch: version <x.y.z>-solidcore.g<sha>, never mistakable for a release"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -83,6 +91,7 @@ env:
   CARGO_INCREMENTAL: 0
   # packaging/env.sh and packaging/windows/package.ps1 read it (empty: the usual build, with SMLib).
   SOLIDCRAFT_SOLIDCORE_ONLY: ${{ inputs.solidcore_only && '1' || '' }}
+  SOLIDCRAFT_TEST_BUILD: ${{ (inputs.test_build || inputs.solidcore_only) && '1' || '' }}
 
 jobs:
   version:
@@ -112,8 +121,8 @@ jobs:
             # Unique SemVer without committing daily version bumps to main.
             VERSION="${VERSION%%-*}-nightly.$(TZ=America/New_York date +%Y%m%d).$GITHUB_RUN_NUMBER.$GITHUB_RUN_ATTEMPT"
           fi
-          if [ -n "$SOLIDCRAFT_SOLIDCORE_ONLY" ]; then
-            # Test builds without SMLib: never mistakable for a release of the same number.
+          if [ -n "$SOLIDCRAFT_TEST_BUILD" ]; then
+            # Test builds of the solidcore branch: never mistakable for a release of the same number.
             VERSION="${VERSION%%-*}-solidcore.g${GITHUB_SHA::9}"
           fi
           if ! printf '%s' "$VERSION" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?$'; then
