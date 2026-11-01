@@ -147,7 +147,7 @@ jobs:
       - shell: bash
         run: |
           . packaging/env.sh
-          cargo build --release --locked -p solidcraft-cli ${APP_FEATURES[@]+"${APP_FEATURES[@]}"}
+          cargo build --release --locked -p solidcraft-cli ${CLI_FEATURES[@]+"${CLI_FEATURES[@]}"}
       - run: |
           . packaging/env.sh
           make_icons target/release/solidcraft-cli icons
