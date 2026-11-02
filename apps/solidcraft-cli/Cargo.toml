@@ -42,3 +42,5 @@ serde_json = { workspace = true }
 image = { workspace = true }
 # Tests measure meshes at their own tolerances.
 solidcraft-kernel = { workspace = true }
+# fillet_input_smb reads its .smb back and runs the round on it.
+solidcraft-smlib = { workspace = true }

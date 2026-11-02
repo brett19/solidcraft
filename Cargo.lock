@@ -4103,6 +4103,7 @@ dependencies = [
  "solidcraft-gpu",
  "solidcraft-kernel",
  "solidcraft-mcp",
+ "solidcraft-smlib",
 ]
 
 [[package]]
