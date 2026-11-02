@@ -253,6 +253,10 @@ pub enum KernelError {
     /// The third-party kernel panicked; the model is unchanged.
     #[error("kernel internal error: {0}")]
     Internal(String),
+    /// The work was stopped by its watch ([`watch`]): what was stopped. Not a failure of the
+    /// operation; the model is unchanged.
+    #[error("{0} cancelled")]
+    Cancelled(String),
 }
 
 pub type Result<T> = std::result::Result<T, KernelError>;

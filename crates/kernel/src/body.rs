@@ -537,8 +537,11 @@ impl Body {
     /// names why, never repaired here.
     pub fn smlib(&self) -> Result<&solidcraft_smlib::Brep> {
         self.require_brep("an SMLib operation")?;
+        // Shared by every copy of the body: filled where no job's cancel can leave a refusal in it.
         self.smlib
-            .get_or_init(|| solidcraft_smlib::Brep::from_record(&self.record, true).map_err(|e| Refusal::of(&self.record, &e)))
+            .get_or_init(|| {
+                crate::watch::shielded(|| solidcraft_smlib::Brep::from_record(&self.record, true).map_err(|e| Refusal::of(&self.record, &e)))
+            })
             .as_ref()
             .map_err(|r| KernelError::Failed(format!("SMLib: {}", r.why)))
     }

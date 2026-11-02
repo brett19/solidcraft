@@ -32,6 +32,7 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 use serde_json::{Value, json};
 
 use solidcraft_engine::doc::KeptResults;
+use solidcraft_engine::doc::progress::{Progress, StopOnDrop};
 
 use crate::SolveApp;
 use crate::control::ControlRequest;
@@ -156,9 +157,18 @@ pub struct ControlJob {
     pub(crate) label: String,
     /// How far it has got (evaluated ahead).
     steps: Option<Arc<Steps>>,
+    /// Stops the worker evaluating ahead, and the kernel operation it waits on, once nothing
+    /// waits for it (Stop, or computed again for a changed design).
+    _stop: Option<StopOnDrop>,
 }
 
 impl ControlJob {
+    /// The stop switch of its worker, for the tests.
+    #[cfg(test)]
+    pub(crate) fn progress(&self) -> Option<Arc<Progress>> {
+        self._stop.as_ref().map(|s| s.0.clone())
+    }
+
     fn poll(&self) -> Option<Option<Value>> {
         match self.done.try_recv() {
             Ok(r) => Some(r),
@@ -214,23 +224,25 @@ impl Steps {
     }
 }
 
+/// A worker evaluating ahead: its answer, what it computes (kept for the run here), how far it
+/// has got, and what stops it once dropped.
+type Evaluating = (Receiver<Option<Value>>, Arc<KeptResults>, Arc<Steps>, StopOnDrop);
+
 /// Evaluate `commands` ahead on a copy of the session, on a worker (with the folder scope
 /// `request` names). What it computes is kept for the run here.
-fn evaluate_ahead(
-    app: &SolveApp,
-    request: &Value,
-    commands: Vec<(String, Value)>,
-) -> Option<(Receiver<Option<Value>>, Arc<KeptResults>, Arc<Steps>)> {
+fn evaluate_ahead(app: &SolveApp, request: &Value, commands: Vec<(String, Value)>) -> Option<Evaluating> {
     let scope = crate::control::request_scope(app, request).ok()?;
     let ahead = app.session.ahead();
     let kept = ahead.kept();
     let steps = Steps::new(app, request, &commands);
     let counting = steps.clone();
+    let progress = Arc::new(Progress::default());
+    let watching = progress.clone();
     let rx = spawn(scope, move || {
-        let _ = ahead.evaluate_counting(&commands, &counting.now);
+        let _ = solidcraft_engine::doc::progress::watch(watching, || ahead.evaluate_counting(&commands, &counting.now));
         None
     })?;
-    Some((rx, kept, steps))
+    Some((rx, kept, steps, StopOnDrop(progress)))
 }
 
 /// Start computing a design change ahead, for the design as it is now.
@@ -239,9 +251,9 @@ fn begin_ahead(
     req: &ControlRequest,
     commands: Vec<(String, Value)>,
     tries: u8,
-) -> Option<(Work, Receiver<Option<Value>>, Arc<Steps>)> {
-    let (rx, kept, steps) = evaluate_ahead(app, &req.params, commands.clone())?;
-    Some((Work::Ahead { commands, doc: app.session.doc.clone(), revision: app.session.revision, tries, kept }, rx, steps))
+) -> Option<(Work, Receiver<Option<Value>>, Arc<Steps>, StopOnDrop)> {
+    let (rx, kept, steps, stop) = evaluate_ahead(app, &req.params, commands.clone())?;
+    Some((Work::Ahead { commands, doc: app.session.doc.clone(), revision: app.session.revision, tries, kept }, rx, steps, stop))
 }
 
 impl SolveApp {
@@ -271,6 +283,8 @@ pub struct Ahead {
     pub(crate) label: String,
     /// How far it has got.
     pub(crate) steps: Arc<Steps>,
+    /// Stops the evaluation once nothing waits for it.
+    _stop: StopOnDrop,
 }
 
 impl Ahead {
@@ -284,8 +298,8 @@ impl Ahead {
         }
         let commands = ahead_commands(method, request);
         let label = label(app, &commands.first()?.0);
-        let (done, kept, steps) = evaluate_ahead(app, request, commands)?;
-        Some(Ahead { done, kept, started: crate::now_ms(), label, steps })
+        let (done, kept, steps, _stop) = evaluate_ahead(app, request, commands)?;
+        Some(Ahead { done, kept, started: crate::now_ms(), label, steps, _stop })
     }
 
     /// The evaluation is in (or its worker ended).
@@ -355,7 +369,8 @@ impl SolveApp {
     }
 
     /// Stop waiting for the agent's design change that is computing: it is answered as stopped
-    /// and nothing of it is applied (its worker finishes on its own, unseen). Requests waiting
+    /// and nothing of it is applied. Its worker is cancelled: the solidcore operation it waits on
+    /// stops at its next check (the C++ kernel's runs to its end, unseen). Requests waiting
     /// behind it go on.
     pub fn stop_agent_command(&mut self) {
         let stopped = match self.control_job.take() {
@@ -398,8 +413,8 @@ impl SolveApp {
         }
         let commands = ahead_commands(&req.method, &req.params);
         let Some(first) = commands.first().map(|(c, _)| c.clone()) else { return Some(req) };
-        let Some((work, rx, steps)) = begin_ahead(self, &req, commands, 0) else { return Some(req) };
-        let job = ControlJob { label: label(self, &first), req, work, done: rx, started: crate::now_ms(), steps: Some(steps) };
+        let Some((work, rx, steps, stop)) = begin_ahead(self, &req, commands, 0) else { return Some(req) };
+        let job = ControlJob { label: label(self, &first), req, work, done: rx, started: crate::now_ms(), steps: Some(steps), _stop: Some(stop) };
         if within_wait(self, &job.done).is_some() {
             // Computed within the wait: it runs now, as before, finding what was computed.
             let Work::Ahead { kept, .. } = job.work else { return Some(job.req) };
@@ -443,7 +458,7 @@ impl SolveApp {
             Some(reply)
         });
         let Some(rx) = rx else { return Some(req) };
-        let job = ControlJob { label: label(self, id), req, work: Work::Answer, done: rx, started: crate::now_ms(), steps: None };
+        let job = ControlJob { label: label(self, id), req, work: Work::Answer, done: rx, started: crate::now_ms(), steps: None, _stop: None };
         match within_wait(self, &job.done) {
             Some(reply) => self.answered(job, reply),
             None => self.control_answering.push(job),
@@ -514,8 +529,8 @@ impl SolveApp {
         }
         if (!same || s.revision != revision) && tries < MAX_TRIES {
             // A person's edit went first: computed again for the design as it is now.
-            if let Some((work, rx, steps)) = begin_ahead(self, &job.req, commands, tries + 1) {
-                self.control_job = Some(ControlJob { work, done: rx, steps: Some(steps), ..job });
+            if let Some((work, rx, steps, stop)) = begin_ahead(self, &job.req, commands, tries + 1) {
+                self.control_job = Some(ControlJob { work, done: rx, steps: Some(steps), _stop: Some(stop), ..job });
                 return;
             }
         }

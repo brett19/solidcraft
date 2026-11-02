@@ -15,6 +15,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{Once, OnceLock};
 
+pub mod cancel;
 mod check;
 mod core;
 pub mod export;
@@ -88,6 +89,8 @@ pub enum Error {
     /// A step of the C++ kernel solidcore has not ported yet, refused rather than built another
     /// way: what is missing, and the solidcore issue that ports it.
     Unported(&'static str),
+    /// The job making the call was cancelled ([`cancel`]): the call stopped part way or never ran.
+    Cancelled(&'static str),
 }
 
 impl std::fmt::Display for Error {
@@ -128,6 +131,7 @@ impl std::fmt::Display for Error {
             Error::Solidcore(e) => write!(f, "solidcore: {e}"),
             Error::Internal(e) => write!(f, "solidcore failed internally in {e}"),
             Error::Unported(what) => write!(f, "not supported yet: {what}"),
+            Error::Cancelled(call) => write!(f, "cancelled: solidcore stopped {call}"),
         }
     }
 }
@@ -285,14 +289,17 @@ impl Brep {
     fn cpp(&self) -> Result<&ffi::Handle> {
         #[cfg(test)]
         route::reached_cpp();
+        // Kept for every later job: filled where no cancel can leave a "cancelled" answer in it.
         let made = self.cpp.get_or_init(|| {
-            let core = self.core.get().ok_or(Error::Empty)?.as_ref().map_err(Clone::clone)?;
-            let a = core::to_arrays(core)?;
-            let h = flat::Flat::from_arrays(&a)?.import()?.cpp.into_inner().unwrap_or(Err(Error::Empty))?;
-            match self.operand {
-                Some(k) => ffi::history::tag(&h, i32::try_from(k).map_err(|_| Error::Argument)?).map_err(error),
-                None => Ok(h),
-            }
+            cancel::shielded(|| {
+                let core = self.core.get().ok_or(Error::Empty)?.as_ref().map_err(Clone::clone)?;
+                let a = core::to_arrays(core)?;
+                let h = flat::Flat::from_arrays(&a)?.import()?.cpp.into_inner().unwrap_or(Err(Error::Empty))?;
+                match self.operand {
+                    Some(k) => ffi::history::tag(&h, i32::try_from(k).map_err(|_| Error::Argument)?).map_err(error),
+                    None => Ok(h),
+                }
+            })
         });
         made.as_ref().map_err(Clone::clone)
     }
@@ -301,12 +308,14 @@ impl Brep {
     /// tagged as the C++ kernel's is, for a [`Brep::tagged`] body).
     fn core(&self) -> Result<&core::Body> {
         let made = self.core.get_or_init(|| {
-            self.cpp.get().ok_or(Error::Empty)?.as_ref().map_err(Clone::clone)?;
-            let b = core::from_arrays(&self.cpp_arrays()?)?;
-            match self.operand {
-                Some(k) => core::history::tag(&b, k),
-                None => Ok(b),
-            }
+            cancel::shielded(|| {
+                self.cpp.get().ok_or(Error::Empty)?.as_ref().map_err(Clone::clone)?;
+                let b = core::from_arrays(&self.cpp_arrays()?)?;
+                match self.operand {
+                    Some(k) => core::history::tag(&b, k),
+                    None => Ok(b),
+                }
+            })
         });
         made.as_ref().map_err(Clone::clone)
     }

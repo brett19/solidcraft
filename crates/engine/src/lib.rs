@@ -80,6 +80,10 @@ pub enum EngineError {
     /// A command panicked; the document was kept as it was (a bug: please report it).
     #[error("internal error in `{0}` (the design was kept as it was): {1}")]
     Internal(String, String),
+    /// The command's watcher stopped it while it computed ([`solidcraft_doc::progress::Progress::cancel`]):
+    /// not a failure, and the design was kept as it was.
+    #[error("`{0}` was cancelled; the design was kept as it was")]
+    Cancelled(String),
 }
 
 impl From<solidcraft_doc::DocError> for EngineError {
@@ -1647,6 +1651,12 @@ impl Session {
         let r = match r {
             Ok(r) => Ok(r),
             Err(EngineError::BadParams { cmd, msg }) if cmd.is_empty() => Err(EngineError::BadParams { cmd: spec.id.to_string(), msg }),
+            // A command that fails after its watcher stopped it (a solidcore fillet stopped part
+            // way) was cancelled, not refused: the design is put back below either way. A panic
+            // stays a panic.
+            Err(e) if !matches!(e, EngineError::Internal(..)) && solidcraft_doc::progress::cancelled() => {
+                Err(EngineError::Cancelled(spec.id.to_string()))
+            }
             Err(e) => Err(e),
         };
         // New/open/recover can replace the Session. Device ownership belongs to the host,

@@ -160,12 +160,12 @@ fn ssi_on_cpp() -> bool {
 impl Surface {
     /// The C side's surface, made the first time the C++ kernel needs it.
     pub(crate) fn handle(&self) -> Result<&ffi::ssi::SurfaceHandle> {
-        self.handle.get_or_init(|| self.spec.on_cpp()).as_ref().map_err(Clone::clone)
+        self.handle.get_or_init(|| crate::cancel::shielded(|| self.spec.on_cpp())).as_ref().map_err(Clone::clone)
     }
 
     /// solidcore's surface, made the first time it is needed.
     fn core(&self) -> Result<&crate::core::split::Tool> {
-        self.core.get_or_init(|| crate::core::ssi::surface(&self.spec)).as_ref().map_err(Clone::clone)
+        self.core.get_or_init(|| crate::cancel::shielded(|| crate::core::ssi::surface(&self.spec))).as_ref().map_err(Clone::clone)
     }
 
     pub(crate) fn spec(&self) -> &Spec {

@@ -311,7 +311,9 @@ drawing and answering while it runs:
   replaced … nothing was applied`.
 - A chip in the view names the command, with **Stop**. Stop answers
   `{"ok": false, "stopped": true, "error": "stopped: …; nothing was applied"}` and the requests
-  waiting behind it go on. The computation finishes unseen in the background.
+  waiting behind it go on. The computation is cancelled: on the solidcore kernel the operation
+  running (a fillet, a boolean) stops at solidcore's next check; on the C++ kernel it finishes
+  unseen in the background.
 - `file.export` and `file.save_mesh` change nothing in the design. They run on a copy of the
   design as it was when they were asked for, and nothing waits behind them.
 - Batches with `timings` or `profile` still run on the window thread, so the times they report
