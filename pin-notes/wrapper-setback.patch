@@ -1,0 +1,34 @@
+--- a/crates/smlib/src/core/blend.rs
++++ b/crates/smlib/src/core/blend.rs
+@@ -24,6 +24,7 @@
+ 
+ use solidcore::EntityRef;
+ use solidcore::SolidError;
++use solidcore::blend::blend_corner::BlendCornerEvent;
+ use solidcore::blend::fillet_corner::p3::MIXED_CORNER_RAILS_CROSS;
+ use solidcore::blend::fillet_executive::p1::{FilletLaw, FilletLawKind};
+ use solidcore::blend::fillet_executive::p3::{ErrorInfo, FitKind, NoRoomReason};
+@@ -518,8 +519,10 @@
+ 
+ /// The corners' part of `round_edges` / `chamfer_offsets`: a chamfer's corners bevelled; each
+ /// setback set on its vertex's corner (`GetFilletCornerOfVertex`), which must be an
+-/// `SM_FCR_N_x_N_CONVEX` corner. Each set-back corner's index in the session's corners, in
+-/// `setbacks`' order.
++/// `SM_FCR_N_x_N_CONVEX` corner or a blend corner whose event is the setback (`SM_FCR_BLEND` with
++/// `SM_BCE_SETBACK`, as the fork's capi `round_edges` takes it; solidcore#2369 routes an all-G2
++/// corner there, `fixes.fillet_blend_corner`). Each set-back corner's index in the session's
++/// corners, in `setbacks`' order.
+ fn corners(
+     s: &mut FilletSession<'_>,
+     section: Section<'_>,
+@@ -544,7 +547,9 @@
+         let Some((i, id)) = found else {
+             return Ok(Err(Err(Error::Argument)));
+         };
+-        if s.corner(id)?.corner_type() != FilletCornerType::NByNConvex {
++        let corner = s.corner(id)?;
++        let setback_blend = corner.blend.is_some_and(|b| b.event == BlendCornerEvent::Setback);
++        if corner.corner_type() != FilletCornerType::NByNConvex && !setback_blend {
+             return Ok(Err(Ok(j)));
+         }
+         s.set_corner_setback(id, sb.distance)?;
