@@ -1,0 +1,105 @@
+[
+  {
+    "area": "fillets",
+    "case": "report-peg-front-chamfer-d1-then-concave-chamfer-d2",
+    "checks": [
+      {
+        "check": "continuity_order",
+        "got": {
+          "body": "Peg",
+          "edges": "blend",
+          "order": "g0",
+          "orders": {
+            "with_contact_faces": {
+              "g0": 4
+            }
+          },
+          "seams": 4,
+          "unmeasured": 0,
+          "worst_edge": {
+            "edge": 0,
+            "faces": "F2:side:a1|F6:blend:F2:side:a1|F2:top",
+            "meets": "with_contact_faces",
+            "next_order_metric": {
+              "at": [
+                33.43018703889427,
+                3.4351826262064984,
+                12.000000000000002
+              ],
+              "edge_fraction": 0.96875,
+              "metric": "normal_angle_deg",
+              "tolerance": 1.0,
+              "value": 45.00000000000028
+            }
+          }
+        },
+        "ok": true,
+        "want": ">= g0 at every blend seam"
+      },
+      {
+        "check": "shells",
+        "got": "Peg: 1",
+        "ok": true,
+        "want": 1
+      },
+      {
+        "check": "record_valid",
+        "got": "ok",
+        "ok": true,
+        "want": "ok"
+      },
+      {
+        "check": "smlib_check",
+        "got": "ok",
+        "ok": true,
+        "want": "ok"
+      },
+      {
+        "check": "body_count",
+        "got": 1,
+        "ok": true,
+        "want": 1
+      },
+      {
+        "check": "bbox.min",
+        "got": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "ok": true,
+        "want": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      },
+      {
+        "check": "bbox.max",
+        "got": [
+          48.0,
+          16.000000000000007,
+          20.0
+        ],
+        "ok": true,
+        "want": [
+          48.0,
+          16.0,
+          20.0
+        ]
+      }
+    ],
+    "kernel": "smlib",
+    "measured": {
+      "area_mm2": 3156.716925428434,
+      "body_count": 1,
+      "edges": 21,
+      "faces": 9,
+      "vertices": 14,
+      "volume_mm3": 9432.066057580232
+    },
+    "seconds": 0.52837232,
+    "sources": null,
+    "status": "pass"
+  }
+]
