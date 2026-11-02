@@ -15,4 +15,19 @@ Made by the binaries `solidcraft-cli-h2364d` (head, solidcore #2364 10331dc53) a
 | base 380cc8218 | pass | 1681.903764966137 | 8 |  |
 | #2364 10331dc53 | fail | 1682.8536106106817 | 10 | g0 seam: edge 1 (`F2:side:l3\|F5:blend:F2:side:l3\|F2:top#[F2:side:l3]`) at [-13.0, 15.5, 0.0], normal angle 90.0° |
 
+## Follow-up: the rig's flags, the edges handed to the blend, and #2364's new head
+**UpstreamFixes.** These are printed by an uncommitted debug line at the end of `crates/smlib/src/core.rs` `fixes()`, in a rebuilt h2364 (same flags and patches, dump-all). The full Debug output is in `../fixes-h2364.txt` (old head 10331dc53) and `../fixes-h2364-3dcc89a9f.txt` (new head). There are 313 flags and 308 are true. These 5 are false: `cone_unbounded_parameterized_as_nurb`, `ellipse_open_arc_keeps_end_angle`, `fillet_round_on_round_as_definition`, `fillet_overflow_crease_along_edge`, `fillet_refuse_rounds_breaking_through`. Rig-specific settings that are true: `fillet_keep_features`, `fillet_round_as_definition`, `fillet_blend_corner`. `fillet_extended_rail_end_at_side_edge_crossing` is removed. The rig also has the wrapper-setback and converter-arms patches. On 3dcc89a9f the only difference is the new field `shell_one_construction: false`.
+
+**Arguments to blend_call.** These are printed by an uncommitted eprintln at the top of `crates/smlib/src/core/blend.rs` `blend_call`:
+`kind=Round points=[[0.0, 15.5, 2.0], [-15.0, 0.0, 2.0]] sizes=[2.0, 2.0] tol=2.1602822881689185 corners=[] setbacks=[]`
+SolidCraft does no chain expansion before this call: the points are exactly the recipe's picks. Any tangent propagation happens inside solidcore. Note the pick tolerance that SolidCraft passes (`tol` above, the body-size-based value), which is much larger than 1e-6. The dumped input is byte-identical to `before-step*.smb` here.
+
+**Rerun on #2364's new head 3dcc89a9f.** It was built like h2364d (same flags and patches, fillet_blend_corner on, dump-all), with `SOLIDCRAFT_KERNEL=solidcore`. The case still reproduces:
+| head | status | volume mm³ | faces | seam |
+|---|---|---|---|---|
+| 10331dc53 (rebuilt) | fail | 1682.8536106106817 | 10 | edge 1 at [-13.0, 15.5, 0.0], 90° |
+| 3dcc89a9f | fail | 1682.8536106106817 | 10 | edge 1 at [-13.0, 15.5, 0.0], 90° |
+
+The new head still reproduces, so the edge-list-only rerun on the old head wasn't needed. The edge list is the same as the swarm's 4 (or 2) picks in any case.
+
 Filed by Claude Code for brett19.
