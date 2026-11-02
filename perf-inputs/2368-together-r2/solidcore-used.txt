@@ -1,0 +1,2 @@
+solidcore 1.0.1 /home/brett/tangency/scratch-solidcraft/pr-rig-1/sc-h2369n/crates/solidcore/Cargo.toml
+366c604da027cc7e27f69c3d347eae413b0e2243

@@ -1,0 +1,3 @@
+blend_call -> SMLib failed (status 1001)
+numeric arguments are not recorded
+input brep: 000000-blend_call-brep.smb

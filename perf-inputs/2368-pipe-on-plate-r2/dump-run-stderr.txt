@@ -1,0 +1,2 @@
+PRRIG after create_corners: step_ok=true error_info: ErrorInfo { code: 0, status: 0, corner_type: Unknown, edge_type: 14, executive: Some(Executive), vertex: None, edge: None, side_face: None, end_face: None, fillet_vertices: [None, None], surfaces: [], edges: [], curves: [], location: None, comment: "<no comment>\n", entity_name: "\n", no_room: None }
+error: 1 kernel case(s) failed

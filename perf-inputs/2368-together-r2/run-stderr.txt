@@ -1,0 +1,6 @@
+PRRIG after create_corners: step_ok=true error_info: ErrorInfo { code: 0, status: 0, corner_type: Unknown, edge_type: 14, executive: Some(Executive), vertex: None, edge: None, side_face: None, end_face: None, fillet_vertices: [None, None], surfaces: [], edges: [], curves: [], location: None, comment: "<no comment>\n", entity_name: "\n", no_room: None }
+PRRIG blend_failure: corner(CreateFilletCorners noted CornerUnsupported)=false
+PRRIG inner SolidError (Display): blend::fillet_executive::session::finish: upstream status 1001
+PRRIG inner SolidError (Debug): Upstream { operation: "blend::fillet_executive::session::finish", code: 1001, entity: None }
+PRRIG error_info: ErrorInfo { code: 3, status: 2, corner_type: NByTwo, edge_type: 14, executive: Some(Executive), vertex: Some(Topology(Target, Vertex(VertexId(5)))), edge: None, side_face: None, end_face: None, fillet_vertices: [None, None], surfaces: [None], edges: [], curves: [], location: None, comment: "Fillet Corner Error: Unable to Make Topology", entity_name: "SmFilletNx2Corner", no_room: None }
+error: 1 kernel case(s) failed

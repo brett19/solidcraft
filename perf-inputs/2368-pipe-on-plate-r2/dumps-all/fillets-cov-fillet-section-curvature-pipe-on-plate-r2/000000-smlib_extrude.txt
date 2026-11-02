@@ -1,0 +1,2 @@
+smlib_extrude -> ok (PRRIG local dump of every call)
+numeric arguments are not recorded

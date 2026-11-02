@@ -1,0 +1,4 @@
+SmApiBoolean -> ok (PRRIG local dump of every call)
+numeric arguments are not recorded
+input a: 000015-SmApiBoolean-a.smb
+input b: 000015-SmApiBoolean-b.smb

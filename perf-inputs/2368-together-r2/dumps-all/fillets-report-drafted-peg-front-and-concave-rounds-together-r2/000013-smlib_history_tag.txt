@@ -1,0 +1,3 @@
+smlib_history_tag -> ok (PRRIG local dump of every call)
+numeric arguments are not recorded
+input brep: 000013-smlib_history_tag-brep.smb

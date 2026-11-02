@@ -1,0 +1,140 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 89d156644..d125b6a83 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -4054,7 +4054,6 @@ dependencies = [
+ [[package]]
+ name = "solidcore"
+ version = "1.0.1"
+-source = "git+https://github.com/tangency-labs/solidcore?rev=97ed188db41d15238d81542a0b86bf7504cbc40f#97ed188db41d15238d81542a0b86bf7504cbc40f"
+ dependencies = [
+  "thiserror 2.0.21",
+ ]
+diff --git a/crates/smlib/src/core.rs b/crates/smlib/src/core.rs
+index 47ffbfc41..c5d7552e9 100644
+--- a/crates/smlib/src/core.rs
++++ b/crates/smlib/src/core.rs
+@@ -364,7 +364,6 @@ pub(crate) fn fixes() -> UpstreamFixes {
+     f.cone_create_canonical_preserves_inside_out_and_checks_height = true;
+     f.point_class_gap_3d_propagates_no_drop_error = true;
+     f.fillet_surface_plane_curve_on_plane_equation = true;
+-    f.fillet_extended_rail_end_at_side_edge_crossing = true;
+     f.fillet_gn_section_generator = true;
+     f.face_trim_curves_kept_where_exact = true;
+     f.swap_uv_keeps_analytic_definition = true;
+@@ -376,12 +375,22 @@ pub(crate) fn fixes() -> UpstreamFixes {
+     f.fillet_section_end_trim_at_creases = true;
+     f.fillet_refuse_mixed_corner_crossing_rails = true;
+     // Held back: see `HELD_BACK`.
+-    f.fillet_keep_features = false;
++    f.fillet_keep_features = true;
+     f.fillet_blend_corner = true;
+     f.fillet_exact_arc_sections = true;
+     f.fillet_exact_arc_spans = true;
+     // Held back: see `HELD_BACK`.
+     f.fillet_refuse_rounds_breaking_through = false;
++    f.fillet_round_as_definition = true;
++    // FLIP (local only): SOLIDCRAFT_FIX_FLIP=a,b flips those flags.
++    if let Ok(list) = std::env::var("SOLIDCRAFT_FIX_FLIP") {
++        for name in list.split(',').map(str::trim).filter(|n| !n.is_empty()) {
++            match f.flag_mut(name) {
++                Some(v) => *v = !*v,
++                None => eprintln!("SOLIDCRAFT_FIX_FLIP: no flag {name}"),
++            }
++        }
++    }
+     f
+ }
+ 
+@@ -441,6 +450,8 @@ pub(crate) fn run<T: dump::Answer>(call: &'static str, f: impl FnOnce(&mut Kerne
+         Ok(v) => {
+             if let Some(why) = v.refusal() {
+                 dump::failed(call, &why);
++            } else if std::env::var_os("PRRIG_DUMP_ALL").is_some() {
++                dump::failed(call, "ok (PRRIG local dump of every call)");
+             }
+         }
+         Err(e) => dump::failed(call, &e.to_string()),
+diff --git a/crates/smlib/src/core/blend.rs b/crates/smlib/src/core/blend.rs
+index c5bc716db..f57dd181c 100644
+--- a/crates/smlib/src/core/blend.rs
++++ b/crates/smlib/src/core/blend.rs
+@@ -285,6 +285,7 @@ fn face_set(b: &Brep) -> solidcore::Result<HashSet<FaceId>> {
+ /// [`Error::Unported`] naming it.
+ fn blend_failure(s: &FilletSession<'_>, e: SolidError, corner: bool) -> (Error, Option<EdgeId>) {
+     let info = s.error_info();
++    eprintln!("PRRIG blend_failure: corner(CreateFilletCorners noted CornerUnsupported)={corner}\nPRRIG inner SolidError (Display): {e}\nPRRIG inner SolidError (Debug): {e:?}\nPRRIG error_info: {info:?}");
+     let fit = match &e {
+         SolidError::FilletRefused { fit, .. } => Some(*fit),
+         _ if info.code == FilletErrorType::NoRoom as i32 => s.fit_size(),
+@@ -426,6 +427,7 @@ fn blend_edges_stopping(
+         // A vertex `CreateFilletCorners` made no corner for, noted before a later step notes its
+         // own failure over it ([`blend_failure`]).
+         let corner = step.is_ok() && s.error_info().code == FilletErrorType::CornerUnsupported as i32;
++        eprintln!("PRRIG after create_corners: step_ok={} error_info: {:?}", step.is_ok(), s.error_info());
+         s.set_overflow_first(overflow_first.is_some());
+         s.set_classify_only(overflow_first.as_ref().is_some_and(|o| o.classify_only));
+         if let Ok(Ok(_)) = step {
+diff --git a/crates/smlib/src/lib.rs b/crates/smlib/src/lib.rs
+index 6b60f7550..3b27da309 100644
+--- a/crates/smlib/src/lib.rs
++++ b/crates/smlib/src/lib.rs
+@@ -230,6 +230,7 @@ static INIT_RESULT: AtomicI32 = AtomicI32::new(0);
+ /// Checks the C API's version, creates SMLib's context and routes its log to the `log` crate.
+ /// Every other call runs it first; calling it at start-up keeps the cost out of the first operation.
+ pub fn init() -> Result<()> {
++    route::cpp_trap("init");
+     #[cfg(test)]
+     route::reached_cpp();
+     INIT.call_once(|| {
+@@ -306,6 +307,7 @@ impl std::fmt::Debug for Brep {
+ impl Brep {
+     /// A body the C++ kernel made.
+     fn made(h: ffi::Handle) -> Brep {
++        route::cpp_trap("made");
+         #[cfg(test)]
+         route::reached_cpp();
+         Brep { cpp: OnceLock::from(Ok(h)), core: OnceLock::new(), maker: route::Backend::Smlib, operand: None }
+@@ -319,6 +321,7 @@ impl Brep {
+     /// The C++ kernel's body: converted from solidcore's the first time it is asked for (and
+     /// tagged as solidcore's is, for a [`Brep::tagged`] body).
+     fn cpp(&self) -> Result<&ffi::Handle> {
++        route::cpp_trap("cpp");
+         #[cfg(test)]
+         route::reached_cpp();
+         let made = self.cpp.get_or_init(|| {
+diff --git a/crates/smlib/src/route.rs b/crates/smlib/src/route.rs
+index 6daf9c31a..6abc5bdd0 100644
+--- a/crates/smlib/src/route.rs
++++ b/crates/smlib/src/route.rs
+@@ -63,6 +63,18 @@ pub(crate) fn take_reached() -> (u64, u64) {
+     REACHED.with(|r| r.replace((0, 0)))
+ }
+ 
++/// TRAP: records a C++ touch to the file `SOLIDCRAFT_CPP_TRAP` names.
++pub(crate) fn cpp_trap(site: &str) {
++    use std::io::Write;
++    static PATH: std::sync::OnceLock<Option<std::ffi::OsString>> = std::sync::OnceLock::new();
++    if let Some(p) = PATH.get_or_init(|| std::env::var_os("SOLIDCRAFT_CPP_TRAP")) {
++        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
++            let thread = std::thread::current();
++            let _ = writeln!(f, "{site} {} {}", std::process::id(), thread.name().unwrap_or("?"));
++        }
++    }
++}
++
+ /// Tests that exercise the C++ kernel opt in: until the guard drops, this thread's operations run
+ /// on it. Thread by thread, so that the other tests in the binary stay on the process's kernel. The
+ /// guard fails a test that never touched a C++ body, so a parity test can't quietly compare
+diff --git a/crates/smlib/src/ssi.rs b/crates/smlib/src/ssi.rs
+index 76f6a4235..ef50ec9cf 100644
+--- a/crates/smlib/src/ssi.rs
++++ b/crates/smlib/src/ssi.rs
+@@ -160,6 +160,7 @@ fn ssi_on_cpp() -> bool {
+ impl Surface {
+     /// The C side's surface, made the first time the C++ kernel needs it.
+     pub(crate) fn handle(&self) -> Result<&ffi::ssi::SurfaceHandle> {
++        crate::route::cpp_trap("ssi");
+         self.handle.get_or_init(|| self.spec.on_cpp()).as_ref().map_err(Clone::clone)
+     }
+ 

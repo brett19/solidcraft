@@ -1,0 +1,11 @@
+[
+  {
+    "area": "fillets",
+    "case": "cov-fillet-section-curvature-pipe-on-plate-r2",
+    "error": "step 3 (solid.fillet): SMLib export: solidcore: flat arrays: an approximated face surface that is not a B-spline",
+    "kernel": "smlib",
+    "seconds": 1.662363033,
+    "sources": [],
+    "status": "fail"
+  }
+]

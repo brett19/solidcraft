@@ -1,0 +1,3 @@
+FlatFromBrep -> solidcore: flat arrays: an approximated face surface that is not a B-spline
+numeric arguments are not recorded
+input brep: 000026-FlatFromBrep-brep.smb
