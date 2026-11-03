@@ -2,6 +2,11 @@
 //! off the window thread. The caller wraps the work in [`watch`]; the timeline's evaluation
 //! loop reports each feature it reaches and, once [`Progress::cancel`] is called, skips the
 //! rest. Nothing changes for evaluations that are not watched.
+//!
+//! Cancel also stops the solidcore operation running ([`solidcraft_kernel::watch::Cancel`]): a
+//! round, an offset, a shell or a sweep that takes a minute returns at solidcore's next check, and
+//! the evaluation's result, cut short by it, is dropped as the caller drops every cancelled one.
+//! Each `Progress` has its own switch, so cancelling one job never stops another.
 
 use std::cell::RefCell;
 use std::sync::{
@@ -13,6 +18,8 @@ use std::sync::{
 #[derive(Debug)]
 pub struct Progress {
     cancelled: AtomicBool,
+    /// Stops the solidcore calls made under the watch.
+    kernel: solidcraft_kernel::watch::Cancel,
     done: AtomicUsize,
     total: AtomicUsize,
     /// The feature the evaluation waits at until cancelled ([`Progress::hold_at`]).
@@ -45,6 +52,7 @@ impl Default for Progress {
     fn default() -> Self {
         Progress {
             cancelled: AtomicBool::new(false),
+            kernel: solidcraft_kernel::watch::Cancel::new(),
             done: AtomicUsize::new(0),
             total: AtomicUsize::new(0),
             hold: AtomicUsize::new(usize::MAX),
@@ -59,12 +67,16 @@ impl Default for Progress {
 }
 
 impl Progress {
-    /// Ask the watched evaluation to stop at its next feature.
+    /// Ask the watched evaluation to stop at its next feature, and the kernel operation running
+    /// to stop at its next check.
     pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::Relaxed);
+        self.kernel.cancel();
     }
     pub fn is_cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::Relaxed)
+        // Either flag: a kernel call that saw its switch thrown has failed because of it, whatever
+        // order another thread sees the two stores in.
+        self.cancelled.load(Ordering::Relaxed) || self.kernel.is_cancelled()
     }
     /// Make the watched evaluation wait before feature `index` until it is cancelled: tests
     /// use it to act while a load is certainly still running, whatever the machine's speed.
@@ -96,6 +108,18 @@ impl Progress {
     }
 }
 
+/// Cancels its progress when dropped: held by whatever waits for a job off the window thread, so
+/// a job nobody waits for any more (given up, replaced) stops computing, and lets go of the
+/// kernel, instead of running to its end unseen.
+#[derive(Debug)]
+pub struct StopOnDrop(pub Arc<Progress>);
+
+impl Drop for StopOnDrop {
+    fn drop(&mut self) {
+        self.0.cancel();
+    }
+}
+
 /// Tell a watcher which item a command is on (`name`, `index` from 0 of `count`), such as the
 /// linked design Update Links reads again; `None` once it is past them. Nothing happens unless
 /// the work is watched ([`watch`]).
@@ -123,6 +147,9 @@ impl solidcraft_kernel::watch::Watch for KernelWatch {
         self.0.work_total.store(total, Ordering::Relaxed);
         self.0.work_done.store(done, Ordering::Relaxed);
     }
+    fn kernel_cancel(&self) -> Option<solidcraft_kernel::watch::Cancel> {
+        Some(self.0.kernel.clone())
+    }
 }
 
 struct Current {
@@ -149,6 +176,12 @@ pub fn watch<R>(progress: Arc<Progress>, f: impl FnOnce() -> R) -> R {
     }
     let _restore = Restore(Some(previous));
     solidcraft_kernel::watch::watching(kernel, f)
+}
+
+/// Whether the work on this thread is watched and its watcher asked it to stop: a command that
+/// fails then failed because of it ([`Progress::cancel`]).
+pub fn cancelled() -> bool {
+    CURRENT.with(|c| c.borrow().as_ref().is_some_and(|cur| cur.progress.is_cancelled()))
 }
 
 /// Entered at the start of an evaluation; the guard leaves it.

@@ -826,6 +826,10 @@ fn add_feature_in(s: &mut Session, p: &Value, kind: FeatureKind, world: bool) ->
             f.body_names = made;
         }
     }
+    // Stopped by its watcher: the feature was skipped or cut short, so it is not added at all.
+    if solidcraft_doc::progress::cancelled() {
+        return Err(EngineError::Cancelled(String::new()));
+    }
     let r = s.model.result(id).cloned();
     if let Some(r) = &r
         && let Some(e) = r.error.clone()

@@ -28,9 +28,10 @@ fn pool() -> Option<&'static rayon::ThreadPool> {
 /// thread. Waking the pool's workers costs tens of microseconds, so callers ask for it only
 /// when the items carry more work than that (decided from the work, not the item count).
 pub(crate) fn map<T: Sync, R: Send>(what: &'static str, items: &[T], parallel: bool, f: impl Fn(&T) -> Result<R> + Sync) -> Vec<Result<R>> {
-    // The workers run under the caller's validation mode (`crate::validation`).
+    // The workers run under the caller's validation mode (`crate::validation`) and its stop switch.
     let scope = crate::validation::current();
-    let one = |item: &T| crate::validation::within(scope.clone(), || guard(what, || f(item)));
+    let cancel = crate::watch::kernel_cancel();
+    let one = |item: &T| crate::watch::within(cancel.clone(), || crate::validation::within(scope.clone(), || guard(what, || f(item))));
     // The browser build has no worker pool: everything runs on the calling thread.
     #[cfg(target_arch = "wasm32")]
     let _ = parallel;
@@ -71,6 +72,8 @@ pub fn for_each_on_threads<T: Sync>(items: &[T], max_threads: usize, f: impl Fn(
 /// a worker while it fills a shared lazy mesh cell. The browser runs serially.
 pub fn map_with_local_pools<T: Sync, R: Send>(items: &[T], max_threads: usize, f: impl Fn(&T) -> Result<R> + Sync) -> Vec<Result<R>> {
     #[cfg(not(target_arch = "wasm32"))]
+    let cancel = crate::watch::kernel_cancel();
+    #[cfg(not(target_arch = "wasm32"))]
     let one = |item: &T| {
         use std::cell::OnceCell;
         thread_local! {
@@ -87,7 +90,8 @@ pub fn map_with_local_pools<T: Sync, R: Send>(items: &[T], max_threads: usize, f
             }
             let pool = cell.get().ok_or_else(|| crate::KernelError::Failed("missing mesh worker".into()))?;
             let scope = crate::validation::current();
-            pool.install(|| crate::validation::within(scope, || guard("mesh worker", || f(item))))
+            let cancel = cancel.clone();
+            pool.install(|| crate::watch::within(cancel, || crate::validation::within(scope, || guard("mesh worker", || f(item)))))
         })
     };
     #[cfg(target_arch = "wasm32")]
@@ -101,9 +105,11 @@ pub fn map_with_local_pools<T: Sync, R: Send>(items: &[T], max_threads: usize, f
 /// `f` over `items` as [`for_each_on_threads`] runs it, results in item order (`None` where an
 /// item panicked).
 pub fn map_on_threads<T: Sync, R: Send>(items: &[T], max_threads: usize, f: impl Fn(&T) -> R + Sync) -> Vec<Option<R>> {
-    // The threads run under the caller's validation mode (`crate::validation`).
+    // The threads run under the caller's validation mode (`crate::validation`) and its stop switch.
     let scope = crate::validation::current();
-    let one = |item: &T| crate::validation::within(scope.clone(), || guard("parallel item", || Ok(f(item))).ok());
+    let cancel = crate::watch::kernel_cancel();
+    let one =
+        |item: &T| crate::watch::within(cancel.clone(), || crate::validation::within(scope.clone(), || guard("parallel item", || Ok(f(item))).ok()));
     #[cfg(not(target_arch = "wasm32"))]
     {
         use std::sync::atomic::{AtomicUsize, Ordering};

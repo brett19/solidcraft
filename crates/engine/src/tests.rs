@@ -5167,3 +5167,195 @@ fn a_command_check_that_panics_refuses_the_command() {
     assert!(matches!(r, Err(EngineError::Internal(..))), "{r:?}");
     assert!(s.doc.features.is_empty());
 }
+
+/// A 100 × 100 × 5 plate and `n` posts (radius 3, height 10) standing in it, each its own body,
+/// and the Join of them all: one long solidcore boolean (`smlib_boolean_union_all`).
+fn plate_and_posts(n: usize) -> (Session, Value) {
+    let mut s = Session::default();
+    run(&mut s, "solid.box", json!({"length": 100, "width": 100, "height": 5, "body_name": "Plate"}));
+    let mut tools = Vec::new();
+    for i in 0..n {
+        let at = [8.0 + 12.0 * (i % 8) as f64, 8.0 + 12.0 * (i / 8) as f64, 0.0];
+        let name = format!("Post {i}");
+        run(&mut s, "solid.cylinder", json!({"radius": 3, "height": 10, "base": at, "operation": "new", "body_name": name}));
+        tools.push(name);
+    }
+    (s, json!({"target": "Plate", "tools": tools, "operation": "join"}))
+}
+
+/// Cancel `progress` once solidcore is inside `call`, from another thread, as the window's
+/// Cancel does; gives up once `done`. When it cancelled, if it did.
+fn cancel_inside(
+    call: &'static str,
+    progress: std::sync::Arc<solidcraft_doc::progress::Progress>,
+    done: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> std::thread::JoinHandle<Option<std::time::Instant>> {
+    std::thread::spawn(move || {
+        while !done.load(std::sync::atomic::Ordering::Relaxed) {
+            if solidcraft_kernel::native_call_in_flight().as_deref() == Some(call) {
+                progress.cancel();
+                return Some(std::time::Instant::now());
+            }
+            std::thread::yield_now();
+        }
+        None
+    })
+}
+
+/// Run `id` on `s` under a watch that Cancel stops once solidcore is inside `call`. The command's
+/// result, and how long after the cancel it came back.
+fn cancelled_inside(s: &mut Session, call: &'static str, id: &str, params: &Value) -> (Result<Value>, std::time::Duration) {
+    use solidcraft_doc::progress::{Progress, watch};
+    use std::sync::{Arc, atomic::AtomicBool};
+    let progress = Arc::new(Progress::default());
+    let done = Arc::new(AtomicBool::new(false));
+    let canceller = cancel_inside(call, progress.clone(), done.clone());
+    let r = watch(progress, || s.execute(id, params));
+    let end = std::time::Instant::now();
+    done.store(true, std::sync::atomic::Ordering::Relaxed);
+    let at = canceller.join().unwrap().unwrap_or_else(|| panic!("Cancel came while solidcore computed {call}: {r:?}"));
+    (r, end.saturating_duration_since(at))
+}
+
+/// A cancelled job left nothing behind: the design is the one before it, and no feature failed.
+fn kept_as_it_was(s: &Session, doc: &std::sync::Arc<solidcraft_doc::Document>, bodies: usize, undo: usize) {
+    assert!(std::sync::Arc::ptr_eq(&s.doc, doc), "the design is the one before the command");
+    assert_eq!((s.model.state().bodies.len(), s.undo.len()), (bodies, undo));
+    assert!(s.model.results.iter().all(|r| r.error.is_none()), "no feature failed");
+}
+
+/// The solidcore operations below run for a minute (a curvature round) or seconds (a shell) when
+/// not stopped; cancelled, they come back at solidcore's next check, in milliseconds. A bound this
+/// loose only fails when the cancel never reached solidcore and the call ran to its end.
+const CANCEL_RETURNS_WITHIN: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// solidcore#2136: Cancel while solidcore computes a Join stops it part way. The command is
+/// cancelled (not failed), the design is exactly as it was, and the next job on it, with its own
+/// switch, builds the Join in full: nothing of the cancel is left in the kernel or the caches.
+#[test]
+fn a_join_cancelled_while_solidcore_computes_it_leaves_the_design_and_the_next_job_alone() {
+    use solidcraft_doc::progress::{Progress, watch};
+    let posts = 32;
+    let (mut s, join) = plate_and_posts(posts);
+    let (doc, bodies, undo) = (s.doc.clone(), s.model.state().bodies.len(), s.undo.len());
+    let (r, _) = cancelled_inside(&mut s, "smlib_boolean_union_all", "solid.combine", &join);
+    assert!(matches!(r, Err(EngineError::Cancelled(ref id)) if id == "solid.combine"), "{r:?}");
+    kept_as_it_was(&s, &doc, bodies, undo);
+    // The next job: the same Join, watched by a switch of its own, builds in full.
+    watch(std::sync::Arc::new(Progress::default()), || s.execute("solid.combine", &join)).unwrap();
+    assert_eq!(s.model.state().bodies.len(), 1);
+    let want = 100.0 * 100.0 * 5.0 + posts as f64 * PI * 9.0 * 5.0;
+    let got = volume(&mut s);
+    assert!(rel(got, want) < 1e-6, "{got} vs {want}");
+}
+
+/// solidcore#2373: Cancel while solidcore computes a curvature (Gⁿ) round, which takes over a
+/// minute uncancelled (tests/kernel-cases/fillets/cov-fillet-section-curvature-boss-root-r2), stops
+/// it at once: the round is cancelled, not failed or built, and the design is as it was.
+#[test]
+fn a_curvature_round_cancelled_while_solidcore_computes_it_comes_back_at_once() {
+    let mut s = Session::default();
+    run(&mut s, "solid.box", json!({"length": 60, "width": 40, "height": 10, "body_name": "Plate"}));
+    run(&mut s, "solid.cylinder", json!({"radius": 8, "height": 10, "base": [30, 20, 10], "operation": "join", "targets": ["Plate"]}));
+    let (doc, bodies, undo) = (s.doc.clone(), s.model.state().bodies.len(), s.undo.len());
+    let v0 = volume(&mut s);
+    let round = json!({"radius": 2, "type": "curvature", "edges": [[38, 20, 10]]});
+    let (r, after) = cancelled_inside(&mut s, "blend_call", "solid.fillet", &round);
+    assert!(matches!(r, Err(EngineError::Cancelled(ref id)) if id == "solid.fillet"), "{r:?}");
+    assert!(after < CANCEL_RETURNS_WITHIN, "the round came back {after:?} after Cancel");
+    kept_as_it_was(&s, &doc, bodies, undo);
+    assert_eq!(volume(&mut s), v0);
+}
+
+/// solidcore#2375: Cancel while solidcore shells a swept bar (tests/kernel-cases/shell/566) stops
+/// the shell at once; the design is as it was.
+#[test]
+fn a_shell_cancelled_while_solidcore_computes_it_comes_back_at_once() {
+    let mut s = Session::default();
+    run(&mut s, "sketch.create", json!({"plane": "XZ", "name": "Path"}));
+    run(&mut s, "sketch.line", json!({"points": [[0, 0], [0, 30]], "ids": ["l1"]}));
+    run(&mut s, "sketch.arc.three_point", json!({"start": "l1.end", "through": [8.787, 51.213], "end": [30, 60], "id": "a1"}));
+    run(&mut s, "sketch.line", json!({"points": ["a1.end", [60, 60]], "ids": ["l2"]}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "sketch.create", json!({"plane": "XY", "name": "Section"}));
+    run(&mut s, "sketch.rectangle.center", json!({"center": [0, 0], "corner": [4, 2.5]}));
+    run(&mut s, "sketch.finish", json!({}));
+    run(&mut s, "solid.sweep", json!({"sketch": "Section", "path_sketch": "Path", "path": ["l1", "a1", "l2"]}));
+    let (doc, bodies, undo) = (s.doc.clone(), s.model.state().bodies.len(), s.undo.len());
+    let shell = json!({"faces": [[0, 0, 0]], "thickness": 0.5});
+    let (r, after) = cancelled_inside(&mut s, "smlib_shell", "solid.shell", &shell);
+    assert!(matches!(r, Err(EngineError::Cancelled(ref id)) if id == "solid.shell"), "{r:?}");
+    assert!(after < CANCEL_RETURNS_WITHIN, "the shell came back {after:?} after Cancel");
+    kept_as_it_was(&s, &doc, bodies, undo);
+}
+
+/// A watch nobody cancels changes nothing: a round, a shell and an offset of faces built under
+/// one give the bodies built without it, to the last bit of their volume and area.
+#[test]
+fn rounds_shells_and_offsets_under_a_watch_not_cancelled_are_unchanged() {
+    use solidcraft_doc::progress::{Progress, watch};
+    let steps = [
+        ("solid.fillet", json!({"radius": 2, "edges": [[5, 0, 10]]})),
+        ("solid.offset_face", json!({"faces": [[5, 5, 0]], "distance": 1})),
+        ("solid.shell", json!({"faces": [[5, 5, 10]], "thickness": 1})),
+    ];
+    let build = |watched: bool| {
+        let mut s = Session::default();
+        run(&mut s, "solid.box", json!({"length": 10, "width": 10, "height": 10}));
+        let progress = std::sync::Arc::new(Progress::default());
+        let mut measures = Vec::new();
+        for (id, p) in &steps {
+            let r = if watched { watch(progress.clone(), || s.execute(id, p)) } else { s.execute(id, p) };
+            r.unwrap_or_else(|e| panic!("{id}: {e}"));
+            let m = run(&mut s, "inspect.measure", json!({}));
+            measures.push((m["total"]["volume_mm3"].as_f64().unwrap(), m["total"]["area_mm2"].as_f64().unwrap(), m["total"]["faces"].clone()));
+        }
+        assert!(!progress.is_cancelled());
+        measures
+    };
+    assert_eq!(build(true), build(false));
+}
+
+/// Cancelling one design's job leaves another design's job alone: its solidcore calls, made
+/// while the cancelled one stops, run with their own switch and build.
+#[test]
+fn cancelling_one_designs_job_leaves_another_designs_job_alone() {
+    use solidcraft_doc::progress::{Progress, watch};
+    use std::sync::{Arc, atomic::AtomicBool};
+    let (mut a, join) = plate_and_posts(32);
+    let mut b = Session::default();
+    run(&mut b, "solid.box", json!({"length": 10, "width": 10, "height": 10}));
+    let (pa, pb) = (Arc::new(Progress::default()), Arc::new(Progress::default()));
+    let done = Arc::new(AtomicBool::new(false));
+    // B's fillet starts while A's Join holds the kernel, and waits for it.
+    let starter = {
+        let (pa, pb, done) = (pa.clone(), pb.clone(), done.clone());
+        std::thread::spawn(move || {
+            while solidcraft_kernel::native_call_in_flight().as_deref() != Some("smlib_boolean_union_all") {
+                if done.load(std::sync::atomic::Ordering::Relaxed) {
+                    return (b, None);
+                }
+                std::thread::yield_now();
+            }
+            let other = {
+                let pb = pb.clone();
+                std::thread::spawn(move || {
+                    let r = watch(pb, || b.execute("solid.fillet", &json!({"radius": 2, "edges": [[5, 0, 10]]})).map(|_| ()));
+                    (b, r)
+                })
+            };
+            pa.cancel();
+            let (b, r) = other.join().unwrap();
+            (b, Some(r))
+        })
+    };
+    let r = watch(pa.clone(), || a.execute("solid.combine", &join));
+    done.store(true, std::sync::atomic::Ordering::Relaxed);
+    let (mut b, rb) = starter.join().unwrap();
+    assert!(matches!(r, Err(EngineError::Cancelled(_))), "{r:?}");
+    let rb = rb.expect("B ran while A computed");
+    assert!(rb.is_ok() && !pb.is_cancelled(), "{rb:?}");
+    let want = 1000.0 - (1.0 - PI / 4.0) * 4.0 * 10.0;
+    let got = volume(&mut b);
+    assert!(rel(got, want) < 1e-6, "{got} vs {want}");
+}

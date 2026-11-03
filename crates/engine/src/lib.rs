@@ -84,6 +84,10 @@ pub enum EngineError {
     /// A command panicked; the document was kept as it was (a bug: please report it).
     #[error("internal error in `{0}` (the design was kept as it was): {1}")]
     Internal(String, String),
+    /// The command's watcher stopped it while it computed ([`solidcraft_doc::progress::Progress::cancel`]):
+    /// not a failure, and the design was kept as it was.
+    #[error("`{0}` was cancelled; the design was kept as it was")]
+    Cancelled(String),
 }
 
 impl From<solidcraft_doc::DocError> for EngineError {
@@ -105,6 +109,8 @@ impl From<solidcraft_kernel::KernelError> for EngineError {
             // A panic the kernel caught: internal, as one in the command would be. The command's id
             // is filled in where the command is run (`Session::execute`).
             solidcraft_kernel::KernelError::Internal(m) => EngineError::Internal(String::new(), m),
+            // Named by the command where it is run, as a panic is.
+            solidcraft_kernel::KernelError::Cancelled(_) => EngineError::Cancelled(String::new()),
             e => EngineError::Other(e.to_string()),
         }
     }
@@ -1689,6 +1695,13 @@ impl Session {
         let r = match r {
             Ok(r) => Ok(r),
             Err(EngineError::BadParams { cmd, msg }) if cmd.is_empty() => Err(EngineError::BadParams { cmd: spec.id.to_string(), msg }),
+            Err(EngineError::Cancelled(cmd)) if cmd.is_empty() => Err(EngineError::Cancelled(spec.id.to_string())),
+            // A command that fails after its watcher stopped it (a solidcore round stopped part
+            // way) was cancelled, not refused: the design is put back below either way. A panic
+            // stays a panic.
+            Err(e) if !matches!(e, EngineError::Internal(..) | EngineError::Cancelled(_)) && solidcraft_doc::progress::cancelled() => {
+                Err(EngineError::Cancelled(spec.id.to_string()))
+            }
             Err(e) => Err(e),
         };
         // New/open/recover can replace the Session. Device ownership belongs to the host,

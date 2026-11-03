@@ -150,7 +150,8 @@ impl ModelBody {
             let tol = (self.body.size() * 2e-3).max(1e-3);
             self.body.faces(tol).map(Arc::from)
         };
-        let (body, faces) = self.joint_faces.get_or_init(|| (self.body.clone(), measure()));
+        // Shared by copies of the body in other jobs: filled where no cancel can leave an error.
+        let (body, faces) = self.joint_faces.get_or_init(|| (self.body.clone(), kernel::watch::shielded(measure)));
         if body.same(&self.body) { faces.clone().map_err(Into::into) } else { measure().map_err(Into::into) }
     }
 
@@ -171,7 +172,8 @@ impl ModelBody {
             cost_tests::count(|c| c.measures += 1);
             kernel::measure(&self.body)
         };
-        let (body, m) = self.measured.get_or_init(|| (self.body.clone(), measure()));
+        // Shared by copies of the body in other jobs: filled where no cancel can leave an error.
+        let (body, m) = self.measured.get_or_init(|| (self.body.clone(), kernel::watch::shielded(measure)));
         // The body was replaced in this cell's holder since: measure it again.
         if body.same(&self.body) { m.clone() } else { measure() }
     }

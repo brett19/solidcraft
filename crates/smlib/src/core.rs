@@ -426,6 +426,12 @@ pub(crate) static KERNEL: Mutex<Option<Kernel>> = Mutex::new(None);
 
 /// Runs `f` on the process's kernel. A panic in solidcore is caught: the kernel, which it may have
 /// left half-updated, is replaced by a fresh one and the call fails with [`Error::Internal`].
+///
+/// A call made inside a cancellable job ([`crate::cancel`]) runs with the job's token on the
+/// kernel, taken off again when it returns. Once the job is cancelled the call fails with
+/// [`Error::Cancelled`] (at once, or at solidcore's next check), whatever it would have answered,
+/// and the kernel is replaced by a fresh one, as after a panic: solidcore may stop part way
+/// through its caches or its context, and the next call must not see that.
 pub(crate) fn run<T: dump::Answer>(call: &'static str, f: impl FnOnce(&mut Kernel) -> std::result::Result<T, solidcore::SolidError>) -> Result<T> {
     run_on(call, &[], f)
 }
@@ -448,8 +454,32 @@ pub(crate) fn run_on<T: dump::Answer>(
     inputs: dump::Inputs<'_>,
     f: impl FnOnce(&mut Kernel) -> std::result::Result<T, solidcore::SolidError>,
 ) -> Result<T> {
+    run_stoppable(call, inputs, true, f)
+}
+
+/// [`run_on`]; a call that is not `stoppable` runs to its end once started, with no token on the
+/// kernel (a cancelled job's call still fails before it starts).
+fn run_stoppable<T: dump::Answer>(
+    call: &'static str,
+    inputs: dump::Inputs<'_>,
+    stoppable: bool,
+    f: impl FnOnce(&mut Kernel) -> std::result::Result<T, solidcore::SolidError>,
+) -> Result<T> {
+    let job = crate::cancel::token();
+    let cancelled = || job.as_ref().is_some_and(solidcore::kernel::CancelToken::is_cancelled);
+    if cancelled() {
+        return Err(Error::Cancelled(call));
+    }
     let mut guard = KERNEL.lock().unwrap_or_else(PoisonError::into_inner);
+    // Cancelled while another job's call held the kernel.
+    if cancelled() {
+        return Err(Error::Cancelled(call));
+    }
     let k = guard.get_or_insert_with(fresh);
+    match &job {
+        Some(token) if stoppable => k.set_cancel_token(token.clone()),
+        _ => k.clear_cancel_token(),
+    }
     // A profiler span per call: where the kernel's time goes.
     let _span = solidcraft_profile::span("solidcore", call);
     dump::set_current(Some(call));
@@ -463,7 +493,17 @@ pub(crate) fn run_on<T: dump::Answer>(
     let depth = Depth;
     let caught = catch_unwind(AssertUnwindSafe(|| f(k)));
     drop(depth);
+    if let Some(k) = guard.as_mut() {
+        k.clear_cancel_token();
+    }
     let r = match caught {
+        // A stopped call is no answer, even one a wrapper turned into a refusal or a default. A
+        // panic stays a panic.
+        Ok(_) if stoppable && cancelled() => {
+            *guard = Some(fresh());
+            dump::set_current(None);
+            return Err(Error::Cancelled(call));
+        }
         Ok(Ok(v)) => Ok(v),
         Ok(Err(e)) => Err(Error::Solidcore(format!("{call}: {e}"))),
         Err(p) => {
@@ -508,7 +548,9 @@ pub(crate) fn with_body<T: dump::Answer>(
     if body.0.is_poisoned() {
         return Err(Error::Internal(format!("{call}: the body was left unfinished by an earlier panic")));
     }
-    run_on(call, &[("brep", body)], |k| f(k, &mut body.0.lock().unwrap_or_else(PoisonError::into_inner)))
+    // `body` is edited in place and shared by other jobs: a cancel must not stop solidcore part way
+    // through it, so the call runs to its end (these are queries, not long operations).
+    run_stoppable(call, &[("brep", body)], false, |k| f(k, &mut body.0.lock().unwrap_or_else(PoisonError::into_inner)))
 }
 
 /// An axis-aligned box from its lower corner (`SmApiCreateBox`, as `smlib_make_box` checks it:
@@ -631,5 +673,50 @@ mod tests {
         let r: Result<()> = run("test", |_| panic!("boom"));
         assert!(matches!(r, Err(Error::Internal(ref m)) if m.contains("boom")), "{r:?}");
         assert!(make_box([0.0; 3], [1.0; 3]).is_ok());
+    }
+
+    /// A cancelled job's call fails as cancelled without running; the token is on the kernel for
+    /// the job's own calls only, and the next job's call runs as if nothing had happened.
+    #[test]
+    fn a_cancel_stops_its_jobs_calls_and_no_other() {
+        use crate::cancel::{Cancel, cancelling};
+        let job = Cancel::new();
+        let saw = cancelling(Some(job.clone()), || run("test", |k| Ok(k.cancel.is_some())));
+        assert_eq!(saw, Ok(true), "the job's token is on the kernel while its call runs");
+        assert_eq!(run("test", |k| Ok(k.cancel.is_some())), Ok(false), "and off it for a call outside the job");
+        job.cancel();
+        let ran = std::cell::Cell::new(false);
+        let r = cancelling(Some(job.clone()), || {
+            run("test", |_| {
+                ran.set(true);
+                Ok(())
+            })
+        });
+        assert_eq!(r, Err(Error::Cancelled("test")));
+        assert!(!ran.get(), "a cancelled job's call never runs");
+        assert!(cancelling(Some(job), || make_box([0.0; 3], [1.0; 3])).is_err());
+        // Cancelled mid-call: the answer is dropped whatever it was.
+        let other = Cancel::new();
+        let r = cancelling(Some(other.clone()), || {
+            run("test", |_| {
+                other.cancel();
+                Ok(())
+            })
+        });
+        assert_eq!(r, Err(Error::Cancelled("test")));
+        // A query on a shared body runs to its end without the token, and keeps its answer.
+        let b = make_box([0.0; 3], [1.0; 3]).unwrap();
+        let late = Cancel::new();
+        let saw = cancelling(Some(late.clone()), || {
+            with_body("test", &b, |k, _| {
+                late.cancel();
+                Ok(k.cancel.is_some())
+            })
+        });
+        assert_eq!(saw, Ok(false), "a query on a shared body is never stopped part way");
+        // Another job, and work outside any job, are untouched.
+        let b = cancelling(Some(Cancel::new()), || make_box([0.0; 3], [1.0; 3])).unwrap();
+        assert_eq!(counts(&b).unwrap(), [6, 12, 8]);
+        assert!((volume(&b, 1e-8).unwrap() - 1.0).abs() < 1e-9);
     }
 }

@@ -81,6 +81,7 @@ fn classify(e: &EngineError) -> Outcome {
     let msg = e.to_string();
     match e {
         EngineError::Internal(..) => Outcome::new("panic", msg),
+        EngineError::Cancelled(_) => Outcome::new("cancelled", msg),
         EngineError::Panel(_)
         | EngineError::BadParams { .. }
         | EngineError::Disabled(..)

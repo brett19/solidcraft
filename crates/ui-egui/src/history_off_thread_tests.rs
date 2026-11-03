@@ -229,6 +229,13 @@ fn cancel_on_the_computing_toast_gives_up_on_the_move() {
     assert!(h.app.computing_since().is_none());
     assert!(crate::scenario::rect_of("toast:computing").is_none(), "the toast is gone");
     assert_eq!(marker(&h), None, "the marker stays where it was");
+    // A real move given up: its worker, and the solidcore operation it waits on, are stopped.
+    h.app.run_heavy("timeline.roll_to", json!({"position": 1})).unwrap();
+    let worker = h.app.deferred.as_ref().and_then(|d| d.progress()).expect("computing under a stop switch");
+    assert!(!worker.is_cancelled());
+    h.app.cancel_computing();
+    assert!(worker.is_cancelled());
+    assert_eq!(marker(&h), None);
     // And the history moves again afterwards.
     h.app.run_heavy("timeline.roll_to", json!({"position": 1})).unwrap();
     until_settled(&mut h);
@@ -693,7 +700,10 @@ fn stopping_an_agent_command_applies_nothing_and_goes_on() {
     );
     h.frames(1);
     assert!(h.app.agent_computing().is_some());
+    let worker = h.app.control_job.as_ref().and_then(|j| j.progress()).expect("evaluated ahead under a stop switch");
+    assert!(!worker.is_cancelled());
     h.app.stop_agent_command();
+    assert!(worker.is_cancelled(), "Stop stops the worker and the solidcore operation it waits on");
     let r = hole.try_recv().expect("answered at once");
     assert!(r["ok"] == false && r["stopped"] == true, "{r}");
     let r = reply_to(&mut h, &boss);

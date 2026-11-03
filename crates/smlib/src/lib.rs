@@ -7,6 +7,7 @@
 
 use std::path::Path;
 
+pub mod cancel;
 mod check;
 mod core;
 pub mod export;
@@ -84,6 +85,8 @@ pub enum Error {
     /// A step of SMLib solidcore has not ported yet, refused rather than built another way: what
     /// is missing, and the solidcore issue that ports it.
     Unported(&'static str),
+    /// The job making the call was cancelled ([`cancel`]): the call stopped part way or never ran.
+    Cancelled(&'static str),
 }
 
 /// Why a blend has no room, as solidcore names its refusal (`NoRoomReason`): the reasons a
@@ -214,6 +217,7 @@ impl std::fmt::Display for Error {
             Error::Solidcore(e) => write!(f, "solidcore: {e}"),
             Error::Internal(e) => write!(f, "solidcore failed internally in {e}"),
             Error::Unported(what) => write!(f, "not supported yet: {what}"),
+            Error::Cancelled(call) => write!(f, "cancelled: solidcore stopped {call}"),
         }
     }
 }

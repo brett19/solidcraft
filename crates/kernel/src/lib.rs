@@ -253,6 +253,10 @@ pub enum KernelError {
     /// The third-party kernel panicked; the model is unchanged.
     #[error("kernel internal error: {0}")]
     Internal(String),
+    /// The work was stopped by its watch ([`watch`]): what was stopped. Not a failure of the
+    /// operation; the model is unchanged.
+    #[error("{0} cancelled")]
+    Cancelled(String),
 }
 
 pub type Result<T> = std::result::Result<T, KernelError>;
@@ -264,6 +268,10 @@ pub(crate) trait Cause: std::fmt::Display {
     fn panic(&self) -> Option<&str> {
         None
     }
+    /// Whether the cause is a solidcore call its job's cancel stopped ([`watch`]).
+    fn cancelled(&self) -> bool {
+        false
+    }
 }
 
 impl Cause for solidcraft_smlib::Error {
@@ -272,6 +280,9 @@ impl Cause for solidcraft_smlib::Error {
             solidcraft_smlib::Error::Internal(m) => Some(m),
             _ => None,
         }
+    }
+    fn cancelled(&self) -> bool {
+        matches!(self, solidcraft_smlib::Error::Cancelled(_))
     }
 }
 
@@ -285,6 +296,9 @@ impl<T: Cause + ?Sized> Cause for &T {
     fn panic(&self) -> Option<&str> {
         (**self).panic()
     }
+    fn cancelled(&self) -> bool {
+        (**self).cancelled()
+    }
 }
 
 impl KernelError {
@@ -292,6 +306,9 @@ impl KernelError {
     /// (its kernel replaced by a fresh one) stays an internal error ([`KernelError::Internal`]),
     /// so the engine reports it as one; any other cause is the operation's failure.
     pub(crate) fn smlib(context: impl std::fmt::Display, e: impl Cause) -> KernelError {
+        if e.cancelled() {
+            return KernelError::Cancelled(context.to_string());
+        }
         match e.panic() {
             Some(m) => KernelError::Internal(format!("{context}: {m}")),
             None => KernelError::Failed(format!("{context}: {e}")),

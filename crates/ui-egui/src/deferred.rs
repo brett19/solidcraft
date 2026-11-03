@@ -37,9 +37,17 @@ pub struct Deferred {
     /// for the run here (a parameter change evaluates twice: the first evaluation is not the
     /// one `evaluated` holds).
     kept: Option<std::sync::Arc<solidcraft_engine::doc::KeptResults>>,
+    /// Stops the worker (and the kernel operation it waits on) once nothing waits for it.
+    _stop: Option<solidcraft_engine::doc::progress::StopOnDrop>,
 }
 
 impl Deferred {
+    /// The stop switch of its worker, for the tests.
+    #[cfg(test)]
+    pub(crate) fn progress(&self) -> Option<std::sync::Arc<solidcraft_engine::doc::progress::Progress>> {
+        self._stop.as_ref().map(|s| s.0.clone())
+    }
+
     pub(crate) fn finished(&mut self) -> bool {
         if self.evaluated.is_none() {
             match self.done.try_recv() {
@@ -58,7 +66,8 @@ impl Deferred {
     /// of what waits for one (the real worker would finish in a moment).
     pub(crate) fn never_done(id: &str, params: Value, revision: u64) -> (Self, std::sync::mpsc::Sender<Option<solidcraft_engine::Evaluated>>) {
         let (tx, rx) = std::sync::mpsc::channel();
-        let job = Deferred { done: rx, evaluated: None, started: crate::now_ms(), command: (id.to_string(), params), revision, kept: None };
+        let job =
+            Deferred { done: rx, evaluated: None, started: crate::now_ms(), command: (id.to_string(), params), revision, kept: None, _stop: None };
         (job, tx)
     }
 }
@@ -82,6 +91,8 @@ pub struct DeleteCheck {
     kept: std::sync::Arc<solidcraft_engine::doc::KeptResults>,
     /// The design's revision it was computed for: a design changed meanwhile checks again.
     revision: u64,
+    /// Stops the check's worker (and the kernel operation it waits on) once nothing waits for it.
+    _stop: solidcraft_engine::doc::progress::StopOnDrop,
 }
 
 /// What a delete does once its check is in.
@@ -212,9 +223,9 @@ impl SolveApp {
 
     /// Stop waiting for the history command, and the delete check, computing off the window thread
     /// (#8266), and drop the commands waiting behind them. The design is as it was before they
-    /// started: a command only runs for real once its evaluation is in. The worker threads run
-    /// to the end of what they evaluate and their results are dropped (the same as Cancel while a
-    /// feature is applying).
+    /// started: a command only runs for real once its evaluation is in. The worker threads are
+    /// cancelled, as Cancel while a feature is applying cancels its own: the solidcore operation
+    /// they wait on stops at its next check, and whatever they computed is dropped.
     pub fn cancel_computing(&mut self) {
         self.deferred = None;
         self.deferred_queue.clear();
@@ -238,12 +249,17 @@ impl SolveApp {
             let kept = ahead.kept();
             let (tx, rx) = std::sync::mpsc::channel();
             let checks = commands.clone();
+            let progress = std::sync::Arc::new(solidcraft_engine::doc::progress::Progress::default());
+            let watching = progress.clone();
             let spawned = std::thread::Builder::new().name("delete check".into()).spawn(move || {
-                let replies = ahead.replies(&checks).into_iter().map(|r| r.map_err(|e| e.to_string())).collect();
+                let replies = solidcraft_engine::doc::progress::watch(watching, || {
+                    ahead.replies(&checks).into_iter().map(|r| r.map_err(|e| e.to_string())).collect()
+                });
                 let _ = tx.send(replies);
             });
             if spawned.is_ok() {
-                let check = DeleteCheck { done: rx, started: crate::now_ms(), then, revision: self.session.revision, kept };
+                let _stop = solidcraft_engine::doc::progress::StopOnDrop(progress);
+                let check = DeleteCheck { done: rx, started: crate::now_ms(), then, revision: self.session.revision, kept, _stop };
                 // As with the history's commands, zero always leaves it for a later frame.
                 match (wait.is_zero(), check.done.recv_timeout(wait)) {
                     (false, Ok(replies)) => check.then.finish(self, replies, Some(check.kept.clone())),
@@ -325,9 +341,12 @@ impl SolveApp {
         let command = (id.to_string(), params.clone());
         let commands = vec![command.clone()];
         let (tx, rx) = std::sync::mpsc::channel();
+        let progress = std::sync::Arc::new(solidcraft_engine::doc::progress::Progress::default());
+        let watching = progress.clone();
         let spawned = std::thread::Builder::new().name("history".into()).spawn(move || {
-            let _ = tx.send(ahead.evaluate(&commands).ok());
+            let _ = tx.send(solidcraft_engine::doc::progress::watch(watching, || ahead.evaluate(&commands).ok()));
         });
+        let stop = solidcraft_engine::doc::progress::StopOnDrop(progress);
         if spawned.is_err() {
             return Start::Now(None, None);
         }
@@ -340,7 +359,15 @@ impl SolveApp {
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
             }
         }
-        Start::Later(Deferred { done: rx, evaluated: None, started: crate::now_ms(), command, revision: self.session.revision, kept: Some(kept) })
+        Start::Later(Deferred {
+            done: rx,
+            evaluated: None,
+            started: crate::now_ms(),
+            command,
+            revision: self.session.revision,
+            kept: Some(kept),
+            _stop: Some(stop),
+        })
     }
 
     #[cfg(target_arch = "wasm32")]
