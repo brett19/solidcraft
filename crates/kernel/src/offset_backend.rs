@@ -23,6 +23,9 @@ use crate::history::{Change, EdgeOrigin, FaceOrigin, History};
 use crate::native::{body_from_smlib_ordered, smlib_body_ordered};
 use crate::{KernelError, Result, record};
 
+/// The kernel's bare failure status (`SM_ERR`): it failed without saying why.
+const SM_ERR: i32 = 1001;
+
 fn failed(op: &str, what: &str, e: impl crate::Cause) -> KernelError {
     KernelError::smlib(format!("SMLib {op}: {what}"), e)
 }
@@ -48,6 +51,11 @@ fn refused(op: &str, wall: Option<f64>, e: SmError) -> KernelError {
         SmError::NoMatch { point } => KernelError::Invalid(format!("{op}: no face at selection point {}", point + 1)),
         SmError::Ambiguous { point } => KernelError::Invalid(format!("{op}: selection point {} is as near to two faces", point + 1)),
         SmError::Unsupported => KernelError::Failed(format!("not supported yet: SMLib {op} for this geometry")),
+        // The kernel's bare failure inside a thicken, with no reason of its own (#11744: the
+        // offset's pieces of a trimmed curved sheet do not merge): a sheet it cannot thicken yet.
+        SmError::Status(SM_ERR) if op == "thicken" => {
+            KernelError::Failed("not supported yet: thickening this surface: the kernel cannot build its offset".into())
+        }
         SmError::NoEffect => KernelError::Failed(format!("SMLib made no change: the {op} reported success but moved no face onto its new surface")),
         e => failed(op, "operation", e),
     }

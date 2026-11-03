@@ -903,6 +903,46 @@ mod tests {
         assert!(s.execute("surface.reverse_normal", &json!({"body": "Cube"})).is_err());
     }
 
+    /// A half pipe's outer face, trimmed by a cut whose edge is a flat at z = 1 running into an
+    /// R20 arc (#11744), thickened 2 mm: a solid, or a refusal in words ("not supported yet"),
+    /// never the kernel's bare status number.
+    #[test]
+    fn thicken_of_a_trimmed_half_pipe_is_a_solid_or_not_supported_yet() {
+        let mut s = Session::default();
+        let plane = |x: [i32; 3], y: [i32; 3]| json!({"origin": [0, 0, 0], "x_dir": x, "y_dir": y});
+        run(&mut s, "sketch.create", json!({"plane": plane([1, 0, 0], [0, 1, 0]), "name": "Pipe"}));
+        run(&mut s, "sketch.arc.three_point", json!({"start": [25, 0], "through": [0, 25], "end": [-25, 0]}));
+        run(&mut s, "sketch.line", json!({"points": [[-25, 0], [-23, 0]]}));
+        run(&mut s, "sketch.arc.three_point", json!({"start": [-23, 0], "through": [0, 23], "end": [23, 0]}));
+        run(&mut s, "sketch.line", json!({"points": [[23, 0], [25, 0]]}));
+        run(&mut s, "sketch.finish", json!({}));
+        run(&mut s, "solid.extrude", json!({"sketch": "Pipe", "distance": 80, "direction": "symmetric", "body_name": "Pipe"}));
+        // In the plane through the pipe's axis: below z = 1, then below the arc about (0, 21)
+        // from (0, 1) for 45°, and everything past its end.
+        let (ex, ez) = (20.0 * std::f64::consts::FRAC_1_SQRT_2, 21.0 - 20.0 * std::f64::consts::FRAC_1_SQRT_2);
+        run(&mut s, "sketch.create", json!({"plane": plane([0, 0, 1], [0, 1, 0]), "name": "Cut"}));
+        run(&mut s, "sketch.line", json!({"points": [[-45, -2], [45, -2], [45, 30], [ex, 30], [ex, ez]]}));
+        run(&mut s, "sketch.arc.center_point", json!({"center": [0, 21], "start": [ex, ez], "sweep": -45}));
+        run(&mut s, "sketch.line", json!({"points": [[0, 1], [-45, 1], [-45, -2]]}));
+        run(&mut s, "sketch.finish", json!({}));
+        run(&mut s, "solid.extrude", json!({"sketch": "Cut", "distance": 84, "direction": "symmetric", "operation": "cut", "targets": ["Pipe"]}));
+        run(&mut s, "surface.offset", json!({"faces": [[0, 25, 0]], "distance": 0, "body_name": "Sheet"}));
+        let sheet = area(&s, "Sheet");
+        assert!(sheet > 1000.0, "the trimmed half pipe: {sheet}");
+        match s.execute("surface.thicken", &json!({"bodies": ["Sheet"], "thickness": 2, "body_name": "Thick"})) {
+            Ok(_) => {
+                assert!(!s.world_state().unwrap().body("Thick").unwrap().body.is_surface());
+                // 2 A (1 ± 1 / 25) on a radius of 25, as the wall goes out or in
+                let v = volume(&s, "Thick");
+                assert!(v > 1.9 * sheet && v < 2.1 * sheet, "{v} for a sheet of {sheet}");
+            }
+            Err(e) => {
+                let e = e.to_string();
+                assert!(e.contains("not supported yet") && !e.contains("status"), "{e}");
+            }
+        }
+    }
+
     /// Delete Face without healing: a box's top taken off leaves a five-face surface; patching
     /// the opening and stitching gives back a box of the same volume. By default the gap still
     /// heals (here it can't: refused); deleting every face is refused.
