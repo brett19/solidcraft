@@ -110,9 +110,9 @@ into `upstream/` (see README): it is the reading reference, and many cases read 
    9. **`UNPORTED` stubs only for calls into units that are not `green`/`partial`**,
       tagged with the owning unit from `harness/callgraph/units.json`; co-ports are
       recorded as `CO-PORTED` in that unit's `plan/units/<id>.toml` notes.
-6. **Finish the PR**: rebase your branch onto the latest `origin/main` (never merge main
-   into it: history stays linear) and force-push your own PR branch with
-   `--force-with-lease`; never rewrite a branch someone else builds on, or `main`. Re-verify,
+6. **Finish the PR**: bring your branch up to date with the latest `origin/main`: rebase
+   (preferred; force-push your own PR branch with `--force-with-lease`) or merge `main` in;
+   never rewrite a branch someone else builds on, or `main`. Re-verify,
    set the unit's `status` to `"green"` or `"partial"` in
    `plan/units/<unit id>.toml` with case/deferred counts in `notes` (plus the files of
    any units you promoted), commit, push, and mark the PR ready. Put the goldens summary lines

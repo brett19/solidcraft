@@ -57,7 +57,8 @@ case, replacing the code they supersede. This page is the short version;
   Say in the PR which results change and show the evidence. Retiring the `UpstreamFixes` flags
   left from the port (turn on, delete the old path) is welcome work.
 - **Don't extend the old paths.** Improve the construction that replaces them.
-- **Keep history linear.** Rebase your branch onto `main`; never merge `main` into it.
+- **Keep up with `main`.** Rebase your branch onto `main` (preferred) or merge `main` in; never
+  force-push over someone else's history.
 
 ## Goldens
 

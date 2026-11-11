@@ -404,8 +404,9 @@ and a fresh CI run:
    goldens, Clippy); every push after that runs the full set again. Contributors don't queue or
    merge their own pull requests. A maintainer or steward adds `ready to merge` (and `approved-for-ci`
    for a pull request from a fork), and the merge shepherd then enqueues it once it is green and
-   passes the review gates: CodeRabbit's threads are resolved, and a change to CI or workflow files
-   has the owner's approval. The merge queue tests each group of queued PRs together before it
+   passes the review gates: CodeRabbit's threads are resolved (acted on, or resolved by the
+   author with a one-line reason; see below), and a change to CI or workflow files has the
+   owner's approval. The merge queue tests each group of queued PRs together before it
    lands on `main`.
 4. Reference the issue (`Fixes #12`). In the PR, say what you tested and how. For geometry work, include the measured numbers (and
    the expected ones).
@@ -480,7 +481,8 @@ long as the change meets the rules above.
 
 If you run an agent, keep one long-running session rather than restarting it, don't `--resume` one
 whose prompt cache has gone cold (it re-reads the whole history at full price), and act on CodeRabbit
-comments only when they're about crashes, wrong results, data loss or security.
+comments only when they're about crashes, wrong results, data loss or security; resolve the
+others with a one-line reason so the merge gate can pass.
 
 Two quick checks run on every pull request (`.github/workflows/pr-checks.yml`, not required): it
 fails when a lower-numbered open PR by someone else already closes the same issue (the label

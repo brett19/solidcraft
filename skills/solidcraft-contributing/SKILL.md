@@ -49,7 +49,8 @@ not modelling a part through MCP.
 - **Merge flow.** The heavy CI jobs start when a maintainer adds `approved-for-ci`. Contributors don't
   queue or merge their own PRs: a maintainer or steward adds `ready to merge` (and `approved-for-ci` for
   a fork), and the merge shepherd enqueues the PR once it is green and passes the review gates
-  (CodeRabbit threads resolved; CI or workflow changes need the owner's approval). The queue runs the
+  (CodeRabbit threads resolved: acted on, or resolved with a one-line reason; CI or workflow
+  changes need the owner's approval). The queue runs the
   full suite on each group before it lands on `main`. Never force-push `main`.
 - **Do not push only to catch up with `main`:** every push restarts the whole CI run, and `main`'s own
   run catches what lands in between. When you push anyway, or GitHub reports a conflict, rebase onto
@@ -107,7 +108,8 @@ not modelling a part through MCP.
 - **Keep the cost down.** Keep one long-running agent session instead of restarting it.
   Don't `--resume` a session after its prompt cache has gone cold: a cold resume re-reads the
   whole history at full price. Act on CodeRabbit comments only when they're about crashes,
-  wrong results, data loss or security, and ignore style nitpicks. Don't push just to
+  wrong results, data loss or security; resolve the other threads, nitpicks included, with a
+  one-line reason so the merge gate can pass. Don't push just to
   re-trigger a review.
 
 ## 1. Check the environment
