@@ -261,6 +261,7 @@ pub(crate) fn components(q: &Query, walls: &[usize]) -> DocResult<Vec<Vec<usize>
         while let Some(&up) = group.get(i)
             && up != i
         {
+            // In range: `i` was read from `group` just above, and every entry names a place in it.
             let grand = group.get(up).copied().unwrap_or(up);
             if let Some(g) = group.get_mut(i) {
                 *g = grand;
@@ -277,6 +278,7 @@ pub(crate) fn components(q: &Query, walls: &[usize]) -> DocResult<Vec<Vec<usize>
                 for g in q.edge_faces(oe.edge as usize) {
                     if let Some(j) = walls.iter().position(|w| *w == g && g != f) {
                         let (a, b) = (root(&mut group, i), root(&mut group, j));
+                        // In range: `root` returns a place in `group`.
                         if let Some(slot) = group.get_mut(a) {
                             *slot = b;
                         }
@@ -997,6 +999,7 @@ fn assemble(r: &Reader, pieces: Vec<Piece>, around: f64) -> Result<Vec<Loop2>, S
         let (mut cycle, mut k, mut at) = (Vec::new(), start, first);
         loop {
             let [a, b] = *nth(&ends, k, "outline piece")?;
+            // In range: `ends` (read at `k` just above) and `used` are the same length.
             if let Some(u) = used.get_mut(k) {
                 *u = true;
             }
@@ -1212,7 +1215,7 @@ mod tests {
     use solidcore_record::{Loop2, Region2, Vec2, Vec3};
     use solidcraft_develop::{Query, Rigid3, Surface};
 
-    use super::{Folded, Slab, components, reached, shadow, within};
+    use super::{Edge, Folded, Kind, Reader, Slab, components, reached, shadow, within};
     use crate::DocError;
 
     /// A plate 10 × 10 × 2 mm, its faces the record's only faces.
@@ -1242,6 +1245,23 @@ mod tests {
         assert_eq!(within(&q, &slab, &region, &[stale], 1e-4, 1e-3), Err(missing.clone()));
         let read = shadow(&body, &q, &slab, &[stale], "the panel", 0.0, 1e-6, 1e-3);
         assert_eq!(read.err(), Some(missing.to_string()));
+    }
+
+    /// An edge the record can't read gives the edge's typed refusal from `crossing`, never a
+    /// panic. (`Query::edge_points` returns at least two points or none, so the old
+    /// `samples.len() - 1`, which underflowed on none, is now guarded on both paths.)
+    #[test]
+    fn crossing_an_unreadable_edge_is_refused() {
+        let body = plate();
+        let q = Query::new(body.record());
+        let surface = Surface::Plane;
+        let slab = Slab::new(&surface, Rigid3::IDENTITY, 2.0);
+        let rec = body.record();
+        let first = rec.edges.first().expect("a box has edges");
+        let curve = solidcraft_geom::brep::eval::CurveEval::new(first.parameters()).expect("a box's edge");
+        let r = Reader { q: &q, slab: &slab, surfaces: Vec::new(), tol: 1e-6, sag: 1e-3, step: 0.1, name: "the panel" };
+        let stale = Edge { e: rec.edges.len() + 3, kind: Kind::Rim { far: false, wall: 0 }, curve, span: first.interval, corners: Vec::new() };
+        assert_eq!(r.crossing(&stale, 0, Vec3::ZERO), Err("an edge of the cut on the panel can't be read".to_string()));
     }
 
     /// Walls that are faces of the record still group as before: the fix reads them, it doesn't
