@@ -443,6 +443,36 @@ fn a_rip_lays_its_panels_out_apart_and_bad_joints_are_refused() {
     ));
 }
 
+/// A rip curve with a number that is not finite anywhere in it, not only at its ends, is refused:
+/// the rip of `a_rip_lays_its_panels_out_apart_and_bad_joints_are_refused` given, on the base, a
+/// cubic from its start to its end whose inner control point is NaN.
+#[test]
+fn a_rip_curve_not_finite_inside_is_refused() {
+    let mut sheet = bracket(bend(FRAC_PI_2, Datum::Sharp, (0.0, 100.0)));
+    if let Some(j) = sheet.joints.get_mut(0) {
+        let mut kind = rip_along(j, 100.0, FRAC_PI_2, Lap::Cut(0.5, 0.25));
+        if let JointKind::Rip(rip) = &mut kind {
+            let (Some(&p0), Some(&p3)) = (rip.edges.0.first(), rip.edges.0.last()) else {
+                panic!("the rip has its points: {rip:?}")
+            };
+            rip.curves.0 = vec![Seg2::Cubic {
+                p0,
+                p1: Vec2::new(f64::NAN, 0.0),
+                p2: p0.lerp(p3, 2.0 / 3.0),
+                p3,
+            }];
+        }
+        j.kind = kind;
+    }
+    assert_eq!(
+        develop(&sheet, &[(0, Rigid2::IDENTITY)]),
+        Err(Refusal::Joint {
+            joint: 0,
+            why: JointRefusal::RipNotFinite
+        })
+    );
+}
+
 /// A cut that took part of a rip's edge out to the rip's line leaves the panel's outline along the
 /// line in stretches, and each is cut back on its own; the cut keeps its shape. The base of the
 /// rip of `a_rip_lays_its_panels_out_apart_and_bad_joints_are_refused` (cut back 0.5 along y = 0)

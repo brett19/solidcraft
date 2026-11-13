@@ -19,7 +19,8 @@ use crate::prism::profile::{Loop2, Region2, Seg2};
 const CHORD_TOL: f64 = 1e-4;
 
 /// Most cubic pieces a line across a cone's parameters is followed by ([`spiral`]): more than a
-/// sheet under 10⁹ mm across ever needs.
+/// sheet under 10⁹ mm across ever needs. A line that needs more is refused
+/// ([`PanelRefusal::ConeSpiral`]), so every spiral is followed within [`CHORD_TOL`].
 const MAX_SPIRAL_PIECES: usize = 4096;
 
 /// Parameters this close are one: a line of one angle on a cone, or of one distance.
@@ -134,6 +135,21 @@ impl Flatten {
                 }
             }
         }
+        if let Flatten::Cone { shift, scale } = *self {
+            // Every line [`Flatten::seg`] follows by a spiral, within its piece budget.
+            for s in std::iter::once(&r.outer)
+                .chain(&r.holes)
+                .flat_map(|lp| &lp.segs)
+            {
+                if let Seg2::Line { a, b } = *s {
+                    if is_spiral(a, b)
+                        && spiral_pieces(a, b, shift, scale) > MAX_SPIRAL_PIECES as f64
+                    {
+                        return Err(PanelRefusal::ConeSpiral);
+                    }
+                }
+            }
+        }
         let mut origins = Vec::new();
         let mut map_loop = |lp: &Loop2| {
             let (mut segs, mut from) = (Vec::new(), Vec::new());
@@ -245,14 +261,8 @@ impl Flatten {
 /// [`CHORD_TOL`], which the pieces still are from the spiral, not on it.
 fn spiral(a: Vec2, b: Vec2, shift: f64, scale: f64) -> Vec<Seg2> {
     let (dr, dt) = (b.x - a.x, (b.y - a.y) * scale);
-    let far = (a.x + shift).abs().max((b.x + shift).abs());
-    let fourth = dt.abs().powi(3) * (dt * dt * far * far + 16.0 * dr * dr).sqrt();
-    // At least one piece, whatever the bound (a NaN one too).
-    let n = (fourth / (384.0 * CHORD_TOL))
-        .powf(0.25)
-        .ceil()
-        .max(1.0)
-        .min(MAX_SPIRAL_PIECES as f64) as usize;
+    // Past the budget only where [`Flatten::region`] has refused the panel already.
+    let n = spiral_pieces(a, b, shift, scale).min(MAX_SPIRAL_PIECES as f64) as usize;
     // The spiral's point, and its rate along the line's t, a fraction t of the way along.
     let at = |t: f64| {
         let p = a * (1.0 - t) + b * t;
@@ -284,6 +294,21 @@ fn spiral(a: Vec2, b: Vec2, shift: f64, scale: f64) -> Vec<Seg2> {
         .collect()
 }
 
+/// Whether [`Flatten::seg`] follows the line from `a` to `b` on a cone by a [`spiral`]: it runs
+/// across both parameters (its guards' order, a NaN taking the spiral too).
+fn is_spiral(a: Vec2, b: Vec2) -> bool {
+    !((a.y - b.y).abs() <= PARAM_TOL) && !((a.x - b.x).abs() <= PARAM_TOL)
+}
+
+/// How many cubic pieces keep the [`spiral`] from `a` to `b` within [`CHORD_TOL`] by the
+/// Hermite remainder's bound: at least one, whatever the bound (a NaN one too); not capped.
+fn spiral_pieces(a: Vec2, b: Vec2, shift: f64, scale: f64) -> f64 {
+    let (dr, dt) = (b.x - a.x, (b.y - a.y) * scale);
+    let far = (a.x + shift).abs().max((b.x + shift).abs());
+    let fourth = dt.abs().powi(3) * (dt * dt * far * far + 16.0 * dr * dr).sqrt();
+    (fourth / (384.0 * CHORD_TOL)).powf(0.25).ceil().max(1.0)
+}
+
 /// A circular arc as rational quadratic pieces of at most a quarter turn each: exact, and kept
 /// exact by any affine map.
 pub(crate) fn arc_as_conics(center: Vec2, radius: f64, start: f64, sweep: f64) -> Vec<Seg2> {
@@ -305,10 +330,10 @@ pub(crate) fn arc_as_conics(center: Vec2, radius: f64, start: f64, sweep: f64) -
 
 #[cfg(test)]
 mod tests {
-    use super::Flatten;
+    use super::{spiral_pieces, Flatten, PanelRefusal};
     use crate::develop::plane::Planar;
     use crate::math::Vec2;
-    use crate::prism::profile::Seg2;
+    use crate::prism::profile::{Loop2, Region2, Seg2};
 
     /// A line across both of a cone's parameters flattens to the spiral it is, followed by cubic
     /// pieces. On a cone of scale 1/2 and no shift, the line from (100, 0) to (200, 1) runs from
@@ -340,5 +365,48 @@ mod tests {
         }
         assert_eq!(out.first().map(Seg2::start), Some(cone.point(a)));
         assert_eq!(out.last().map(Seg2::end), Some(cone.point(b)));
+    }
+
+    /// A spiral past the piece budget is refused, not followed less closely. On a cone laid flat
+    /// at scale 1, the line from (10¹⁰, 0) to (2·10¹⁰, 6) has Δr = 10¹⁰, Δθ = 6 and its furthest
+    /// point 2·10¹⁰ from the apex: its fourth derivative is bounded by
+    /// 6³ √(6² · 4·10²⁰ + 16 · 10²⁰) = 216 · √(1.6·10²²) = 2.732·10¹³, so it needs
+    /// ⌈(2.732·10¹³ / (384 · 10⁻⁴))^¼⌉ = 5165 pieces, past 4096. The same triangle 100 times
+    /// smaller has a bound 100 times less, 2.732·10¹¹, and needs
+    /// ⌈(2.732·10¹¹ / (384 · 10⁻⁴))^¼⌉ = 1634: it is laid flat, its other two sides a line (one
+    /// angle) and an arc (one distance).
+    #[test]
+    fn a_spiral_past_the_piece_budget_is_refused() {
+        let cone = Flatten::Cone {
+            shift: 0.0,
+            scale: 1.0,
+        };
+        let triangle = |s: f64| Region2 {
+            outer: Loop2 {
+                segs: vec![
+                    Seg2::Line {
+                        a: Vec2::new(1e10 * s, 0.0),
+                        b: Vec2::new(2e10 * s, 0.0),
+                    },
+                    Seg2::Line {
+                        a: Vec2::new(2e10 * s, 0.0),
+                        b: Vec2::new(2e10 * s, 6.0),
+                    },
+                    Seg2::Line {
+                        a: Vec2::new(2e10 * s, 6.0),
+                        b: Vec2::new(1e10 * s, 0.0),
+                    },
+                ],
+            },
+            holes: Vec::new(),
+        };
+        let pieces = spiral_pieces(Vec2::new(2e10, 6.0), Vec2::new(1e10, 0.0), 0.0, 1.0);
+        assert_eq!(pieces, 5165.0);
+        assert_eq!(cone.region(&triangle(1.0)), Err(PanelRefusal::ConeSpiral));
+        let small = spiral_pieces(Vec2::new(2e8, 6.0), Vec2::new(1e8, 0.0), 0.0, 1.0);
+        assert_eq!(small, 1634.0);
+        let (flat, from) = cone.region(&triangle(0.01)).unwrap();
+        assert_eq!(flat.outer.segs.len(), 1 + 1 + 1634);
+        assert_eq!(from, vec![[vec![0, 1], vec![2; 1634]].concat()]);
     }
 }

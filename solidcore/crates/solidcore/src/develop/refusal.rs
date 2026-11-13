@@ -45,6 +45,10 @@ pub enum PanelRefusal {
     ConeApex,
     /// A cut drawn on a panel the flat has no place for.
     CutUnplaced,
+    /// A line across both of a cone's parameters that more cubic pieces than a flat takes would
+    /// be needed to follow within its distance (a panel far past any sheet's size): refused
+    /// rather than followed less closely.
+    ConeSpiral,
 }
 
 /// Why a joint is not laid out.

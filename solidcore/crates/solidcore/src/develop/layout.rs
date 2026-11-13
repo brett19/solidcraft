@@ -646,7 +646,29 @@ fn check_joint(sheet: &Sheet, j: usize, joint: &Joint) -> Result<(), Refusal> {
                     why: JointRefusal::RipPoints,
                 });
             }
-            let finite = |s: &Seg2| s.start().is_finite() && s.end().is_finite();
+            // Every number of each curve: its ends, an arc's radius and angles, a Bezier's or
+            // conic's inner control points and weight.
+            let finite = |s: &Seg2| match *s {
+                Seg2::Line { a, b } => a.is_finite() && b.is_finite(),
+                Seg2::Arc {
+                    center,
+                    radius,
+                    start,
+                    sweep,
+                } => {
+                    center.is_finite()
+                        && radius.is_finite()
+                        && start.is_finite()
+                        && sweep.is_finite()
+                }
+                Seg2::Cubic { p0, p1, p2, p3 } => {
+                    p0.is_finite() && p1.is_finite() && p2.is_finite() && p3.is_finite()
+                }
+                Seg2::Conic { a, apex, b, w } => {
+                    a.is_finite() && apex.is_finite() && b.is_finite() && w.is_finite()
+                }
+                Seg2::Bezier { n, p } => p.iter().take(usize::from(n) + 1).all(|q| q.is_finite()),
+            };
             if !rip
                 .edges
                 .0

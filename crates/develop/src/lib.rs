@@ -66,6 +66,7 @@ fn panel_words(why: PanelRefusal) -> &'static str {
         PanelRefusal::ConeHalfAngle => "a cone's rulings make more than 0 and less than a quarter turn with its axis",
         PanelRefusal::ConeApex => "the cone's neutral surface would pass its apex inside the panel",
         PanelRefusal::CutUnplaced => "a cut lies on a panel the flat has no place for",
+        PanelRefusal::ConeSpiral => "a line across the cone's panel needs more pieces than a flat takes to follow",
     }
 }
 
