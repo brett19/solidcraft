@@ -74,6 +74,11 @@
 //!   ([`BSplineCurve::assert_valid_on_edge`]). The fork takes the smallest radius
 //!   solution (its loop from cc4289d); the port keeps WR-382's first solution and
 //!   takes the first one not passed over.
+//!   Not upstream (WR-560 extended): test 13 of a UV trim measured on its surface also
+//!   passes over a solution below the tolerance whose image on the surface,
+//!   `S(c(t))`, has a radius at least the tolerance (`radius_on_surface`): the
+//!   constant metric WR-560 maps the trim by is exact only on a plane, and near a
+//!   pole the exact trim of a smooth curve turns sharply in (u, v).
 //! - **Back-edges.** `HasInternalPole` calls `IsDegenerate` (`p2`); `IsSegmentLine`,
 //!   `IsOnPlane` and `JoinWith` test `IsKindOf(SmLine_TYPE)` (false for a
 //!   `BSplineCurve`; a line is a [`crate::curve::line::Line`], whose `JoinWith`
@@ -117,7 +122,9 @@ use crate::nurbs::b_spline_curve::analysis::{analysis_key, curve_bounds, BOUND_M
 use crate::nurbs::b_spline_curve::p1::BSplineCurve;
 use crate::nurbs::b_spline_curve::p2::{BoundingBoxRequest, ControlPointForm};
 use crate::nurbs::b_spline_curve_n_lib::TrimMode;
+use crate::nurbs::b_spline_surface_n_lib::EvaluateFlags;
 use crate::nurbs::geom::dist_cpt_cpt;
+use crate::nurbs::knots::Side;
 use crate::nurbs::nurbs_crv::to_euclid;
 use crate::surface::surface::Surface;
 
@@ -601,6 +608,73 @@ fn trim_metric(
     let b = efg[1] / a;
     let c = (efg[0] * efg[2] - efg[1] * efg[1]).sqrt() / a;
     Ok(Some([a, b, c]))
+}
+
+/// The radius of curvature at `t` of the image of the UV trim `trim` on `surface`, the
+/// 3D curve `S(c(t))`: `|g'|^3 / |g' x g''|` with `g' = J c'` and
+/// `g'' = J c'' + S_uu c_u'^2 + 2 S_uv c_u' c_v' + S_vv c_v'^2` (`J = [S_u S_v]`), the
+/// smaller of its values from the two sides of `t` (a knot of the trim may join spans
+/// of different curvature). The surface's partial derivatives are exact (not
+/// zero-corrected). `None` where it cannot be measured: an evaluation fails, `t` is a
+/// singular point of the surface (`S_u x S_v` zero, where the image of a turn is not
+/// defined by the chain rule), or the image does not move (`g'` zero).
+///
+/// # Errors
+///
+/// [`SolidError::Unported`] and cancellation from the evaluations.
+fn radius_on_surface(
+    k: &Kernel,
+    trim: &BSplineCurve,
+    surface: &Surface,
+    t: f64,
+) -> Result<Option<f64>> {
+    let mut radius = f64::INFINITY;
+    for from_left in [true, false] {
+        let c = match trim.evaluate(t, 2, from_left, false) {
+            Ok(c) => c,
+            Err(e) if e.is_unported_or_cancelled() => return Err(e),
+            Err(_) => return Ok(None),
+        };
+        let (Some(p), Some(d1), Some(d2)) = (c.first(), c.get(1), c.get(2)) else {
+            return Ok(None);
+        };
+        let flags = EvaluateFlags {
+            u_side: Side::Left,
+            v_side: Side::Left,
+            only_upper_half: true,
+            non_zero_tangents: false,
+        };
+        let m = match surface.evaluate(k, Point2::new(p.x, p.y), 2, 2, flags) {
+            Ok(m) => m,
+            Err(e) if e.is_unported_or_cancelled() => return Err(e),
+            Err(_) => return Ok(None),
+        };
+        let at = |i: usize, j: usize| m.get(i).and_then(|r| r.get(j)).copied();
+        let (Some(su), Some(sv), Some(suv), Some(suu), Some(svv)) =
+            (at(1, 0), at(0, 1), at(1, 1), at(2, 0), at(0, 2))
+        else {
+            return Ok(None);
+        };
+        if su.cross(sv).length() == 0.0 {
+            return Ok(None);
+        }
+        let g1 = su * d1.x + sv * d1.y;
+        let g2 = su * d2.x
+            + sv * d2.y
+            + suu * (d1.x * d1.x)
+            + suv * (2.0 * d1.x * d1.y)
+            + svv * (d1.y * d1.y);
+        let speed = g1.length();
+        if speed == 0.0 {
+            return Ok(None);
+        }
+        let side = speed * speed * speed / g1.cross(g2).length();
+        if side.is_nan() {
+            return Ok(None);
+        }
+        radius = radius.min(side);
+    }
+    Ok(Some(radius))
 }
 
 /// A copy of `trim` with its control points mapped by [`trim_metric`]'s `l` (the
@@ -1917,14 +1991,32 @@ impl BSplineCurve {
                     }
                 }
             }
+            // Not upstream: a UV trim measured on its surface (WR-560) has a small
+            // radius only where its image on the surface has one. The constant metric
+            // of `trim_metric` is exact on a plane only: near a singular point of the
+            // surface (a sphere's pole) it overstates the steps along the collapsing
+            // direction, and the exact trim of a smooth curve passing near the pole
+            // turns there through up to half a period over a few times the pole's
+            // distance. A solution below the tolerance whose image on the surface has
+            // a radius at least the tolerance ([`radius_on_surface`]) is passed over.
+            let on_surface = match (mapped.as_ref(), ovr.trim_surface) {
+                (Some(_), Some(surface)) => Some(surface),
+                _ => None,
+            };
             let mut first = solutions.first();
-            if stretch.iter().any(|&s| s >= 0.0) {
+            if stretch.iter().any(|&s| s >= 0.0) || on_surface.is_some() {
                 first = None;
                 for s in &solutions {
                     let p = s.param(0)?;
                     let growth = (p - domain.min()).abs() <= stretch[0]
                         || (p - domain.max()).abs() <= stretch[1];
-                    if !(s.solution_value < radius_tol && growth) {
+                    let smooth_on_surface = match on_surface {
+                        Some(surface) if s.solution_value < radius_tol => {
+                            radius_on_surface(k, self, surface, p)?.is_some_and(|r| r >= radius_tol)
+                        }
+                        _ => false,
+                    };
+                    if !(s.solution_value < radius_tol && (growth || smooth_on_surface)) {
                         first = Some(s);
                         break;
                     }
