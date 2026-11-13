@@ -935,6 +935,42 @@ fn a_ball_with_its_poles_on_a_cylinders_seam_or_on_a_faces_edge_is_cut() {
     assert!(failed.is_empty(), "{failed:#?}");
 }
 
+/// The half roll less the r 6 ball about (0, 50 + δ, 20), its poles about the zone tolerance
+/// off the roll's outside: 1.2e-5 inside it with the ball's seam on +x (frames 2 and 5), and
+/// 1e-5 (frames 2, 5 and 8) and 1.2e-5 (all four frames) outside it with the seam turned to +y.
+/// The line where the ball crosses the wall passes each pole δ from it, so its exact trim on
+/// the ball turns through about half a turn in u within a few δ of the pole. The B-rep check
+/// measured that turn with the ball's metric at the trim's middle (a step in u is 2π·6 times
+/// the sine of the angle from the pole long, so about δ/6 rad at the turn), and refused trims
+/// whose images on the ball have radii of 2e-4 to 1e-2 as cusps of radius 1e-9 to 1e-5,
+/// against a tolerance of 1e-4. Each case is one valid
+/// solid of V = 3920π less the ball between radii 48 and 50 at that distance ([`ball_inside`];
+/// turning the ball about its axis moves no point of it).
+#[test]
+fn a_ball_with_its_poles_about_the_tolerance_off_a_rolls_face_is_cut() {
+    all_fixes();
+    let mut failed = Vec::new();
+    let cases: [(f64, f64, &[u32]); 3] = [
+        (-1.2e-5, 0.0, &[2, 5]),
+        (1e-5, PI / 2.0, &[2, 5, 8]),
+        (1.2e-5, PI / 2.0, &[2, 5, 8, 14]),
+    ];
+    for (delta, turn, frames) in cases {
+        let d = 50.0 + delta;
+        let want = 3920.0 * PI - (ball_inside(|_| 50.0, d) - ball_inside(|_| 48.0, d));
+        for &frame in frames {
+            let what = format!("δ {delta:e}, turned {turn}, frame {frame}");
+            failed.extend(cut_is_valid_solid(
+                half_roll(frame),
+                ball([0.0, d, 20.0], turn),
+                want,
+                &what,
+            ));
+        }
+    }
+    assert!(failed.is_empty(), "{failed:#?}");
+}
+
 /// The ball's poles on a plane and on a cone. A box on one side of the plane y = 0 (which holds
 /// the ball's seam meridian) or of x = 0 (square to it) less the ball about the origin: the
 /// plane cuts the ball in a great circle through both poles, V = 20·10·20 less half the ball,

@@ -2594,6 +2594,70 @@ mod tests {
         assert!(!idx.contains(&15), "{idx:?}");
     }
 
+    /// [`radius_on_surface`] is the radius of the trim's image: the exact trim of a r 1
+    /// circle on a plane spanning 600 x 3 (an ellipse 200 times as long as it is wide in
+    /// (u, v)) has radius 1 on the plane at every parameter, a knot included.
+    #[test]
+    fn a_trim_on_a_plane_has_the_radius_of_its_image() {
+        let k = Kernel::default();
+        let (trim, plane) = circle_trim_on_plane((300.0, 1.5, 1.0), (600.0, 3.0));
+        for t in [0.1, 0.25, 0.6, 0.9] {
+            let r = radius_on_surface(&k, &trim, &plane, t).unwrap().unwrap();
+            assert!((r - 1.0).abs() <= 1e-9, "t {t}: {r}");
+        }
+    }
+
+    /// [`radius_on_surface`] near a pole: a straight trim along u at fixed v on a r 6
+    /// sphere is a circle of latitude, whose radius is its distance from the sphere's
+    /// axis. That holds 1e-6 of the way from the pole, where the trim's (u, v) radius is
+    /// infinite and its image's radius is about 2e-5, as halfway up.
+    #[test]
+    fn a_trim_near_a_sphere_pole_has_the_radius_of_its_image() {
+        use crate::nurbs::b_spline_curve::p1::{BSplineCurveForm, CanonicalData, KnotType};
+        use crate::surface::sphere::{Sphere, SphereOptions};
+        let k = Kernel::default();
+        let mut sphere = Sphere::new(
+            &k,
+            Point3::ZERO,
+            Vec3::X,
+            Vec3::Y,
+            Extent2d::from_bounds(0.0, -90.0, 360.0, 90.0),
+            6.0,
+            SphereOptions::default(),
+        )
+        .unwrap();
+        sphere.make_nurb(&k).unwrap();
+        let surface = Surface::from(sphere);
+        let dom = surface.natural_uv_domain_if_built();
+        for f in [1e-6, 0.5, 1.0 - 1e-6] {
+            let v = dom.min().y + f * (dom.max().y - dom.min().y);
+            let (u0, u1) = (
+                dom.min().x + 0.1 * (dom.max().x - dom.min().x),
+                dom.min().x + 0.7 * (dom.max().x - dom.min().x),
+            );
+            let trim = BSplineCurve::create_canonical(&CanonicalData {
+                dim: 2,
+                degree: 1,
+                control_points: &[Vec3::new(u0, v, 0.0), Vec3::new(u1, v, 0.0)],
+                form: BSplineCurveForm::Unspecified,
+                knot_multiplicities: &[2, 2],
+                knots: &[0.0, 1.0],
+                knot_type: KnotType::Unspecified,
+                weights: None,
+                trim: None,
+            })
+            .unwrap();
+            let p = surface
+                .evaluate_point(&k, Point2::new(0.5 * (u0 + u1), v))
+                .unwrap();
+            let want = (p.x * p.x + p.y * p.y).sqrt();
+            let r = radius_on_surface(&k, &trim, &surface, 0.5)
+                .unwrap()
+                .unwrap();
+            assert!((r - want).abs() <= 1e-9 * want, "f {f}: {r} against {want}");
+        }
+    }
+
     /// WR-668 (fork tangency-labs/smlib ecf1963): `C(t) = (t^2, t^3, 0)` on `[0, 1]`,
     /// `y = x^(3/2)`, the shape of the curve where two surfaces touch at a vertex (a
     /// G2 blend's tangent end): curvature growing as `s^(-1/2)` in the length `s`,
