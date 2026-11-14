@@ -1003,6 +1003,27 @@ impl<'s, 't, O: SolutionObject + 't, G: Clone> FilletIntersector<'s, 't, O, G> {
         std::mem::take(&mut self.flush_outcome)
     }
 
+    /// [`Self::flush_curve`], noting any error exit as the geometry left unmade
+    /// ([`FlushOutcome::unmade`]; not upstream, tangency-labs/solidcraft#16686): the flush
+    /// may have written part of it.
+    ///
+    /// # Errors
+    ///
+    /// Those of [`Self::flush_curve`].
+    pub fn flush_curve_noting<S: FilletSolverOps<FilletGeom = G>>(
+        &mut self,
+        solver: &mut S,
+        k: &Kernel,
+        pseudo: &mut FilletBrep,
+        out: &mut TsectCurves,
+    ) -> Result<()> {
+        let flushed = self.flush_curve(solver, k, pseudo, out);
+        if flushed.is_err() {
+            self.flush_outcome.unmade = true;
+        }
+        flushed
+    }
+
     /// Test hook: set what [`Self::take_flush_outcome`] reads, as flushes would.
     #[cfg(test)]
     pub(crate) fn set_flush_outcome(&mut self, outcome: FlushOutcome) {
@@ -1755,26 +1776,10 @@ impl<'s, 't, O: SolutionObject + 't, G: Clone> FilletIntersector<'s, 't, O, G> {
     ///
     /// `SM_ERR_NULL_POINTER` without curve points; `SM_ERR` when a mid point has no
     /// solution or the handler or surface generator fails (after setting the solver
-    /// status); those of the solver and the curve construction. Any of them notes the
-    /// geometry as unmade ([`FlushOutcome::unmade`]): the flush may have written part of
-    /// it.
-    pub fn flush_curve<S: FilletSolverOps<FilletGeom = G>>(
-        &mut self,
-        solver: &mut S,
-        k: &Kernel,
-        pseudo: &mut FilletBrep,
-        out: &mut TsectCurves,
-    ) -> Result<()> {
-        let flushed = self.flush_curve_steps(solver, k, pseudo, out);
-        if flushed.is_err() {
-            self.flush_outcome.unmade = true;
-        }
-        flushed
-    }
-
-    /// The steps of [`Self::flush_curve`].
+    /// status); those of the solver and the curve construction.
+    /// [`Self::flush_curve_noting`] notes any of them as the geometry left unmade.
     #[allow(clippy::too_many_lines)]
-    fn flush_curve_steps<S: FilletSolverOps<FilletGeom = G>>(
+    pub fn flush_curve<S: FilletSolverOps<FilletGeom = G>>(
         &mut self,
         solver: &mut S,
         k: &Kernel,
@@ -2362,10 +2367,11 @@ where
             .compute_next_point(self.solver, k, prev, step_size, next)
     }
 
-    /// [`FilletIntersector::flush_curve`].
+    /// [`FilletIntersector::flush_curve`], its failure noted
+    /// ([`FilletIntersector::flush_curve_noting`]).
     fn flush_curve(&mut self, k: &Kernel, out: &mut TsectCurves) -> Result<()> {
         self.intersector
-            .flush_curve(self.solver, k, self.pseudo, out)
+            .flush_curve_noting(self.solver, k, self.pseudo, out)
     }
 
     /// [`FilletIntersector::evaluate_law_point`] (the law arguments are unused).
