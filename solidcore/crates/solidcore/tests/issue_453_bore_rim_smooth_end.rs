@@ -27,11 +27,13 @@
 //! triangle of legs d) swept about the bore's axis over the arc's 270 degrees, less what
 //! lies below the bottom face (at angle g from V past the face's reach, only
 //! t < 5 / cos g - 5 from the bore), from the 20 cube less the bore. The integrals are
-//! exact; they are evaluated by Simpson's rule, here at 800 spans in each, where halving the
-//! spans moves them by 6e-10 and 1.3e-9 (so the rule's own error is about 4e-11 and 8e-11:
-//! a Richardson estimate, ARGUED). The end rib on the bottom face is the corner's certified
-//! intersection, not the exact torus or cone; its share of the volume is below the 3e-10
-//! the bodies agree to (MEASURED, not derived).
+//! exact; they are evaluated by Simpson's rule at 10^4 spans (2000 for the round's inner
+//! section integral). At 800 spans halving moved them by 6e-10 and 1.3e-9, and the rule's
+//! error falls as the fourth power of the span, so at these counts it is about 1e-12
+//! (a Richardson estimate, ARGUED): negligible. The end rib on the bottom face is the
+//! corner's certified intersection, not the exact torus or cone, and is not in the closed
+//! forms. The 1e-9 each body is held to is therefore MEASURED (the bodies agree to 3e-10 and
+//! 1.5e-10, the end rib's term included), not a closed-form bound.
 //!
 //! The touching line is a non-manifold edge of the input: the holed cube is no closed
 //! manifold solid, so `fillet_edges`' check that a solid stays one (WR-212) does not apply.
@@ -151,7 +153,9 @@ fn simpson(f: impl Fn(f64) -> f64, a: f64, b: f64, n: u32) -> f64 {
 /// t = rr (1 - cos p), times its radius from the bore's axis, swept and clipped.
 fn round_takes(rr: f64) -> f64 {
     use core::f64::consts::PI;
-    const N: u32 = 800;
+    // the section's integral in p, nested in the outer one in g
+    const INNER: u32 = 2_000;
+    const OUTER: u32 = 10_000;
     let section = |up: f64| {
         if up <= 0.0 {
             return 0.0;
@@ -160,11 +164,12 @@ fn round_takes(rr: f64) -> f64 {
             |p| (5.0 + rr - rr * p.cos()) * rr * (1.0 - p.sin()) * rr * p.sin(),
             0.0,
             (1.0 - up / rr).acos(),
-            N,
+            INNER,
         )
     };
     let g0 = (5.0 / (5.0 + rr)).acos();
-    section(rr) * (1.5 * PI - g0) + simpson(|g| section(rr.min(5.0 / g.cos() - 5.0)), 0.0, g0, N)
+    section(rr) * (1.5 * PI - g0)
+        + simpson(|g| section(rr.min(5.0 / g.cos() - 5.0)), 0.0, g0, OUTER)
 }
 
 /// What a chamfer of legs `d` takes off the rim (the file header).
@@ -175,7 +180,7 @@ fn chamfer_takes(d: f64) -> f64 {
         let t = 5.0 / g.cos() - 5.0;
         5.0 * d * t - 2.5 * t * t + 0.5 * d * t * t - t * t * t / 3.0
     };
-    (2.5 * d * d + d * d * d / 6.0) * (1.5 * PI - g0) + simpson(clipped, 0.0, g0, 800)
+    (2.5 * d * d + d * d * d / 6.0) * (1.5 * PI - g0) + simpson(clipped, 0.0, g0, 10_000)
 }
 
 /// The round ends at the seam on the plane z = 5 and builds the fork's body, of the closed

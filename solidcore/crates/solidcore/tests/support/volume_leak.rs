@@ -129,9 +129,10 @@ pub struct Leak {
 /// The closure's grid of nearest points per strip (`properties::CLOSURE_GRID`).
 const GRID: u32 = 64;
 
-/// The margin on a strip's sampled width for a peak between samples (ARGUED: between two
-/// samples a ruled strip's width is smooth, and at 8 samples per grid segment a peak
-/// between them stays well under 10% above the larger of them).
+/// The margin on a strip's sampled width for a peak between samples. ARGUED, not derived:
+/// between two samples a ruled strip's width is smooth, so at 8 samples per grid segment a
+/// peak between them is expected to stay well under 10% above the larger of them; no bound
+/// is proven. It feeds only the informational tube figures, never the gate.
 pub const WIDTH_MARGIN: f64 = 1.1;
 
 /// The nearest point's parameter on `curve` over `[t0, t1]` to `p` by Gauss-Newton from
@@ -361,8 +362,8 @@ pub fn moved_by_the_old_leak(
 /// [`moved_by_the_old_leak`] for a difference of two bodies' volumes, `before - after` (what
 /// an operation removed), that moved from `old` to `new`: each body's volume may have moved
 /// by its own old leak, so the gate is the move within the two old leak bounds and the two
-/// quadratures' shares, with both volumes reproduced (the difference to 1e-9 of the larger
-/// volume) and origin-free.
+/// quadratures' shares, with both volumes reproduced (the difference to 1e-9 of itself plus
+/// a 1e-14 rounding floor on the larger volume) and origin-free.
 pub fn difference_moved_by_the_old_leak(
     k: &Kernel,
     before: &mut Brep,
@@ -395,8 +396,10 @@ pub fn difference_moved_by_the_old_leak(
         ));
     }
     let moved = (new - old).abs();
-    let reproduces =
-        (volumes[0] - volumes[1] - new).abs() <= 1e-9 * volumes[0].abs().max(volumes[1].abs());
+    // relative to the removed volume itself (the bodies' volumes are recomputed at the
+    // caller's accuracy, the same evaluation), with only a rounding floor on the larger one
+    let reproduces = (volumes[0] - volumes[1] - new).abs()
+        <= 1e-9 * new.abs() + 1e-14 * volumes[0].abs().max(volumes[1].abs());
     let within_old_leak = moved <= bound;
     let line = format!(
         "difference {new} (was {old}, moved {moved:.3e}) within {bound:.3e}; before {}; after {}",

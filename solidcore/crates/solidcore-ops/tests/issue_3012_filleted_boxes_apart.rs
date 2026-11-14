@@ -109,7 +109,8 @@ fn issue_3012_cut_of_filleted_boxes_a_sliver_apart() {
             // tangent ends, over 10: 20 dx. The area routine takes each cap over its trims,
             // which enclose dx^2 / 2 less than the cap's edges (MEASURED: -0.5000, -0.5000
             // and -0.5015 dx^2 per cap at 1e-4, 1e-3 and 1e-2; not derived, the same class of
-            // defect #16735 closed for the volume), so the area is dx^2 short of the faces.
+            // defect #16735 closed for the volume; tracked in #16854), so the area is dx^2
+            // short of the faces.
             // Up to a second-order term (measured 0.02 dx^2 at most: the arcs are not straight)
             // and the area routine's slack of 1e-7 (measured 4e-8).
             let faces = 2.0 * 26.0 * 10.0 + 4.0 * FRAC_PI_2 * 2.0 * 10.0 + 2.0 * section;
