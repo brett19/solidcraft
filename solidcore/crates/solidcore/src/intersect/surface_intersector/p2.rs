@@ -858,7 +858,15 @@ impl SurfaceIntersector<'_> {
         // near-zero first derivatives: check for singularities (needs a previous
         // point and a step size)
         if let (Some(prev), Some(step)) = (previous, step_size) {
-            for s in [SrfIndex::First, SrfIndex::Second] {
+            // which surfaces are singular there, and whether each keeps its own
+            // derivatives (Not upstream: `near_a_pole_off_it`); every query reads the point
+            // as it is before any step-back, which changes only its own surface's frame
+            // and, as upstream, the 3D tangent
+            let mut singular = [None, None];
+            for (s, slot) in [SrfIndex::First, SrfIndex::Second]
+                .into_iter()
+                .zip(&mut singular)
+            {
                 let du_len_sq = point.srf_du(s).length_squared();
                 let dv_len_sq = point.srf_dv(s).length_squared();
                 if du_len_sq < EFF_ZERO_SQRT || dv_len_sq < EFF_ZERO_SQRT {
@@ -868,10 +876,8 @@ impl SurfaceIntersector<'_> {
                         uv_values[1]
                     };
                     let (sing, sing_dir) = is_singularity(k, self.surface(s), uv)?;
-                    // Not upstream: a point near a pole but off it keeps its own
-                    // derivatives (`near_a_pole_off_it`)
-                    let keeps = if sing {
-                        match self.near_a_pole_off_it(
+                    if sing {
+                        let keeps = match self.near_a_pole_off_it(
                             k,
                             s,
                             sing_dir,
@@ -883,21 +889,34 @@ impl SurfaceIntersector<'_> {
                                 k, s, sing_dir, prev, point, step, errs,
                             )?,
                             None => false,
-                        }
-                    } else {
-                        false
-                    };
-                    if sing && !keeps {
-                        // Not upstream: a point on the degenerate boundary is the pole
-                        if self.place_at_pole(k, s, sing_dir, point)? {
-                            return Ok(());
-                        }
-                        // step back along the 3D curve and recompute the tangents
-                        let mut p = prev.clone();
-                        self.step_back_from_singularity_points(
-                            k, sing_dir, s, true, &mut p, point, step,
-                        )?;
+                        };
+                        *slot = Some((sing_dir, keeps));
                     }
+                }
+            }
+            // Not upstream: a surface that keeps its tangent was judged against the
+            // point's own 3D tangent; where the other surface steps back and replaces that
+            // tangent with `prev`'s (upstream, without
+            // `fixes.ssi_pole_point_keeps_its_tangent`), both step back, as upstream
+            let replaced = !k.fixes.ssi_pole_point_keeps_its_tangent
+                && singular.iter().flatten().any(|&(_, keeps)| !keeps);
+            for (s, slot) in [SrfIndex::First, SrfIndex::Second]
+                .into_iter()
+                .zip(singular)
+            {
+                let Some((sing_dir, keeps)) = slot else {
+                    continue;
+                };
+                if !keeps || replaced {
+                    // Not upstream: a point on the degenerate boundary is the pole
+                    if self.place_at_pole(k, s, sing_dir, point)? {
+                        return Ok(());
+                    }
+                    // step back along the 3D curve and recompute the tangents
+                    let mut p = prev.clone();
+                    self.step_back_from_singularity_points(
+                        k, sing_dir, s, true, &mut p, point, step,
+                    )?;
                 }
             }
         }
@@ -1079,19 +1098,36 @@ impl SurfaceIntersector<'_> {
     /// Not upstream: whether `point`, a point [`Self::near_a_pole_off_it`] admits on
     /// surface `s` with derivative error bounds `err_u` and `err_v`, keeps its own
     /// derivatives: whether the certified error of its own UV tangent is no larger than
-    /// that of the tangent the step-back would give it (`StepBackFromSingularity` from
-    /// `prev` with `step`, then `DropVectors`), both measured as solutions of the chain rule
-    /// at the point itself ([`tangent_error_bounds`]: the own tangent's upper bound against
-    /// the step-back tangent's lower bound). No tolerance enters: the point takes its own
-    /// tangent only where it is certified at least as accurate. The step-back also moves
-    /// the point's singular parameter, an error not counted here, so the comparison leans
-    /// to the step-back (upstream's choice). A step-back that fails, as upstream's would,
-    /// keeps upstream's path.
+    /// the certified error of the tangent the step-back would give it
+    /// (`StepBackFromSingularity` from `prev` with `step`, then `DropVectors`). Each
+    /// tangent is measured as a solution of the chain rule in the frame and against the
+    /// 3D tangent it was computed from ([`tangent_error_bounds`]):
+    /// - the own tangent at the point's `uv`, with its exact derivatives `su`, `sv`, their
+    ///   bounds `err_u`, `err_v`, and the point's own 3D tangent `T`;
+    /// - the step-back tangent at the stepped-back `uv` (`c.uv_pos(s)`: the singular
+    ///   parameter moved), with the derivatives the step-back evaluated there and their
+    ///   bounds from [`sphere_derivative_errors`] at that `uv`, against the same `T`, the
+    ///   point's own 3D tangent (not the one the step-back solved with: as upstream that is
+    ///   `prev`'s, and the substitution is an error of the step-back's tangent, which a
+    ///   residual against the substituted tangent would not see; the trace curve's tangent
+    ///   at the point is what its UV tangent must reproduce).
+    ///
+    /// The own tangent's upper bound is compared with the step-back tangent's lower bound.
+    /// No tolerance enters: the point takes its own tangent only where it is certified at
+    /// least as accurate. The step-back's `uv` is another point of the surface (its image
+    /// is not the point's position); that displacement is not counted in its bound, so the
+    /// comparison leans to the step-back (upstream's choice). A step-back that fails, as
+    /// upstream's would, and a stepped-back `uv` whose derivatives cannot be bounded keep
+    /// upstream's path.
+    ///
+    /// The comparison runs one extra step-back (its local solve, or its global solve when
+    /// that fails) for every point it is asked about, so a [`crate::kernel::CancelToken`]
+    /// made by `after_polls` counts more polls on such a trace than upstream's path.
     ///
     /// # Errors
     ///
-    /// [`SolidError::Unported`] and [`SolidError::Cancelled`] from the step-back and the
-    /// solves.
+    /// [`SolidError::Unported`] and [`SolidError::Cancelled`] from the step-back, the
+    /// solves and the evaluations.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn own_tangent_beats_step_back(
         &self,
@@ -1120,7 +1156,15 @@ impl SurfaceIntersector<'_> {
             Err(e) if e.is_unported_or_cancelled() => return Err(e),
             Err(_) => return Ok(false),
         }
-        let (step_back_lo, _) = tangent_error_bounds(su, sv, err_u, err_v, t, c.uv_deriv(s));
+        // the step-back's own frame, against the point's own 3D tangent
+        let (c_su, c_sv) = (c.srf_du(s), c.srf_dv(s));
+        let Some((c_err_u, c_err_v)) =
+            sphere_derivative_errors(self.surface(s), c.uv_pos(s), c_su, c_sv)
+        else {
+            return Ok(false);
+        };
+        let (step_back_lo, _) =
+            tangent_error_bounds(c_su, c_sv, c_err_u, c_err_v, t, c.uv_deriv(s));
         // (written to accept: a NaN keeps the step-back)
         let keeps = own_hi <= step_back_lo;
         Ok(keeps)
@@ -2514,8 +2558,9 @@ mod tests {
                 ));
             }
         }
-        // the pole 1e-9 off the line: knots too close to it for a well-conditioned solve
-        // are stepped back from and keep finite tangents; the others keep their own
+        // the pole 1e-9 off the line: knots whose own tangent is not certified more accurate
+        // than the step-back's are stepped back from and keep finite tangents; the others
+        // keep their own
         for turn in [0.0, PI / 2.0] {
             let (worst, _) = knot_image_turn(1e-9, turn);
             // (written to accept: a NaN fails)
@@ -2716,6 +2761,87 @@ mod tests {
                     .is_some(),
                 keeps
             );
+        }
+    }
+
+    /// The comparison itself ([`SurfaceIntersector::own_tangent_beats_step_back`]), one
+    /// case each way, on the r 6 ball about (0, 50, 20) (its poles on z), with the trace
+    /// points built on the ball (position, exact derivatives, 3D tangent; the other surface
+    /// a fixed frame):
+    /// - along the circle of latitude `1e-6` of the domain from the pole, the previous
+    ///   point 0.05 of the domain back: the own tangent's certified error (MEASURED 1e-7)
+    ///   is far below the step-back's (MEASURED 0.30: it solves `prev`'s 3D tangent, which
+    ///   the circle has turned from by about 0.3 rad), so the point keeps its own;
+    /// - across the meridians at 45 degrees, `1e-8` of the domain from the pole, the
+    ///   previous point `1e-12` of the domain back along the same UV direction: the own
+    ///   tangent's certified error (its `u'` about `1e8` times `v'`, the derivative errors
+    ///   multiplied by it) is above the step-back's lower bound (the step-back's 3D tangent
+    ///   is the point's own to `1e-12`, and its residual lies within its own frame's
+    ///   errors), so the point is stepped back from.
+    ///
+    /// Removing the comparison (either constant) or reversing it fails one case or both.
+    #[test]
+    fn the_own_tangent_is_kept_only_where_it_beats_the_step_back() {
+        use crate::geom::axis2_placement::Axis2Placement;
+        use crate::surface::sphere::Sphere;
+        let k = &Kernel::default();
+        let ball = Surface::from(
+            Sphere::create_canonical(
+                k,
+                &Axis2Placement::new(
+                    Vec3::new(0.0, 50.0, 20.0),
+                    Vec3::new(1.0, 0.0, 0.0),
+                    Vec3::new(0.0, 1.0, 0.0),
+                ),
+                6.0,
+            )
+            .unwrap(),
+        );
+        let other = plane([0.0, 0.0, -0.5], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]);
+        let d = Extent2d::from_bounds(0.0, 0.0, 1.0, 1.0);
+        let dom = ball.natural_uv_domain_with_nurb(k).unwrap();
+        let si = SurfaceIntersector::new(k, &ball, &dom, &other, &d, false).unwrap();
+        let (w, h) = (dom.max().x - dom.min().x, dom.max().y - dom.min().y);
+        // a trace point at the domain fractions (fu, fv), its 3D tangent the image of the
+        // UV direction (a, b) scaled by the derivatives' lengths, normalised
+        let at = |fu: f64, fv: f64, a: f64, b: f64| {
+            let uv = Point2::new(dom.min().x + fu * w, dom.min().y + fv * h);
+            let m = ball.evaluate(k, uv, 2, 2, LEFT_UPPER).unwrap();
+            let (su, sv) = (m[1][0], m[0][1]);
+            let mut p = TsectPnt::new();
+            *p.uv_pos_mut(SrfIndex::First) = uv;
+            *p.srf_du_mut(SrfIndex::First) = su;
+            *p.srf_dv_mut(SrfIndex::First) = sv;
+            *p.uv_pos_mut(SrfIndex::Second) = Point2::new(0.5, 0.5);
+            *p.srf_du_mut(SrfIndex::Second) = Vec3::new(1.0, 0.0, 0.0);
+            *p.srf_dv_mut(SrfIndex::Second) = Vec3::new(0.0, 0.0, 1.0);
+            *p.crv_pos_mut() = m[0][0];
+            *p.crv_deriv_mut() = (su / su.length() * a + sv / sv.length() * b).unitize_or_z();
+            (p, uv, su, sv)
+        };
+        let s45 = 0.5f64.sqrt();
+        for (prev_at, point_at, keeps) in [
+            ((0.25, 1e-6, 1.0, 0.0), (0.3, 1e-6, 1.0, 0.0), true),
+            (
+                (0.3 - 1e-12, 1e-8 - 1e-12, s45, s45),
+                (0.3, 1e-8, s45, s45),
+                false,
+            ),
+        ] {
+            let (prev, _, _, _) = at(prev_at.0, prev_at.1, prev_at.2, prev_at.3);
+            let (point, uv, su, sv) = at(point_at.0, point_at.1, point_at.2, point_at.3);
+            let (sing, dir) = is_singularity(k, &ball, uv).unwrap();
+            assert!(sing, "{keeps}: {dir:?}");
+            let errs = si
+                .near_a_pole_off_it(k, SrfIndex::First, dir, uv, su, sv)
+                .unwrap()
+                .unwrap();
+            // the step size the trace takes: the chord between the points
+            let step = prev.crv_pos().distance(point.crv_pos());
+            let got = si
+                .own_tangent_beats_step_back(k, SrfIndex::First, dir, &prev, &point, step, errs)
+                .unwrap();
+            assert_eq!(got, keeps, "{point_at:?}");
         }
     }
 
