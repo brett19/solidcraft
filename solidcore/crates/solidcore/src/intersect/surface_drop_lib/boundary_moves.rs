@@ -22,16 +22,18 @@
 //! kept the polygon collinear through the knot.
 //!
 //! **When it applies.** Upstream's fix-up is made first and kept as it is (the drop
-//! reports what upstream reports) unless it is shown to move the curve off its 3D curve:
-//! a span whose move is not proved within the budget (below) and whose surface image is
-//! proved to move by more than `2 tol - budget` from the traced span at one of 65 evenly
-//! spaced parameters ([`MoveBound::span_move_lower_bound`]: the UV points enclosed in
-//! interval arithmetic, the surface over each enclosure from the net's partials). The
-//! traced span is within the deviation the drop measured, `tol - budget` (sampled, as
-//! upstream's span test samples it), so the moved point is then more than `tol` from the
-//! 3D curve. Where the budget is not positive (the trace accepted a span over the
-//! tolerance) upstream's fix-up is kept. Only then does the rule below replace it; for
-//! the `HoodCorner` crease the flattened span moved 4.5e-4 at a 2e-5 tolerance.
+//! reports what upstream reports) unless a span it moved is proved to have a parametric
+//! (matched-`t`) deviation over the tolerance: its move is not proved within the budget
+//! (below), and `|S(c(t)) - C(t_0 + t (t_1 - t_0))|` is proved over `tol` at one of 65
+//! evenly spaced `t` ([`MoveBound::span_deviation_lower_bound`]: the UV point enclosed
+//! in interval arithmetic and inside the domain, the surface over the enclosure from the
+//! net's partials, the dropped curve's point at the span's own parameter (the drop's
+//! knots are the curve's parameters) from [`curve_derivs_over`]). The curve must be a
+//! B-spline or an ellipse ([`MoveBound::set_curve`]); otherwise, and where the budget is
+//! not positive (the trace accepted a span over the tolerance), upstream's fix-up is
+//! kept. Only then does the rule below replace it; for the `HoodCorner` crease the
+//! flattened span moved 4.5e-4 at a 2e-5 tolerance. On the kept path upstream's moves
+//! are neither proved within the budget nor added to the deviation, as upstream.
 //!
 //! **The rule here.** A polygon holding a number that is not finite, or a domain that is
 //! empty or not a number, is refused. Then:
@@ -82,9 +84,11 @@
 //! Deviations: not upstream (above). Used for B-spline surfaces and offsets of them;
 //! elsewhere the drop keeps upstream's [`super::p1::fix_boundary_curves`].
 
+use crate::blend::fillet_section::certificate::{curve_derivs_over, NurbsCurve};
 use crate::blend::fillet_section::interval::{round_down, round_up, Ivl};
 use crate::blend::fillet_section::series::V3;
 use crate::blend::fillet_section::station::Nurbs;
+use crate::curve::curve::{Curve, CurveKind};
 use crate::error::{Result, SolidError};
 use crate::geom::extent2d::Extent2d;
 use crate::geom::vector3d::Point3;
@@ -116,6 +120,9 @@ pub struct MoveBound {
     pub budget: f64,
     /// The drop's 3D tolerance (the budget it was made with).
     tol: f64,
+    /// The dropped 3D curve as a NURBS (its parameters are the drop's knots), for the
+    /// matched-parameter deviation; `None` where it is not one ([`MoveBound::set_curve`]).
+    curve: Option<NurbsCurve>,
     /// The largest bound of a span's total move in the last fix-up.
     spent: Cell<f64>,
     /// Whether a fix-up refused its curve.
@@ -177,6 +184,7 @@ impl MoveBound {
                 offset: None,
                 budget,
                 tol: budget,
+                curve: None,
                 spent: Cell::new(0.0),
                 refused: Cell::new(false),
             }),
@@ -194,12 +202,24 @@ impl MoveBound {
                         offset: Some((d, domain)),
                         budget,
                         tol: budget,
+                        curve: None,
                         spent: Cell::new(0.0),
                         refused: Cell::new(false),
                     })
             }
             _ => None,
         }
+    }
+
+    /// Sets the dropped 3D curve, whose parameters the drop's knots are: a B-spline, or an
+    /// ellipse through its rational NURB, as the kernel evaluates them. Without one (any
+    /// other kind) upstream's fix-up is always kept.
+    pub fn set_curve(&mut self, curve: &Curve) {
+        self.curve = match curve.kind() {
+            CurveKind::BSpline(bs) => NurbsCurve::of(bs).ok(),
+            CurveKind::Ellipse(e) => NurbsCurve::of(&e.base).ok(),
+            _ => None,
+        };
     }
 
     /// Upper bounds of `|S_u|` and `|S_v|` over the box: the net's first partials, and for
@@ -292,22 +312,29 @@ impl MoveBound {
         bound.is_finite().then_some(bound)
     }
 
-    /// A lower bound of how far the surface image of the span `new` moves from the traced
-    /// span `old` (both clamped into `dom`, as the span test measures): the largest of
-    /// `|S(clamp(new(t))) - S(clamp(old(t)))|` bounded below at [`MOVE_SAMPLES`] + 1 evenly
-    /// spaced `t`, each UV point enclosed in interval arithmetic and the surface over each
-    /// enclosure from its net's partials (for an offset, its normal `N / |N|` where `|N|`
-    /// is proved at least `2 EFF_ZERO`, as `OffsetSurface::point_with` takes it, inside the
-    /// net's domain). A parameter whose enclosure fails adds nothing; 0 where none holds.
-    fn span_move_lower_bound(&self, old: [Point3; 4], new: [Point3; 4], dom: &Extent2d) -> f64 {
-        let clamp = |c: Ivl, l: f64, h: f64| {
-            if c.lo.is_nan() || c.hi.is_nan() {
-                Ivl::new(l, h)
-            } else {
-                Ivl::new(dom_clamp(c.lo, l, h), dom_clamp(c.hi, l, h))
-            }
+    /// A lower bound of the parametric (matched-`t`) deviation of the span `new` from the
+    /// dropped 3D curve, the span being the curve's parameters `[t0, t1]`: the largest of
+    /// `|S(new(t)) - C(t0 + t (t1 - t0))|` bounded below at [`MOVE_SAMPLES`] + 1 evenly
+    /// spaced `t`. Each UV point is enclosed in interval arithmetic and the surface over
+    /// the enclosure comes from its net's partials (for an offset, its normal `N / |N|`
+    /// where `|N|` is proved at least `2 EFF_ZERO`, as `OffsetSurface::point_with` takes
+    /// it, inside the net's domain); the curve point is enclosed by
+    /// [`curve_derivs_over`] inside the curve's own domain. A parameter whose UV enclosure
+    /// leaves `dom` (where the surface would be evaluated past its domain) or whose
+    /// enclosure fails adds nothing; 0 without a curve or where none holds.
+    fn span_deviation_lower_bound(
+        &self,
+        new: [Point3; 4],
+        (t0, t1): (f64, f64),
+        dom: &Extent2d,
+    ) -> f64 {
+        let Some(cn) = &self.curve else {
+            return 0.0;
         };
-        let at = |c: [Point3; 4], t: Ivl| -> (Ivl, Ivl) {
+        let (Some(&c0), Some(&c1)) = (cn.u.get(cn.p), cn.u.get(cn.n)) else {
+            return 0.0;
+        };
+        let at = |c: [Point3; 4], t: Ivl| -> Option<(Ivl, Ivl)> {
             let m = Ivl::from(1.0) - t;
             let three = Ivl::from(3.0);
             let w = [m * m * m, three * m * m * t, three * m * t * t, t * t * t];
@@ -316,10 +343,11 @@ impl MoveBound {
                 x = x + w * Ivl::from(p.x);
                 y = y + w * Ivl::from(p.y);
             }
-            (
-                clamp(x, dom.u_min(), dom.u_max()),
-                clamp(y, dom.v_min(), dom.v_max()),
-            )
+            let inside = dom.u_min() <= x.lo
+                && x.hi <= dom.u_max()
+                && dom.v_min() <= y.lo
+                && y.hi <= dom.v_max();
+            inside.then_some((x, y))
         };
         let point = |(u, v): (Ivl, Ivl)| -> Option<IV3> {
             let order = usize::from(self.offset.is_some());
@@ -352,13 +380,23 @@ impl MoveBound {
         let mut lb = 0.0_f64;
         for i in 0..=MOVE_SAMPLES {
             let t = Ivl::from(i as f64) / Ivl::from(MOVE_SAMPLES as f64);
-            let (Some(a), Some(b)) = (point(at(new, t)), point(at(old, t))) else {
+            let s = Ivl::from(t0) + t * (Ivl::from(t1) - Ivl::from(t0));
+            if !(c0 <= s.lo && s.hi <= c1) {
+                continue;
+            }
+            let Some(c) = curve_derivs_over(cn, s, 0, None)
+                .ok()
+                .and_then(|d| d.first().copied())
+            else {
+                continue;
+            };
+            let Some(a) = at(new, t).and_then(point) else {
                 continue;
             };
             let gap = V3 {
-                x: a.x - b.x,
-                y: a.y - b.y,
-                z: a.z - b.z,
+                x: a.x - c.x,
+                y: a.y - c.y,
+                z: a.z - c.z,
             };
             lb = lb.max(norm_down(gap));
         }
@@ -366,19 +404,8 @@ impl MoveBound {
     }
 }
 
-/// The parameters [`MoveBound::span_move_lower_bound`] samples a span at, less one.
+/// The parameters [`MoveBound::span_deviation_lower_bound`] samples a span at, less one.
 const MOVE_SAMPLES: usize = 64;
-
-/// `x` (a number) clamped into `[l, h]` (a non-empty domain).
-fn dom_clamp(x: f64, l: f64, h: f64) -> f64 {
-    if x <= l {
-        l
-    } else if x >= h {
-        h
-    } else {
-        x
-    }
-}
 
 /// One parameter axis of a UV point (`x` = u, `y` = v).
 #[derive(Clone, Copy)]
@@ -455,22 +482,23 @@ pub fn fix_boundary_curves_bounded(
     let (lo, hi) = (uv_domain.min(), uv_domain.max());
     let traced = ctrl_poly.to_vec();
 
-    // 0. upstream's fix-up, kept unless it moves a span off the 3D curve by more than the
-    // tolerance: by more than the tolerance plus the deviation the trace measured
-    // (`tol - budget`), a lower bound proved at one parameter (module docs)
+    // 0. upstream's fix-up, kept unless a span it moves is proved to deviate from the 3D
+    // curve, at matched parameters, by more than the tolerance (module docs)
     let mut upstream = traced.clone();
     let upstream_changed = fix_boundary_curves(&mut upstream, uv_domain, uv_tol_x, uv_tol_y)?;
     let mut upstream_exceeds = false;
-    let off = round_up(bound.tol + round_up(bound.tol - bound.budget));
-    if bound.budget > 0.0 && off.is_finite() {
+    if bound.budget > 0.0 && bound.tol.is_finite() {
         for s in 0..num_spans {
             let (Some(old), Some(new)) = (span_of(&traced, s), span_of(&upstream, s)) else {
+                return Err(bad());
+            };
+            let (Some(&t0), Some(&t1)) = (knots.get(s), knots.get(s + 1)) else {
                 return Err(bad());
             };
             let within = bound
                 .span_bound(old, new, uv_domain)
                 .is_some_and(|b| b == 0.0 || b <= bound.budget);
-            if !within && bound.span_move_lower_bound(old, new, uv_domain) > off {
+            if !within && bound.span_deviation_lower_bound(new, (t0, t1), uv_domain) > bound.tol {
                 upstream_exceeds = true;
                 break;
             }
@@ -718,6 +746,32 @@ mod tests {
 
     const TOL: f64 = 1e-6;
 
+    /// Sets `b`'s dropped curve to the plane `(su u, sv v, 0)`'s image of the traced
+    /// polygon `p` over the breakpoints `knots`: a cubic B-spline with the polygon's
+    /// points mapped (the plane is linear), so the traced curve deviates by nothing and
+    /// a moved one by its 3D move, at matched parameters.
+    fn on_curve(b: &mut MoveBound, su: f64, sv: f64, p: &[Point3], knots: &[f64]) {
+        let pts: Vec<CPoint> = p
+            .iter()
+            .map(|q| CPoint::new(su * q.x, sv * q.y, 0.0, 1.0))
+            .collect();
+        let mut u = vec![knots[0]; 4];
+        for &k in &knots[1..knots.len() - 1] {
+            u.extend([k; 3]);
+        }
+        u.extend([knots[knots.len() - 1]; 4]);
+        let c = crate::nurbs::b_spline_curve::BSplineCurve::from_data(
+            3,
+            pts.len() - 1,
+            u.len() - 1,
+            3,
+            &pts,
+            &u,
+        )
+        .expect("curve");
+        b.set_curve(&Curve::from(c));
+    }
+
     fn fix(p: &mut [Point3], knots: &[f64], b: &MoveBound) -> bool {
         fix_boundary_curves_bounded(p, knots, &DOM, TOL, TOL, b).expect("fix")
     }
@@ -743,9 +797,10 @@ mod tests {
     #[test]
     fn a_shallow_arrival_is_made_collinear_on_every_side() {
         for side in 0..4 {
-            let b = plane(100.0, 100.0, 1e-5);
+            let mut b = plane(100.0, 100.0, 1e-5);
             let (hp, hn) = (9.0, 0.05);
             let mut p = poly(side, (0.45, 9e-6), (0.5, 1e-7), (0.501, 1e-7));
+            on_curve(&mut b, 100.0, 100.0, &p, &[0.0, hp, hp + hn]);
             let before_a = p[2];
             assert!(fix(&mut p, &[0.0, hp, hp + hn], &b));
             assert_eq!(p[2], before_a, "side {side}: the previous neighbour stays");
@@ -765,38 +820,51 @@ mod tests {
     /// Where neither choice fits the budget, nothing moves.
     #[test]
     fn nothing_moves_past_the_budget() {
-        let b = plane(100.0, 100.0, 1e-12);
+        let mut b = plane(100.0, 100.0, 1e-12);
         let mut p = poly(0, (0.45, 9e-6), (0.5, 1e-7), (0.55, 5e-6));
+        on_curve(&mut b, 100.0, 100.0, &p, &[0.0, 1.0, 2.0]);
         let before = p.clone();
         assert!(fix(&mut p, &[0.0, 1.0, 2.0], &b));
         assert_eq!(p, before);
     }
 
     /// Upstream's flatten is kept, though its move is not proved within the budget, where
-    /// it is not proved to move the curve more than `2 tol - budget` either: it may be on
-    /// the curve, and the drop reports what upstream reports. On every side.
+    /// its parametric (matched-`t`) deviation from the dropped curve is not proved over the
+    /// tolerance: the drop reports what upstream reports. It is kept too without a curve
+    /// to measure against. On every side.
     #[test]
     fn upstreams_flatten_is_kept_unless_proved_off_the_curve() {
         for side in 0..4 {
-            // tolerance 1e-4, of which the trace measured all but 1e-6: the flatten moves
-            // the surface point by about 100 (4/9) 1.9e-6 = 8.4e-5, past the budget but
-            // not past 2e-4 - 1e-6
+            let knots = [0.0, 1.0, 2.0];
+            let traced = poly(side, (0.45, 2e-6), (0.5, 1e-7), (0.55, 2e-6));
+            let mut upstream = traced.clone();
+            assert!(fix_boundary_curves(&mut upstream, &DOM, TOL, TOL).expect("upstream"));
+            assert_ne!(traced, upstream);
+            // the curve is the traced polygon's image, so the flatten's deviation is its 3D
+            // move, about 100 (4/9) 1.9e-6 = 8.4e-5 at most: past the 1e-6 budget, but
+            // under the 1e-4 tolerance
             let mut b = plane(100.0, 100.0, 1e-4);
             b.budget = 1e-6;
-            let mut p = poly(side, (0.45, 2e-6), (0.5, 1e-7), (0.55, 2e-6));
-            let mut upstream = p.clone();
-            assert!(fix_boundary_curves(&mut upstream, &DOM, TOL, TOL).expect("upstream"));
-            assert_ne!(p, upstream);
-            assert!(fix(&mut p, &[0.0, 1.0, 2.0], &b));
+            on_curve(&mut b, 100.0, 100.0, &traced, &knots);
+            let mut p = traced.clone();
+            assert!(fix(&mut p, &knots, &b));
             assert_eq!(p, upstream, "side {side}");
             assert_eq!(b.spent(), 0.0);
-            // the same flatten with a tolerance of 2e-5 (budget 1e-6): proved off the curve
-            // by more than 2 tol - budget = 3.9e-5, so the rule replaces it
+            // a tolerance of 2e-5: proved over it, so the rule replaces the flatten; with
+            // a 1e-6 budget neither the flatten nor a collinear move fits, so nothing moves
             let mut b = plane(100.0, 100.0, 2e-5);
             b.budget = 1e-6;
-            let mut p = poly(side, (0.45, 2e-6), (0.5, 1e-7), (0.55, 2e-6));
-            let _ = fix_boundary_curves_bounded(&mut p, &[0.0, 1.0, 2.0], &DOM, TOL, TOL, &b);
-            assert_ne!(p, upstream, "side {side}");
+            on_curve(&mut b, 100.0, 100.0, &traced, &knots);
+            let mut p = traced.clone();
+            assert!(fix(&mut p, &knots, &b));
+            assert_eq!(p, traced, "side {side}");
+            assert!(!b.refused(), "side {side}");
+            // the same without a curve: nothing is proved, so upstream's flatten is kept
+            let mut b = plane(100.0, 100.0, 2e-5);
+            b.budget = 1e-6;
+            let mut p = traced.clone();
+            assert!(fix(&mut p, &knots, &b));
+            assert_eq!(p, upstream, "side {side}");
         }
     }
 
@@ -828,8 +896,9 @@ mod tests {
                 );
             }
             assert_eq!(b.spent(), 0.0);
-            let small = plane(100.0, 100.0, 1e-6);
+            let mut small = plane(100.0, 100.0, 1e-6);
             let mut p = poly(side, (0.45, -1e-5), (0.5, 1e-7), (0.55, 5e-6));
+            on_curve(&mut small, 100.0, 100.0, &p, &[0.0, 1.0, 2.0]);
             assert!(
                 fix_boundary_curves_bounded(&mut p, &[0.0, 1.0, 2.0], &DOM, TOL, TOL, &small)
                     .is_err()

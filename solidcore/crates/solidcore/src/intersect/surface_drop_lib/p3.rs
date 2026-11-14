@@ -723,8 +723,12 @@ impl Surface {
         let oob = with_out_of_bounds_enabled(self)?;
         let this = oob.as_ref().unwrap_or(self);
         // not upstream: a B-spline surface's net bounds the boundary fix-up's moves
-        // (`boundary_moves`); its budget is set before each use
+        // (`boundary_moves`); its budget is set before each use, and the dropped curve
+        // tells it where upstream's fix-up leaves the curve
         let mut move_bound = MoveBound::of(k, this, approx_tol_3d);
+        if let Some(b) = move_bound.as_mut() {
+            b.set_curve(curve);
+        }
 
         // surface singularities and their pole points
         let sings = this.get_singularities(k, true, true)?;
