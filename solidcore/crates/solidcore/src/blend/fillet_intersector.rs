@@ -913,10 +913,21 @@ pub struct FilletIntersector<'s, 't, O, G> {
     curr_fillet_touch_boundary: bool,
     /// `m_bSelfIntersect` (no longer used upstream).
     self_intersect: bool,
-    /// Not upstream (tangency-labs/solidcraft#16686): a [`Self::flush_curve`] could not
-    /// make its fillet geometry (the surface not skinned, or the self-intersection not
-    /// smoothed). Upstream only notes it in the solver's sticky status.
-    geometry_unmade: bool,
+    /// Not upstream (tangency-labs/solidcraft#16686): what the [`Self::flush_curve`]s did
+    /// to their fillet geometry since [`Self::take_flush_outcome`] last read it.
+    flush_outcome: FlushOutcome,
+}
+
+/// Not upstream (tangency-labs/solidcraft#16686): what [`FilletIntersector::flush_curve`]s
+/// did to their fillet geometry.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FlushOutcome {
+    /// A flush could not make its fillet geometry (the surface not skinned, or the
+    /// self-intersection not smoothed). Upstream only notes it in the solver's sticky
+    /// status.
+    pub unmade: bool,
+    /// A flush made its fillet geometry (saved its surface, centre line and rails).
+    pub made: bool,
 }
 
 impl<'s, 't, O: SolutionObject + 't, G: Clone> FilletIntersector<'s, 't, O, G> {
@@ -947,7 +958,7 @@ impl<'s, 't, O: SolutionObject + 't, G: Clone> FilletIntersector<'s, 't, O, G> {
             curr_fillet_geom,
             curr_fillet_touch_boundary: false,
             self_intersect: false,
-            geometry_unmade: false,
+            flush_outcome: FlushOutcome::default(),
         })
     }
 
@@ -980,10 +991,16 @@ impl<'s, 't, O: SolutionObject + 't, G: Clone> FilletIntersector<'s, 't, O, G> {
         self.self_intersect = is_self_intersect;
     }
 
-    /// Not upstream (tangency-labs/solidcraft#16686): whether a [`Self::flush_curve`]
-    /// since the last call could not make its fillet geometry; clears the flag.
-    pub fn take_geometry_unmade(&mut self) -> bool {
-        std::mem::take(&mut self.geometry_unmade)
+    /// Not upstream (tangency-labs/solidcraft#16686): what the [`Self::flush_curve`]s since
+    /// the last call did to their fillet geometry; clears it.
+    pub fn take_flush_outcome(&mut self) -> FlushOutcome {
+        std::mem::take(&mut self.flush_outcome)
+    }
+
+    /// Test hook: set what [`Self::take_flush_outcome`] reads, as flushes would.
+    #[cfg(test)]
+    pub(crate) fn set_flush_outcome(&mut self, outcome: FlushOutcome) {
+        self.flush_outcome = outcome;
     }
 
     /// `IsKindOf`: `SmFilletIntersector_TYPE` or a type the advanced intersector is.
@@ -2091,7 +2108,7 @@ impl<'s, 't, O: SolutionObject + 't, G: Clone> FilletIntersector<'s, 't, O, G> {
                 );
                 if keep_unported(smoothed)?.is_none() {
                     solver.set_status(FilStatus::SelfIntHandlingFailure)?;
-                    self.geometry_unmade = true;
+                    self.flush_outcome.unmade = true;
                     return Err(SolidError::blend_failed(
                         OP_FLUSH,
                         "the self-intersecting fillet could not be smoothed",
@@ -2131,7 +2148,7 @@ impl<'s, 't, O: SolutionObject + 't, G: Clone> FilletIntersector<'s, 't, O, G> {
             );
             let Some(s) = keep_unported(created)? else {
                 solver.set_status(FilStatus::SurfSkinningFailure)?;
-                self.geometry_unmade = true;
+                self.flush_outcome.unmade = true;
                 return Err(SolidError::blend_failed(
                     OP_FLUSH,
                     "the fillet surface could not be skinned",
@@ -2150,6 +2167,7 @@ impl<'s, 't, O: SolutionObject + 't, G: Clone> FilletIntersector<'s, 't, O, G> {
         solver.set_rail_mate_uv_curve(pseudo, &fillet_geom, 0, uv1)?;
         solver.set_rail_curve(pseudo, &fillet_geom, 1, curve2)?;
         solver.set_rail_mate_uv_curve(pseudo, &fillet_geom, 1, uv2)?;
+        self.flush_outcome.made = true;
 
         // restore FilletSolver offset distances in offset Surfaces stored in the FilletSolver
         solver.reload_surface_offsets()?;
