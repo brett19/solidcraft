@@ -644,3 +644,246 @@ impl UnitDiff for Runner {
         crate::runner::default_cases(self, &ctx)
     }
 }
+
+#[cfg(test)]
+mod section_certificate {
+    //! WR-723: the section curves of the rows that moved when a face's section became traced
+    //! to the face's tolerance are proved within that tolerance of the plane and of a face's
+    //! surface, every curve of every row. Upstream's size default left them up to 1.6e-2 off
+    //! a 1e-5 face tolerance, so this test fails with the size default.
+    //!
+    //! - **Plane:** a NURBS curve with positive weights lies in the hull of its Euclidean
+    //!   control points, so the largest `|e . (P_i - p0)|` bounds its distance from the plane
+    //!   (`plane_bound`, rounding counted with `gamma_k`).
+    //! - **Surface:** `nurbs::certificate::span_bound` bounds the distance between the curve
+    //!   and the surface's NURBS form over a correspondence between them (by the convex hull of
+    //!   Bernstein coefficients, rounding counted), here between nodes at stations along the
+    //!   curve. The nodes are projections and are not trusted: the bound holds for any
+    //!   correspondence. Each piece of the curve then lies within the bound of the surface.
+    use super::*;
+    use solidcore::curve::curve::CurveKind;
+    use solidcore::geom::certified::{gamma, unit, unit_error};
+    use solidcore::geom::vector2d::Point2;
+    use solidcore::math::Point3;
+    use solidcore::nurbs::certificate::{node_on, span_bound, Node, RailSpans};
+    use solidcore::nurbs::math::NOW;
+    use solidcore::topology::brep::planar_section::face_planar_section_curves;
+    use solidcore::topology::face::p2 as face2;
+    use solidcore::topology::FaceId;
+
+    /// The rows whose section moved (`planar_section_face_tolerance` retired).
+    const MOVED: [&str; 15] = [
+        "cone_slant", "faces_fillet_box_y98", "fillet_box_y98_uv_unforced", "fillet_box_y_forced",
+        "gen0015", "gen0025", "gen0038", "gen0056", "gen0070", "gen0071", "gen0073", "gen0074",
+        "gen0089", "gen0093", "nurb_fillet_section",
+    ];
+
+    /// Stations per curve for the surface certificate, more where fewer do not prove it (each
+    /// piece's correspondence starts as the line between two projected nodes; `span_bound`
+    /// halves it where needed). One curve (gen0025's fourth) needs the last.
+    const STATIONS: [usize; 4] = [1024, 8192, 65536, 262_144];
+
+    /// A certified bound on the distance of the curve's NURB (positive weights) from the
+    /// plane through `p0` with normal `n`: the curve lies in the hull of its Euclidean control
+    /// points, so the largest `|e . (P_i - p0)|` bounds it; each term's rounding is counted.
+    fn plane_bound(nurb: &solidcore::nurbs::crv_basic::Curve, p0: Point3, n: Vec3) -> Option<f64> {
+        let e = unit(n)?;
+        let ue = unit_error();
+        let mut worst = 0.0_f64;
+        for c in nurb.cpts() {
+            let w = if c.w == NOW { 1.0 } else { c.w };
+            if w.is_nan() || w <= 0.0 {
+                return None;
+            }
+            let p = if c.w == NOW { Vec3::new(c.x, c.y, c.z) } else { Vec3::new(c.x / w, c.y / w, c.z / w) };
+            let q = p - p0;
+            let size = p.x.abs().max(p.y.abs()).max(p.z.abs()) + p0.x.abs().max(p0.y.abs()).max(p0.z.abs());
+            // each component of q within eq of exact: the division and the subtraction
+            let eq = gamma(2) * size;
+            let ql = q.length() * (1.0 + gamma(5)) + 2.0 * eq;
+            let err = 2.0 * ue * ql + (1.0 + 2.0 * ue) * 2.0 * eq + gamma(3) * (1.0 + 2.0 * ue) * ql;
+            worst = worst.max((e.dot(q).abs() + err) * (1.0 + gamma(2)));
+        }
+        Some(worst)
+    }
+
+    /// The curves of the row and the face each belongs to where the call says.
+    fn section(k: &Kernel, b: &mut Brep, i: &Inputs) -> SolidResult<Vec<(Curve, Option<FaceId>)>> {
+        let (point, normal) = (v(i.point), v(i.normal));
+        if i.faces {
+            let mut out = Vec::new();
+            for f in brep1::faces(b, None)? {
+                let dom = face2::uv_domain(b, f)?;
+                let Some(s) = face2::surface(b, f)? else { continue };
+                let s = s.clone_for_evaluation()?;
+                if let Ok(sec) = face_planar_section_curves(k, b, f, &s, &dom, point, normal, i.tol, i.ang_tol) {
+                    out.extend(sec.curves_3d.into_iter().map(|c| (c, Some(f))));
+                }
+            }
+            return Ok(out);
+        }
+        if i.api {
+            return Ok(intersect_brep_with_plane(k, b, point, normal)?.into_iter().map(|c| (c, None)).collect());
+        }
+        let opts = PlanarSectionOptions {
+            approx_tol_3d: i.tol,
+            ang_tol_rad: i.ang_tol,
+            outputs: SectionOutputs { curves_3d: i.want_3d, uv_curves: i.want_uv, faces: i.want_faces },
+            force_uv_classify: i.force_uv_classify,
+        };
+        let s = create_planar_section_curves(k, b, point, normal, &opts)?;
+        Ok(s.curves_3d.unwrap_or_default().into_iter().map(|c| (c, None)).collect())
+    }
+
+    /// The certified bound of a curve against the surface of the face it lies on (its own
+    /// face where the call says, else the face whose surface is nearest the curve's middle),
+    /// that face's tolerance, and a note of the surface's kind and definition bound.
+    fn surface_bound(
+        k: &Kernel,
+        b: &Brep,
+        c: &Curve,
+        own: Option<FaceId>,
+    ) -> Result<(f64, f64, String), String> {
+        let base = match c.kind() {
+            CurveKind::Line(l) => l.base_with_nurb().map_err(|e| e.to_string())?.into_owned(),
+            _ => c.b_spline_base().ok_or("no NURBS form")?.clone(),
+        };
+        let nurb = base.gw_nurb().ok_or("no NURB")?.clone();
+        let ivl = c.natural_interval();
+        let mid = c.evaluate_point(k, ivl.evaluate(0.5)).map_err(|e| e.to_string())?;
+        let face = if let Some(f) = own {
+            f
+        } else {
+            let mut best: Option<(FaceId, f64)> = None;
+            for f in brep1::faces(b, None).map_err(|e| e.to_string())? {
+                let Some(s) = face2::surface(b, f).ok().flatten() else { continue };
+                let Ok((_, d)) = node_on(k, s, mid) else { continue };
+                if best.is_none_or(|(_, bd)| d < bd) {
+                    best = Some((f, d));
+                }
+            }
+            best.ok_or("no face's surface")?.0
+        };
+        let s = face2::surface(b, face).ok().flatten().ok_or("a face without surface")?.clone();
+        let tol = face2::tolerance(b, face).map_err(|e| e.to_string())?;
+        let slack = match s.kind() {
+            solidcore::surface::surface::SurfaceKind::ProceduralBlend(pb) => pb.bound(),
+            _ => 0.0,
+        };
+        let kind = format!("{}", s.type_code());
+        // The nodes are not trusted (the bound holds for any correspondence); they are chosen
+        // so the correspondence runs in step with the curve: where the projection's foot is
+        // ambiguous (a pole, where every `u` is the same point) the previous node's parameter
+        // is kept if it is as near, and where the foot jumps across a closed surface's seam the
+        // piece is cut at the seam, each side ending on its own edge of the parameter range.
+        let dom = s.natural_uv_domain_with_nurb(k).map_err(|e| e.to_string())?;
+        let (u0, u1) = (dom.evaluate(0.0, 0.0).x, dom.evaluate(1.0, 0.0).x);
+        let (v0, v1) = (dom.evaluate(0.0, 0.0).y, dom.evaluate(0.0, 1.0).y);
+        let gap = |uv: Point2, q: Point3| s.evaluate_point(k, uv).map_or(f64::INFINITY, |p| (p - q).length());
+        let foot = |q: Point3, prev: Option<Point2>| -> Result<Point2, String> {
+            let (uv, _) = node_on(k, &s, q).map_err(|e| e.to_string())?;
+            let Some(pr) = prev else { return Ok(uv) };
+            let d = gap(uv, q);
+            let mut best = uv;
+            for cand in [Point2::new(pr.x, uv.y), Point2::new(uv.x, pr.y), pr] {
+                if gap(cand, q) <= d + 1e-12 * (1.0 + q.length())
+                    && (cand - pr).length() < (best - pr).length()
+                {
+                    best = cand;
+                }
+            }
+            Ok(best)
+        };
+        let jumps = |a: Point2, b: Point2| {
+            (a.x - b.x).abs() > 0.5 * (u1 - u0).abs() || (a.y - b.y).abs() > 0.5 * (v1 - v0).abs()
+        };
+        let edge = |x: f64, lo: f64, hi: f64| if (x - lo).abs() < (x - hi).abs() { lo } else { hi };
+        let mut worst = f64::INFINITY;
+        for stations in STATIONS {
+            let mut segments: Vec<(Node, Node)> = Vec::new();
+            let ts: Vec<f64> = (0..=stations).map(|j| ivl.evaluate(j as f64 / stations as f64)).collect();
+            let q0 = c.evaluate_point(k, ts[0]).map_err(|e| e.to_string())?;
+            let mut prev = Node { t: ts[0], uv: foot(q0, None)? };
+            for &t in &ts[1..] {
+                let q = c.evaluate_point(k, t).map_err(|e| e.to_string())?;
+                let uv = foot(q, Some(prev.uv))?;
+                if jumps(prev.uv, uv) {
+                    // cut at the seam: bisect for the curve parameter where the foot crosses it
+                    let (mut lo, mut hi) = (prev.t, t);
+                    let mut hi_uv = uv;
+                    for _ in 0..60 {
+                        let m = 0.5 * (lo + hi);
+                        let qm = c.evaluate_point(k, m).map_err(|e| e.to_string())?;
+                        let um = foot(qm, Some(prev.uv))?;
+                        if jumps(prev.uv, um) {
+                            hi = m;
+                            hi_uv = um;
+                        } else {
+                            lo = m;
+                        }
+                    }
+                    let qs = c.evaluate_point(k, hi).map_err(|e| e.to_string())?;
+                    let at = foot(qs, Some(prev.uv))?;
+                    let left = Point2::new(
+                        if (prev.uv.x - hi_uv.x).abs() > 0.5 * (u1 - u0).abs() { edge(prev.uv.x, u0, u1) } else { at.x },
+                        if (prev.uv.y - hi_uv.y).abs() > 0.5 * (v1 - v0).abs() { edge(prev.uv.y, v0, v1) } else { at.y },
+                    );
+                    let right = Point2::new(
+                        if (prev.uv.x - hi_uv.x).abs() > 0.5 * (u1 - u0).abs() { edge(hi_uv.x, u0, u1) } else { at.x },
+                        if (prev.uv.y - hi_uv.y).abs() > 0.5 * (v1 - v0).abs() { edge(hi_uv.y, v0, v1) } else { at.y },
+                    );
+                    segments.push((prev, Node { t: hi, uv: left }));
+                    prev = Node { t: hi, uv: right };
+                }
+                segments.push((prev, Node { t, uv }));
+                prev = Node { t, uv };
+            }
+            worst = 0.0_f64;
+            for (a, b) in segments {
+                let qa = c.evaluate_point(k, a.t).map_err(|e| e.to_string())?;
+                let spans = RailSpans::about(&nurb, qa).map_err(|e| e.to_string())?;
+                let bound = span_bound(k, &s, c, &spans, qa, a, b, tol).map_err(|e| e.to_string())?;
+                worst = worst.max(bound);
+            }
+            if worst < tol {
+                break;
+            }
+        }
+        Ok((worst, tol, format!("surface type {kind} definition bound {slack:.3e}")))
+    }
+
+    #[test]
+    fn the_moved_rows_section_curves_are_proved_within_their_face_tolerance() {
+        let ctx = CaseContext { root: crate::case::repo_root(), seeds: 16 };
+        let cases = Runner.cases(&ctx).unwrap();
+        let mut report = Vec::new();
+        let mut failed = Vec::new();
+        for name in MOVED {
+            let case = cases.iter().find(|c| c.name == name).unwrap_or_else(|| panic!("case {name}"));
+            let i: Inputs = case.parse().unwrap();
+            let mut k = Kernel::default();
+            let mut b = build(&mut k, &i).unwrap().unwrap();
+            assert!(i.translate.is_none() && i.plane_walk.is_none(), "{name}: not covered");
+            let curves = section(&k, &mut b, &i).unwrap();
+            for (ci, (c, own)) in curves.iter().enumerate() {
+                let tol = own.map_or(1e-5, |f| face2::tolerance(&b, f).unwrap());
+                let nurb = match c.kind() {
+                    CurveKind::Line(l) => l.base_with_nurb().ok().and_then(|x| x.gw_nurb().cloned()),
+                    _ => c.b_spline_base().and_then(|x| x.gw_nurb().cloned()),
+                };
+                let plane = nurb.as_ref().and_then(|n| plane_bound(n, v(i.point), v(i.normal)));
+                let surf = surface_bound(&k, &b, c, *own);
+                let line = format!("{name} c{ci} type {} plane {plane:?} surface {surf:?}", c.type_code());
+                let ok = plane.is_some_and(|p| p < tol) && surf.as_ref().is_ok_and(|(s, t, _)| s < t);
+                if !ok {
+                    failed.push(line.clone());
+                }
+                report.push(line);
+            }
+        }
+        for l in &report {
+            println!("{l}");
+        }
+        assert!(failed.is_empty(), "not proved within tolerance:\n{}", failed.join("\n"));
+    }
+}
