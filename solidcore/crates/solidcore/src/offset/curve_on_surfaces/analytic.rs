@@ -9,10 +9,12 @@
 //! | [`Path`]      | none     |
 //!
 //! **The bound.** For a surface `S` take a function `F` with `|F(x)|` the distance from `x`
-//! to a point of `S` (the foot), and the foot inside `S`'s domain:
+//! to a point of `S`'s unbounded form (the foot):
 //!
-//! - a plane through `O` with unit normal `n`: `F(x) = (x - O) . n`, the foot
-//!   `x - F(x) n`, of the same plane parameters as `x`;
+//! - a plane through `O` spanned by `X` and `Y`, unit normal `n = X x Y / |X x Y|`:
+//!   `F(x) = (x - O) . n`, the foot `x - F(x) n`, whose plane coordinates are `x`'s (the
+//!   Gram system of `X` and `Y` solved by Cramer's rule, so `X` and `Y` need not be
+//!   orthonormal);
 //! - a cone `O + R(v) (cos u X + sin u Y) + v Z`, `R(v) = R0 + T v`: with `v(x)` the
 //!   height of `x` along `Z` and `rho(x)` its distance from the axis, the surface point at
 //!   height `v(x)` in `x`'s half-plane is `|rho(x) - R(v(x))|` from `x`, so
@@ -28,24 +30,34 @@
 //! and `H_F = (I - Z Z^T / |Z|^2 - w^ w^T) / rho` (the Hessian of `rho`; `v` and `R` are
 //! linear), so `phi'' = w^ . C'' - T (Z . C'') / |Z|^2 + (|C'|^2 - (C' . Z)^2 / |Z|^2 -
 //! (w^ . C')^2) / rho`, with `rho` proved positive. The distance is then at most
-//! `max(|phi(a)|, |phi(b)|) + h^2 / 8 sup |phi''|` on the segment. Every quantity is
-//! enclosed in rounded interval arithmetic; a segment over the distance is cut in two, to
-//! [`super::MAX_DEPTH`] halvings.
+//! `max(|phi(a)|, |phi(b)|) + h^2 / 8 sup |phi''| + slack` on the segment. Every quantity
+//! is enclosed in rounded interval arithmetic; a segment over the distance is cut in two,
+//! to [`super::MAX_DEPTH`] halvings, within the edge's segment budget.
 //!
-//! **Domains.** Each foot must lie in the surface's domain, unless the surface evaluates
-//! out of bounds: the plane parameters of the segment's box, and the cone heights of the
-//! box (the cone's angular domain must be a whole turn, else nothing is proved).
+//! **Domains** (the slack). A surface that does not evaluate out of bounds clamps its
+//! parameters to its domain, so a foot past the domain is not a surface point: the point
+//! at the clamped parameters is, at most `du su |X| + dv sv |Y|` from it on a plane (`du`,
+//! `dv` how far the box's coordinates reach past the domain, `su`, `sv` the scales) and
+//! `dv (|Z| + |T|)` on a cone (its height past the domain; the angular domain must be a
+//! whole turn, else nothing is proved).
 //!
-//! **Frames.** The placement's axes are taken as its orthonormal frame (the placement
-//! keeps them so; the cone's `Z` is used as stored, its height `v = (x - O) . Z / |Z|^2`).
-//! The semi-angle's tangent is taken within two ulps of the libm value.
+//! **Cone frames** (the slack). The cone is taken about its stored `Z` (its height
+//! `v = (x - O) . Z / |Z|^2`), its circles of radius `R(v)` across it. The placement's
+//! `X`, `Y`, `Z` are enclosed off orthonormal by a residual `r` (the magnitudes of their
+//! dot products and squared lengths less 1), refused past [`FRAME_ULPS`] ulps; then the
+//! surface point `O + R (cos u X + sin u Y) + v Z` lies within `8 r (|R| + |v| + |x - O|)`
+//! of that circle (ARGUED to first order in `r`: each of `X`, `Y`, `Z` is within `3 r` of
+//! an orthonormal frame, so `R (cos u X + sin u Y)` within `6 r |R|` of a vector across
+//! `Z` of length `R`, `v Z` within `3 r |v|` of height `v`; the `x - O` term covers the
+//! height's and radius's own residual), which is added. The semi-angle's tangent is taken
+//! within two ulps of the libm value.
 //!
 //! Deviations: none (no upstream counterpart). Not checked (nothing proved): other analytic
 //! kinds (spheres and tori evaluate through their NURB), offsets of analytic surfaces, a
 //! cone of partial turn, a segment touching a cone's axis. Recursion: none (an explicit
 //! stack, at most [`super::MAX_DEPTH`] halvings of each piece).
 
-use super::{add, cross, scale, sub, FIRST_SEGMENTS, IV3, MAX_DEPTH, OP};
+use super::{add, charge, cross, norm_up, scale, sub, FIRST_SEGMENTS, IV3, MAX_DEPTH, OP};
 use crate::blend::fillet_section::certificate::{curve_derivs_over, NurbsCurve};
 use crate::blend::fillet_section::interval::{round_up, Ivl};
 use crate::blend::fillet_section::series::V3;
@@ -66,6 +78,10 @@ pub(super) enum Path<'c> {
     Segment([IV3; 2]),
 }
 
+/// The most a cone's frame may be off orthonormal, in units of `f64::EPSILON`: each
+/// enclosed `X . Y`, `X . Z`, `Y . Z`, `|X|^2 - 1`, `|Y|^2 - 1`, `|Z|^2 - 1`.
+const FRAME_ULPS: f64 = 4.0;
+
 /// A plane or cone the check bounds in closed form (module docs).
 pub(super) enum Analytic {
     /// `F(x) = (x - O) . n`.
@@ -74,8 +90,8 @@ pub(super) enum Analytic {
         o: IV3,
         /// The unit normal, enclosed.
         n: IV3,
-        /// The X and Y axes with the scales and STEP domain the parameters must lie in;
-        /// `None` when the plane evaluates out of bounds.
+        /// The X and Y axes, their scales and the STEP domain the plane clamps its
+        /// parameters to; `None` when the plane evaluates out of bounds.
         bounds: Option<(IV3, IV3, Ivl, Ivl, Extent2d)>,
     },
     /// `F(x) = rho(x) - (R0 + T v(x))`.
@@ -90,10 +106,36 @@ pub(super) enum Analytic {
         r0: Ivl,
         /// `T`, the semi-angle's tangent, enclosed.
         t: Ivl,
-        /// The STEP heights the feet must lie in; `None` when the cone evaluates out of
-        /// bounds.
+        /// The STEP heights the cone clamps its heights to; `None` when it evaluates out
+        /// of bounds.
         heights: Option<Extent1d>,
+        /// The frame's largest residual off orthonormal (at most [`FRAME_ULPS`] ulps).
+        frame: f64,
     },
+}
+
+/// The largest residual of `axes` off orthonormal, enclosed: the magnitudes of their
+/// pairwise dot products and of their squared lengths less 1.
+fn frame_residual(axes: &[IV3]) -> f64 {
+    let mut r: f64 = 0.0;
+    for (i, a) in axes.iter().enumerate() {
+        r = r.max((dot(*a, *a) - Ivl::from(1.0)).mag());
+        for b in axes.iter().skip(i + 1) {
+            r = r.max(dot(*a, *b).mag());
+        }
+    }
+    r
+}
+
+/// How far `i` reaches past `e` (0 inside), rounded up; `None` when not finite.
+fn past(i: Ivl, e: Extent1d) -> Option<f64> {
+    if !finite(i) {
+        return None;
+    }
+    let lo = round_up(e.min() - i.lo).max(0.0);
+    let hi = round_up(i.hi - e.max()).max(0.0);
+    let r = lo.max(hi);
+    r.is_finite().then_some(r)
 }
 
 fn v3(v: Vec3) -> IV3 {
@@ -110,10 +152,6 @@ fn dot(a: IV3, b: IV3) -> Ivl {
 
 fn finite(i: Ivl) -> bool {
     i.lo.is_finite() && i.hi.is_finite()
-}
-
-fn inside(i: Ivl, e: Extent1d) -> bool {
-    finite(i) && i.lo >= e.min() && i.hi <= e.max()
 }
 
 impl Analytic {
@@ -156,6 +194,10 @@ impl Analytic {
                 if !(zz.lo > 0.0 && finite(zz) && t.is_finite() && c.base_radius().is_finite()) {
                     return None;
                 }
+                let frame = frame_residual(&[v3(pos.x_axis()), v3(pos.y_axis()), z]);
+                if frame.is_nan() || frame > FRAME_ULPS * f64::EPSILON {
+                    return None;
+                }
                 // within two ulps of the libm tangent
                 let ulp = f64::EPSILON * t.abs();
                 let heights = (!rev.is_out_of_bounds_enabled()).then(|| dom.v_interval());
@@ -166,26 +208,57 @@ impl Analytic {
                     r0: Ivl::from(c.base_radius()),
                     t: Ivl::checked(t - 2.0 * ulp, t + 2.0 * ulp),
                     heights,
+                    frame,
                 })
             }
             _ => None,
         }
     }
 
-    /// `F` over the box `x`, `None` where a foot may leave the domain or `F` is not
-    /// enclosed.
+    /// `F` over the box `x`, `None` where it is not enclosed.
     fn f(&self, x: IV3) -> Option<Ivl> {
         let v = match self {
-            Self::Plane { o, n, bounds } => {
+            Self::Plane { o, n, .. } => dot(sub(x, *o), *n),
+            Self::Cone {
+                o, z, zz, r0, t, ..
+            } => {
                 let q = sub(x, *o);
-                if let Some((ax, ay, su, sv, dom)) = bounds {
-                    let u = dot(q, *ax) / (dot(*ax, *ax) * *su);
-                    let w = dot(q, *ay) / (dot(*ay, *ay) * *sv);
-                    if !(inside(u, dom.u_interval()) && inside(w, dom.v_interval())) {
-                        return None;
-                    }
+                let v = dot(q, *z) / *zz;
+                let w = sub(q, scale(*z, v));
+                let rho = dot(w, w).sqrt();
+                rho - (*r0 + *t * v)
+            }
+        };
+        finite(v).then_some(v)
+    }
+
+    /// For the points of the box `x`, a bound of the distance from the foot `F` gives to the
+    /// surface point the kernel evaluates there (module docs: the parameters clamped to the
+    /// domain; for a cone, also its frame's residual), `None` where it is not enclosed.
+    fn slack(&self, x: IV3) -> Option<f64> {
+        let e = match self {
+            Self::Plane { bounds: None, .. } => 0.0,
+            Self::Plane {
+                o,
+                bounds: Some((ax, ay, su, sv, dom)),
+                ..
+            } => {
+                // the foot's plane coordinates, the Gram system solved by Cramer's rule
+                let q = sub(x, *o);
+                let (xx, xy, yy) = (dot(*ax, *ax), dot(*ax, *ay), dot(*ay, *ay));
+                let (qx, qy) = (dot(q, *ax), dot(q, *ay));
+                let det = xx * yy - xy * xy;
+                if det.lo.is_nan() || det.lo <= 0.0 {
+                    return None;
                 }
-                dot(q, *n)
+                let a = (qx * yy - qy * xy) / det;
+                let b = (qy * xx - qx * xy) / det;
+                let du = past(a / *su, dom.u_interval())?;
+                let dv = past(b / *sv, dom.v_interval())?;
+                // the clamped point moves `du su X + dv sv Y` at most
+                let mx = round_up(su.mag() * norm_up(*ax));
+                let my = round_up(sv.mag() * norm_up(*ay));
+                round_up(round_up(du * mx) + round_up(dv * my))
             }
             Self::Cone {
                 o,
@@ -194,18 +267,23 @@ impl Analytic {
                 r0,
                 t,
                 heights,
+                frame,
             } => {
                 let q = sub(x, *o);
                 let v = dot(q, *z) / *zz;
-                if heights.is_some_and(|h| !inside(v, h)) {
-                    return None;
-                }
-                let w = sub(q, scale(*z, v));
-                let rho = dot(w, w).sqrt();
-                rho - (*r0 + *t * v)
+                let dv = match heights {
+                    Some(h) => past(v, *h)?,
+                    None => 0.0,
+                };
+                // a clamped height moves the point `dv (|Z| + |T|)` at most; the frame's
+                // residual `r` moves it `8 r (|R| + |v| + |x - O|)` at most (module docs)
+                let zt = round_up(zz.sqrt().hi + t.mag());
+                let r = (*r0 + *t * v).mag();
+                let size = round_up(round_up(r + v.mag()) + norm_up(q));
+                round_up(round_up(dv * zt) + round_up(8.0 * frame * size))
             }
         };
-        finite(v).then_some(v)
+        e.is_finite().then_some(e)
     }
 
     /// `sup |phi''|` over the segment whose points lie in `x`, with derivatives in `d1`,
@@ -278,7 +356,8 @@ fn enclose(path: &Path<'_>, a: f64, b: f64) -> Option<Piece> {
 }
 
 /// Whether `path` over `interval` (the curve's parameters; `[0, 1]` for a segment) is
-/// proved within `tol` of the surface (module docs). `false` where it is not proved.
+/// proved within `tol` of the surface (module docs), within the segment `budget`. `false`
+/// where it is not proved.
 ///
 /// # Errors
 ///
@@ -290,6 +369,7 @@ pub(super) fn on_analytic(
     s: &Analytic,
     interval: Extent1d,
     tol: f64,
+    budget: &mut usize,
 ) -> Result<bool> {
     let (lo, hi) = (interval.min(), interval.max());
     let mut cuts = vec![lo];
@@ -316,11 +396,13 @@ pub(super) fn on_analytic(
         }
         while let Some((a, b, depth)) = stack.pop() {
             k.check_cancelled(OP)?;
+            if !charge(budget) {
+                return Ok(false);
+            }
             let Some(p) = enclose(path, a, b) else {
                 return Ok(false);
             };
-            // (`F` over the whole segment: every foot lies in the domain)
-            let (Some(fa), Some(fb), Some(_)) = (s.f(p.pa), s.f(p.pb), s.f(p.x)) else {
+            let (Some(fa), Some(fb), Some(extra)) = (s.f(p.pa), s.f(p.pb), s.slack(p.x)) else {
                 return Ok(false);
             };
             let g = fa.mag().max(fb.mag());
@@ -330,7 +412,7 @@ pub(super) fn on_analytic(
             let h = round_up(b - a);
             let ok = s.second(p.x, p.d1, p.d2).is_some_and(|e| {
                 let bend = round_up(round_up(round_up(h * h) / 8.0) * e);
-                round_up(g + bend) <= tol
+                round_up(round_up(g + bend) + extra) <= tol
             });
             if ok {
                 continue;

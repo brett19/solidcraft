@@ -22,7 +22,8 @@
 //!
 //! **Offsets.** For an offset `O = S + d n` of a B-spline net (`n = N / |N|`,
 //! `N = S_u x S_v`), `S` is replaced by `O`: its point by the net's point plus `d N / |N|`
-//! (enclosed by interval division, `|N|` proved positive), and its second derivative along
+//! (enclosed by interval division, `|N|` proved at least twice `EFF_ZERO`, where the offset
+//! takes that normal), and its second derivative along
 //! `w` by the net's plus `d n''`, bounded by `|n''| <= 2 |N''| / |N| + 5 |N'|^2 / |N|^2`
 //! (from `n'' = N''/r - 2 N' r'/r^2 + N (2 r'^2 / r^3 - r''/r^2)`, `r = |N|`, `|r'| <= |N'|`,
 //! `|r''| <= (|N'|^2 + r |N''|) / r`), `N'` and `N''` along `w` from the net's partials to
@@ -36,17 +37,28 @@
 //! rational cylinder), at a point on that line exactly, so each piece lies in one closed
 //! patch; a piece that still crosses one is not proved there.
 //!
+//! **Seams.** Of a foot's parameters (a point on a seam or pole has several) the one nearest
+//! the segment's other foot is taken. Where the two feet still lie more than half the
+//! domain apart in a coordinate (the curve runs across a closed net's seam), the segment is
+//! cut where the line between them, the short way round, leaves the domain: the first piece
+//! ends on that domain edge, the second starts on the opposite one, each bounded on its own
+//! (its end points need only be surface points; a net not closed there leaves a gap that is
+//! not proved).
+//!
 //! **Planes and cones.** A plane or a cone (a cylinder is one) is bounded in closed form by
 //! its distance function instead (module `analytic`): a line by its segment, an ellipse by
 //! the rational NURB it evaluates through, a B-spline as above.
 //!
 //! The curve is taken as the kernel evaluates it: a B-spline, an ellipse's NURB, a line's
-//! analytic segment (`Line::segment_over`, rounding included).
+//! analytic segment (`Line::segment_over`, rounding included); a NURBS curve only over its
+//! own domain `[u_p, u_n]` (past it a polynomial piece's continuation is not the curve).
 //!
 //! Deviations: none (no upstream counterpart). Checked: a B-spline or ellipse on B-spline
 //! nets or offsets of them, and a line, ellipse or B-spline on planes and cones; anything
-//! else is not proved (`false`). Recursion: none (an explicit stack, at most [`MAX_DEPTH`]
-//! halvings of each knot span).
+//! else (spheres, tori, surfaces of revolution, blends, offsets of analytic surfaces) is
+//! not proved (`false`). Recursion: none (explicit stacks, at most [`MAX_DEPTH`] halvings of
+//! each knot span and [`MAX_SEGMENTS`] segments in all for one check, past which nothing is
+//! proved).
 
 use crate::blend::fillet_section::certificate::{curve_derivs_over, NurbsCurve};
 use crate::blend::fillet_section::interval::{round_down, round_up, Ivl};
@@ -74,6 +86,29 @@ const OP: &str = "offset::curve_on_surfaces";
 
 /// The most halvings of one knot span of the curve.
 pub const MAX_DEPTH: u32 = 24;
+
+/// The most segments one check examines, over all the curve's knot spans and both
+/// surfaces; past it the curve is not proved.
+pub const MAX_SEGMENTS: usize = 1 << 16;
+
+/// Whether a net normal `N` of length at least `r` is the one an offset takes there:
+/// `OffsetSurface::point_with` uses `N / |N|` only where `|N|^2` is at least `EFF_ZERO^2`
+/// and another normal below, so the bound holds only above it (twice `EFF_ZERO`, a margin
+/// for the rounding of its `|N|^2`).
+fn normal_as_offset(r: f64) -> bool {
+    r >= 2.0 * crate::math::EFF_ZERO
+}
+
+/// Charges one segment to `budget`: `false` when it is spent.
+fn charge(budget: &mut usize) -> bool {
+    match budget.checked_sub(1) {
+        Some(left) => {
+            *budget = left;
+            true
+        }
+        None => false,
+    }
+}
 
 /// The first segments a knot span is cut into.
 const FIRST_SEGMENTS: usize = 16;
@@ -141,6 +176,18 @@ pub fn curve_on_surfaces(
         CurveKind::Ellipse(e) => NurbsCurve::of(&e.base).ok(),
         _ => None,
     };
+    // the interval must lie in the curve's own domain `[u_p, u_n]`: past it a polynomial
+    // piece's continuation is not the curve
+    if let Some(cn) = &nurbs {
+        let (Some(&u0), Some(&u1)) = (cn.u.get(cn.p), cn.u.get(cn.n)) else {
+            return Ok(false);
+        };
+        if interval.min() < u0 || interval.max() > u1 {
+            return Ok(false);
+        }
+    }
+    // every segment either check examines, for both surfaces, counts against one budget
+    let mut budget = MAX_SEGMENTS;
     let segment = match curve.kind() {
         CurveKind::Line(l) => l.segment_over(&interval).map(|[(p, e), (q, f)]| {
             let boxed = |p: Point3, e: f64| V3 {
@@ -170,24 +217,27 @@ pub fn curve_on_surfaces(
     for s in surfaces {
         let proved = if let Some(a) = Analytic::of(s) {
             match (&nurbs, segment) {
-                (Some(cn), _) => on_analytic(k, &Path::Nurbs(cn), &a, interval, tol)?,
+                (Some(cn), _) => on_analytic(k, &Path::Nurbs(cn), &a, interval, tol, &mut budget)?,
                 (None, Some(seg)) => on_analytic(
                     k,
                     &Path::Segment(seg),
                     &a,
                     Extent1d::from_min_max(0.0, 1.0),
                     tol,
+                    &mut budget,
                 )?,
                 (None, None) => false,
             }
         } else {
             match (&nurbs, &segment_curve, Checked::of(k, s)) {
-                (Some(cn), _, Some(c)) => on_surface(k, cn, curve, s, &c, interval, tol)?,
+                (Some(cn), _, Some(c)) => {
+                    on_surface(k, cn, curve, s, &c, interval, tol, &mut budget)?
+                }
                 // a line: its rounded segment, within the line's rounding less
                 (None, Some((seg, sn, slack)), Some(c)) => {
                     let unit = Extent1d::from_min_max(0.0, 1.0);
                     let inner = round_down(tol - slack);
-                    inner > 0.0 && on_surface(k, sn, seg, s, &c, unit, inner)?
+                    inner > 0.0 && on_surface(k, sn, seg, s, &c, unit, inner, &mut budget)?
                 }
                 _ => false,
             }
@@ -280,6 +330,77 @@ fn cut_at_creases(
     }
     nodes.push((b, sb));
     nodes
+}
+
+/// The segment `[a, b]` with surface points `wa`, `wb` split where it runs across the net's
+/// parameter domain the short way round, through a seam: where `wa` and `wb` lie more than
+/// half the domain apart in a coordinate, the line from `wa` to `wb` shifted by the
+/// domain's length is cut where it crosses the domain's edge, the first piece ending on
+/// that edge and the second starting on the opposite one, at the same parameter `t` (each
+/// piece is bounded on its own, so its ends need only be surface points; a surface not
+/// closed there leaves a gap the bound does not prove). Pieces `(ta, pa, tb, pb)`.
+fn split_at_seams(
+    net: &Nurbs,
+    a: f64,
+    b: f64,
+    wa: Point2,
+    wb: Point2,
+) -> Vec<(f64, Point2, f64, Point2)> {
+    let mut pieces = vec![(a, wa, b, wb)];
+    for axis in [0, 1] {
+        let (knots, deg, n) = if axis == 0 {
+            (&net.u, net.p, net.nu)
+        } else {
+            (&net.v, net.q, net.nv)
+        };
+        let (Some(&d0), Some(&d1)) = (knots.get(deg), knots.get(n)) else {
+            continue;
+        };
+        let len = d1 - d0;
+        let coord = |w: Point2| if axis == 0 { w.x } else { w.y };
+        let mut out = Vec::new();
+        for (ta, pa, tb, pb) in pieces {
+            let (ca, cb) = (coord(pa), coord(pb));
+            if !(len > 0.0 && (cb - ca).abs() > 0.5 * len) {
+                out.push((ta, pa, tb, pb));
+                continue;
+            }
+            // up through d1 into d0, or down through d0 into d1
+            let (shifted, leave, enter) = if cb < ca {
+                (cb + len, d1, d0)
+            } else {
+                (cb - len, d0, d1)
+            };
+            let lam = (leave - ca) / (shifted - ca);
+            let (oa, ob) = if axis == 0 {
+                (pa.y, pb.y)
+            } else {
+                (pa.x, pb.x)
+            };
+            let at = |c: f64, other: f64| {
+                if axis == 0 {
+                    Point2::new(c, other)
+                } else {
+                    Point2::new(other, c)
+                }
+            };
+            // a crossing at an end: that end is taken on the seam's other edge instead
+            if lam.is_nan() || lam <= 0.0 {
+                out.push((ta, at(enter, oa), tb, pb));
+                continue;
+            }
+            if lam >= 1.0 {
+                out.push((ta, pa, tb, at(leave, ob)));
+                continue;
+            }
+            let t = ta + lam * (tb - ta);
+            let other = oa + lam * (ob - oa);
+            out.push((ta, pa, t, at(leave, other)));
+            out.push((t, at(enter, other), tb, pb));
+        }
+        pieces = out;
+    }
+    pieces
 }
 
 /// Whether the parameter box of `p`, `q` holds no crease line inside it (it lies in one
@@ -377,7 +498,7 @@ fn gap_at(cn: &NurbsCurve, c: &Checked, t: f64, w: Point2) -> Option<f64> {
     let mut sp = p.at(0, 0);
     if let Some((d, _)) = c.offset {
         let n = cross(p.at(1, 0), p.at(0, 1));
-        if norm_down(n) <= 0.0 {
+        if !normal_as_offset(norm_down(n)) {
             return None;
         }
         let len = (n.x * n.x + n.y * n.y + n.z * n.z).sqrt();
@@ -426,7 +547,7 @@ fn bend(cn: &NurbsCurve, c: &Checked, a: f64, b: f64, wa: Point2, wb: Point2) ->
     if let Some((dist, _)) = c.offset {
         let (su, sv) = (p.at(1, 0), p.at(0, 1));
         let r = norm_down(cross(su, sv));
-        if r <= 0.0 {
+        if !normal_as_offset(r) {
             return None;
         }
         // first and second derivatives of N = S_u x S_v along w, times h and h^2
@@ -450,7 +571,9 @@ fn bend(cn: &NurbsCurve, c: &Checked, a: f64, b: f64, wa: Point2, wb: Point2) ->
     bound.is_finite().then_some(bound)
 }
 
-/// Whether the curve is proved within `tol` of one surface over `interval`.
+/// Whether the curve is proved within `tol` of one surface over `interval`, within the
+/// segment `budget`.
+#[allow(clippy::too_many_arguments)] // the curve both ways, the surface both ways, the budget
 fn on_surface(
     k: &Kernel,
     cn: &NurbsCurve,
@@ -459,6 +582,7 @@ fn on_surface(
     c: &Checked,
     interval: Extent1d,
     tol: f64,
+    budget: &mut usize,
 ) -> Result<bool> {
     let lines = crease_lines(c);
     // the knot spans inside the interval
@@ -485,6 +609,9 @@ fn on_surface(
         }
         while let Some((a, b, depth)) = stack.pop() {
             k.check_cancelled(OP)?;
+            if !charge(budget) {
+                return Ok(false);
+            }
             let wa = foot(k, s, a, curve, None);
             let (Some(wa), Some(wb)) = (wa, foot(k, s, b, curve, wa)) else {
                 return Ok(false);
@@ -494,20 +621,25 @@ fn on_surface(
                 (Some(_), Some(_)) => {}
                 _ => return Ok(false),
             }
-            // each piece between crease lines on its own (its `g` is smooth there)
-            let nodes = cut_at_creases(&lines, a, b, wa, wb);
-            let ok = nodes.windows(2).all(|w| {
-                let [(ta, pa), (tb, pb)] = w else {
-                    return false;
-                };
-                ta < tb
-                    && in_one_patch(&lines, *pa, *pb)
-                    && match (gap_at(cn, c, *ta, *pa), gap_at(cn, c, *tb, *pb)) {
-                        (Some(ga), Some(gb)) => bend(cn, c, *ta, *tb, *pa, *pb)
-                            .is_some_and(|e| round_up(ga.max(gb) + e) <= tol),
-                        _ => false,
-                    }
-            });
+            // each piece across the seams and between crease lines on its own (its `g` is
+            // smooth there)
+            let mut ok = true;
+            for (ta, pa, tb, pb) in split_at_seams(&c.net, a, b, wa, wb) {
+                let nodes = cut_at_creases(&lines, ta, tb, pa, pb);
+                ok = ok
+                    && nodes.windows(2).all(|w| {
+                        let [(ta, pa), (tb, pb)] = w else {
+                            return false;
+                        };
+                        ta < tb
+                            && in_one_patch(&lines, *pa, *pb)
+                            && match (gap_at(cn, c, *ta, *pa), gap_at(cn, c, *tb, *pb)) {
+                                (Some(ga), Some(gb)) => bend(cn, c, *ta, *tb, *pa, *pb)
+                                    .is_some_and(|e| round_up(ga.max(gb) + e) <= tol),
+                                _ => false,
+                            }
+                    });
+            }
             if ok {
                 continue;
             }
@@ -651,6 +783,115 @@ mod tests {
         assert!(!curve_on_surfaces(&k, &c, ivl, [&s, &s], 1e-6).expect("check"));
     }
 
+    /// The curve of `{"p", "u", "pw"}` (homogeneous control points).
+    fn fixture_curve(v: &serde_json::Value) -> (NurbsCurve, Curve) {
+        let p = v["p"].as_u64().expect("p") as usize;
+        let u: Vec<f64> = serde_json::from_value(v["u"].clone()).expect("u");
+        let pw: Vec<f64> = serde_json::from_value(v["pw"].clone()).expect("pw");
+        let pts: Vec<CPoint> = pw
+            .chunks(4)
+            .map(|c| CPoint::new(c[0], c[1], c[2], c[3]))
+            .collect();
+        let bs =
+            BSplineCurve::from_data(3, pts.len() - 1, u.len() - 1, p, &pts, &u).expect("curve");
+        (NurbsCurve::of(&bs).expect("nurbs"), Curve::from(bs))
+    }
+
+    /// The net of `{"p", "q", "nu", "nv", "u", "v", "pw"}` (u-major homogeneous points).
+    fn fixture_net(v: &serde_json::Value) -> (Nurbs, Surface) {
+        let n = |k: &str| v[k].as_u64().expect(k) as usize;
+        let (p, q, nu, nv) = (n("p"), n("q"), n("nu"), n("nv"));
+        let u: Vec<f64> = serde_json::from_value(v["u"].clone()).expect("u");
+        let w: Vec<f64> = serde_json::from_value(v["v"].clone()).expect("v");
+        let pw: Vec<f64> = serde_json::from_value(v["pw"].clone()).expect("pw");
+        let rows: Vec<Vec<CPoint>> = (0..nu)
+            .map(|i| {
+                (0..nv)
+                    .map(|j| {
+                        let c = &pw[(i * nv + j) * 4..(i * nv + j) * 4 + 4];
+                        CPoint::new(c[0], c[1], c[2], c[3])
+                    })
+                    .collect()
+            })
+            .collect();
+        let bs = BSplineSurface::from_data(
+            nu - 1,
+            nv - 1,
+            p,
+            q,
+            u.len() - 1,
+            w.len() - 1,
+            &rows,
+            &u,
+            &w,
+        )
+        .expect("net");
+        (Nurbs::of(&bs).expect("nurbs"), Surface::from(bs))
+    }
+
+    /// A certified lower bound of the distance from the box `x` to the net over its whole
+    /// knot domain: branch and bound over parameter boxes, each box's points enclosed
+    /// ([`partials_over`]) and its distance bounded below ([`norm_down`]), a box cut in
+    /// two along its longer side until its bound reaches `target` or 40 cuts.
+    fn net_distance_lower_bound(net: &Nurbs, x: IV3, target: f64) -> f64 {
+        let (u0, u1) = (net.u[net.p], net.u[net.nu]);
+        let (v0, v1) = (net.v[net.q], net.v[net.nv]);
+        let mut stack = vec![(Ivl::new(u0, u1), Ivl::new(v0, v1), 0u32)];
+        let mut lb = f64::INFINITY;
+        while let Some((u, v, depth)) = stack.pop() {
+            let s = partials_over(net, u, v, 0)
+                .expect("box")
+                .expect("weights")
+                .at(0, 0);
+            let d = norm_down(sub(x, s));
+            if d >= target || depth >= 40 {
+                lb = lb.min(d);
+                continue;
+            }
+            if u.hi - u.lo >= v.hi - v.lo {
+                let m = 0.5 * (u.lo + u.hi);
+                stack.push((Ivl::new(u.lo, m), v, depth + 1));
+                stack.push((Ivl::new(m, u.hi), v, depth + 1));
+            } else {
+                let m = 0.5 * (v.lo + v.hi);
+                stack.push((u, Ivl::new(v.lo, m), depth + 1));
+                stack.push((u, Ivl::new(m, v.hi), depth + 1));
+            }
+        }
+        lb
+    }
+
+    /// `pe_Fillet_tilt_cyl_on_box_f1_d0_out_ext` (goldens), the mated pair whose ends
+    /// match: the old offset edge, the intersection and the two extended surfaces (a
+    /// rational quadratic by linear net, the tilted cylinder's side, and a bilinear net),
+    /// dumped once from the mate. The old edge's point at t = 126.32/34 is certified at
+    /// least 0.3 from the bilinear net, 220 times its tolerance 1.34e-3: the old edge is not
+    /// a mate of the two faces. The intersection is proved within the tolerance of both.
+    #[test]
+    fn tilt_cyl_old_offset_edge_is_off_its_plane_and_the_intersection_is_on_both() {
+        let data: serde_json::Value = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/data/issue_15282_tilt_cyl_mate_pair.json"
+        )))
+        .expect("fixture");
+        let tol = data["tol"].as_f64().expect("tol");
+        let (old, _) = fixture_curve(&data["old"]);
+        let (_, s1) = fixture_net(&data["s"][0]["net"]);
+        let (net2, s2) = fixture_net(&data["s"][1]["net"]);
+        let t = data["ivl"][1].as_f64().expect("ivl") / 34.0;
+        let x = curve_derivs_over(&old, Ivl::from(t), 0, None).expect("point")[0];
+        let lb = net_distance_lower_bound(&net2, x, 0.3);
+        assert!(lb >= 0.3, "lower bound {lb}");
+        assert!(lb > tol);
+        let (_, new) = fixture_curve(&data["new"]);
+        let ivl = Extent1d::from_min_max(
+            data["new_ivl"][0].as_f64().expect("ivl"),
+            data["new_ivl"][1].as_f64().expect("ivl"),
+        );
+        let k = Kernel::default();
+        assert!(curve_on_surfaces(&k, &new, ivl, [&s1, &s2], tol).expect("check"));
+    }
+
     mod analytic_kinds {
         use super::super::*;
         use crate::curve::ellipse::{Ellipse, EllipseOptions};
@@ -711,6 +952,28 @@ mod tests {
             let (l, ivl) = line(Point3::new(5.0, 0.0, 1e-3), Point3::new(5.0, 10.0, 1e-3));
             assert!(!curve_on_surfaces(&k, &l, ivl, [&a, &b], 1e-6).expect("check"));
             assert!(curve_on_surfaces(&k, &l, ivl, [&a, &b], 2e-3).expect("check"));
+        }
+
+        /// `gen0732` (goldens, `offset.offset_geometry_creation`): the mated pair whose ends
+        /// match, a line from (0, 0, 10) to (2, 0, 10) on the planes y = 0 and z = 10 over
+        /// `[0, 10]^2`, its ends on both planes' domain edges (x = 0, and the plane
+        /// coordinate 10 or 0 across). It is proved on both at its tolerance 1e-5, the
+        /// rounding of its ends past the domain edges counted as the clamped point's move,
+        /// so `MateEdges` keeps it as upstream does and the row does not move.
+        #[test]
+        fn gen0732s_line_on_two_bounded_planes_is_proved() {
+            let k = Kernel::default();
+            let dom = Extent2d::from_bounds(0.0, 0.0, 10.0, 10.0);
+            let side = Surface::from(Plane::new(Point3::ZERO, X, Z, Vec2::new(1.0, 1.0), &dom));
+            let top = Surface::from(Plane::new(
+                Point3::new(0.0, 0.0, 10.0),
+                X,
+                Y,
+                Vec2::new(1.0, 1.0),
+                &dom,
+            ));
+            let (l, ivl) = line(Point3::new(0.0, 0.0, 10.0), Point3::new(2.0, 0.0, 10.0));
+            assert!(curve_on_surfaces(&k, &l, ivl, [&side, &top], 1e-5).expect("check"));
         }
 
         /// A foot outside a bounded plane's domain is not proved.

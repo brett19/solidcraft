@@ -308,13 +308,13 @@ fn unique_cone_meeting(k: &Kernel, first: &Surface, second: &Surface) -> Result<
 /// When [`OffsetGeometryCreation::replace_edge_curves`]'s shortcut keeps an edge whose
 /// curve's ends match the new curve's.
 #[derive(Clone, Copy)]
-enum KeepOld<'s> {
+enum KeepOld {
     /// Always (upstream).
     OnMatchingEnds,
-    /// Only where the old curve is proved within the edge's tolerance of both surfaces (not
-    /// upstream: `MateEdges`, whose new curve is their intersection; see
+    /// As decided by the caller (not upstream: `MateEdges`, whose new curve is the surfaces'
+    /// intersection, keeps an offset edge only where it is proved on both surfaces; see
     /// [`OffsetGeometryCreation::replace_edge_curves_in`]).
-    IfOnSurfaces([&'s Surface; 2]),
+    Decided(bool),
 }
 
 /// A dereference of a null pointer or a cast that fails upstream (undefined
@@ -2455,6 +2455,45 @@ impl OffsetGeometryCreation {
         )
     }
 
+    /// Whether [`Self::replace_edge_curves_in`]'s shortcut would keep `edgeuse`'s edge
+    /// against the candidate `curve_3d` in `MateEdges` (not upstream): its curve's ends match
+    /// the candidate's within the edge tolerance (either way round) and it is proved within
+    /// that tolerance of both `surfaces`
+    /// ([`crate::offset::curve_on_surfaces::curve_on_surfaces`]).
+    fn keeps_old_edge<O: ClassObject + SolutionObject>(
+        k: &Kernel,
+        brep: &impl OffsetBrep<O>,
+        edgeuse: O,
+        curve_3d: O,
+        surfaces: [&Surface; 2],
+    ) -> Result<bool> {
+        let edge = brep
+            .edgeuse_edge(edgeuse)?
+            .ok_or(dangling("edge use without edge"))?;
+        let eu_curve = brep
+            .edge_curve(edge)?
+            .ok_or(dangling("edge without curve"))?;
+        let edge_ivl = brep.edge_interval(edge)?;
+        let edge_tol = brep.edge_tolerance(edge)?;
+        let old = curve_of(brep, eu_curve)?;
+        let (s, e) = (
+            old.evaluate_point(k, edge_ivl.min())?,
+            old.evaluate_point(k, edge_ivl.max())?,
+        );
+        let new = curve_of(brep, curve_3d)?;
+        let ivl = new.natural_interval();
+        let (cs, ce) = (
+            new.evaluate_point(k, ivl.min())?,
+            new.evaluate_point(k, ivl.max())?,
+        );
+        let ends = (distance(s, cs) < edge_tol && distance(e, ce) < edge_tol)
+            || (distance(s, ce) < edge_tol && distance(e, cs) < edge_tol);
+        Ok(ends
+            && crate::offset::curve_on_surfaces::curve_on_surfaces(
+                k, old, edge_ivl, surfaces, edge_tol,
+            )?)
+    }
+
     /// [`Self::replace_edge_curves`], with `keep` choosing when a curve whose ends match the
     /// edge curve's leaves the edge as it is. Upstream always keeps it: that is sound where
     /// the candidate is the edge's own curve extended or trimmed (`ExtendTrimEdges`, the
@@ -2465,11 +2504,13 @@ impl OffsetGeometryCreation {
     /// edge), each face's own offset edge ends at the intersection's ends but leaves it in
     /// between (by up to 0.032 for the hood corner sheet of
     /// `tests/issue_1502_thicken_rim_halves.rs` thickened by 2), and keeping them leaves the
-    /// two offset faces apart along the edge. So `MateEdges` keeps the old edge only where it
-    /// is proved within its tolerance of both extended surfaces
-    /// ([`crate::offset::curve_on_surfaces::curve_on_surfaces`]: closed form on planes and
-    /// cones, interval bounds on B-spline nets and their offsets) and otherwise installs the
-    /// intersection, upstream's own path for ends that do not match.
+    /// two offset faces apart along the edge. So `MateEdges` keeps each offset edge of the
+    /// pair only where [`Self::keeps_old_edge`] holds for it (proved within its tolerance of
+    /// both extended surfaces by [`crate::offset::curve_on_surfaces::curve_on_surfaces`]:
+    /// closed form on planes and cones, interval bounds on B-spline nets and their
+    /// offsets), and otherwise installs the intersection, upstream's own path for ends that
+    /// do not match. Each use decides alone, as upstream: a kept edge and an installed
+    /// intersection are then both within the tolerance of both surfaces.
     #[allow(clippy::too_many_arguments)] // `ReplaceEdgeCurves` and the choice above
     fn replace_edge_curves_in<O: ClassObject + SolutionObject>(
         k: &Kernel,
@@ -2478,7 +2519,7 @@ impl OffsetGeometryCreation {
         curve_3d: Option<O>,
         uv_curve: Option<O>,
         opt_orig_edgeuse: Option<O>,
-        keep: KeepOld<'_>,
+        keep: KeepOld,
     ) -> Result<ReplaceEdgeCurves> {
         // locals
         let edge = brep
@@ -2507,20 +2548,11 @@ impl OffsetGeometryCreation {
             let curve_start = curve_of(brep, c3)?.evaluate_point(k, c3_ivl.min())?;
             let curve_end = curve_of(brep, c3)?.evaluate_point(k, c3_ivl.max())?;
 
-            // (not upstream: where asked, the old curve must also be proved on both
-            // surfaces, see `KeepOld`)
-            let keep_old = |brep: &mut _| -> Result<bool> {
+            // (not upstream: where asked, the pair's joint decision, see `KeepOld`)
+            let keep_old = |_: &mut _| -> Result<bool> {
                 Ok(match keep {
                     KeepOld::OnMatchingEnds => true,
-                    KeepOld::IfOnSurfaces(surfaces) => {
-                        crate::offset::curve_on_surfaces::curve_on_surfaces(
-                            k,
-                            curve_of(brep, eu_curve)?,
-                            edge_ivl,
-                            surfaces,
-                            edge_tol,
-                        )?
-                    }
+                    KeepOld::Decided(keep) => keep,
                 })
             };
 
@@ -4439,9 +4471,16 @@ impl OffsetGeometryCreation {
         let copy_3d = curve_of(brep, curve_3d_found)?.copy(k)?;
         let copy_3d_h = store_curve(brep, copy_3d)?;
 
-        // when appropriate - change the pOffsetEdgeuse geometry (not upstream: an edge
-        // whose ends match is kept only when proved on both extended surfaces, see
+        // when appropriate - change the pOffsetEdgeuse geometry (not upstream: an offset
+        // edge whose ends match is kept only when proved on both extended surfaces, see
         // `replace_edge_curves_in`)
+        let keep = KeepOld::Decided(Self::keeps_old_edge(
+            k,
+            brep,
+            offset_edgeuse,
+            curve_3d_found,
+            [&s1, &s2],
+        )?);
         Self::replace_edge_curves_in(
             k,
             brep,
@@ -4449,12 +4488,19 @@ impl OffsetGeometryCreation {
             Some(curve_3d_found),
             Some(uv_curve1_found),
             Some(edgeuse),
-            KeepOld::IfOnSurfaces([&s1, &s2]),
+            keep,
         )?;
 
         // when appropriate - change the pOtherOffsetEdgeuse geometry
         // GWC:BUG?? These two Edgeuses point to the same edge - these two calls should
         //           have the same 3DCurve. It's ok: At this point they do not (yet) point to the same edge.
+        let keep = KeepOld::Decided(Self::keeps_old_edge(
+            k,
+            brep,
+            other_offset_edgeuse,
+            copy_3d_h,
+            [&s1, &s2],
+        )?);
         Self::replace_edge_curves_in(
             k,
             brep,
@@ -4462,7 +4508,7 @@ impl OffsetGeometryCreation {
             Some(copy_3d_h),
             Some(uv_curve2_found),
             Some(other_edgeuse),
-            KeepOld::IfOnSurfaces([&s1, &s2]),
+            keep,
         )?;
 
         // all done
