@@ -3025,6 +3025,19 @@ mod tests {
         assert!(fi
             .flush_curve(&mut s, &Kernel::default(), &mut FilletBrep::new(), &mut out)
             .is_err());
+        // (not upstream, #16686) the same error exit through the noting wrapper notes the
+        // geometry unmade, and nothing made
+        assert_eq!(fi.take_flush_outcome(), FlushOutcome::default());
+        assert!(fi
+            .flush_curve_noting(&mut s, &Kernel::default(), &mut FilletBrep::new(), &mut out)
+            .is_err());
+        assert_eq!(
+            fi.take_flush_outcome(),
+            FlushOutcome {
+                unmade: true,
+                made: false
+            }
+        );
         // one point on the boundary of the first domain
         let p = fi
             .base

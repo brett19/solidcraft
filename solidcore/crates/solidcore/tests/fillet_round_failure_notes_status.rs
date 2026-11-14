@@ -324,10 +324,7 @@ fn the_rollover_failure_notes_its_status() {
         .expect("the second round fails with the three fixes");
     assert_eq!(*which, "second");
     assert_eq!(*code, 4, "{comment}");
-    assert!(
-        comment.starts_with("Fillet Surface Computation Failure"),
-        "{comment}"
-    );
+    assert_eq!(comment, "Fillet Surface Computation Failure");
 }
 
 /// Every vertex's point and tolerance; every edge's tolerance, its curve's points at the start,
