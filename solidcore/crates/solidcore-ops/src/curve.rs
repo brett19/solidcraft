@@ -494,7 +494,7 @@ pub enum CurveExtension {
     /// The same knots and control points, the control polygon stretched along itself from the
     /// other end so each point keeps its share of it (the kernel's
     /// [`solidcore::nurbs::crv_basic::Curve::extend_keeping_proportion`]): the curve grows by the
-    /// length, certified within `1e-7` of the length asked, its shape slides along the polygon;
+    /// length, its growth certified within `1e-7` of the growth asked, relatively, its shape slides along the polygon;
     /// refused ([`Error::NotExact`]) where that is not certified.
     Proportion,
 }
