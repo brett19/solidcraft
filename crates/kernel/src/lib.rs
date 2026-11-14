@@ -222,7 +222,7 @@ pub use sew::{EdgeSpec, FaceSpec, SurfSpec, sew, sew_touching};
 pub use solidcraft_smlib::hold_a_kernel;
 pub use solidcraft_smlib::stop::Stop;
 pub use solidcraft_smlib::trace as smlib_trace;
-pub use splitface::{SplitTool, split_body, split_faces, split_faces_with_map};
+pub use splitface::{SplitTool, face_split_if_on_face, has_cap_at, split_body, split_faces, split_faces_with_map};
 pub use step::step_export;
 /// The largest STEP text the importer parses; `solidcraft_io::limits` keeps it at the limit in force (#13329).
 pub use step_in::p21::{max_bytes as step_max_bytes, set_max_bytes as set_step_max_bytes};
@@ -243,7 +243,7 @@ pub use surfaces::{
 };
 pub use sweep_path::{RailFit, SweepControl, SweepOrientation, sweep_path, sweep_path_with};
 pub use topo::{CylinderFace, cylinder_end_at, cylinder_face, cylinder_face_at, material_in_ring};
-pub use topo::{TopoCounts, merged_topology, seam_flags};
+pub use topo::{TopoCounts, merged_topology, seam_flags, whole_edge};
 pub use tspline::tspline_sheet;
 pub use validation::{KeptCheck, Validation, check_kept, detach_kept, validating};
 pub use validity::{SmlibCheck, Validity, smlib_dump_dir, validity};
