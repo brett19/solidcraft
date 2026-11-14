@@ -401,6 +401,8 @@ pub struct Proj {
     pub cam: Camera,
     pub vp: Mat4,
     pub rect: Rect,
+    /// The scene's box, when known: an orthographic pick ray starts in front of it (see [`Proj::ray`]).
+    pub bounds: Option<solidcraft_engine::geom::Aabb3>,
 }
 
 impl Proj {
@@ -416,7 +418,25 @@ impl Proj {
         ))
     }
     pub fn ray(&self, p: Pos2) -> (Vec3, Vec3) {
-        self.cam.ray((p.x - self.rect.left()) as f64, (p.y - self.rect.top()) as f64, self.rect.width() as f64, self.rect.height() as f64)
+        let (o, d) =
+            self.cam.ray((p.x - self.rect.left()) as f64, (p.y - self.rect.top()) as f64, self.rect.width() as f64, self.rect.height() as f64);
+        if self.cam.fov > 0.0 {
+            return (o, d);
+        }
+        // Orthographic: the ray starts behind the whole scene, however far the target has moved along the
+        // view direction, so visible geometry is always pickable (#16601). The start never moves forward.
+        let Some(b) = self.bounds.filter(|b| !b.is_empty() && b.min.is_finite() && b.max.is_finite()) else { return (o, d) };
+        let mut nearest = f64::INFINITY;
+        for i in 0..8 {
+            let corner = Vec3::new(
+                if i & 1 == 0 { b.min.x } else { b.max.x },
+                if i & 2 == 0 { b.min.y } else { b.max.y },
+                if i & 4 == 0 { b.min.z } else { b.max.z },
+            );
+            nearest = nearest.min((corner - o).dot(d));
+        }
+        let t = nearest - (b.diagonal() * 0.01 + 1.0);
+        if t.is_finite() && t < 0.0 { (o + d * t, d) } else { (o, d) }
     }
 }
 
@@ -482,6 +502,14 @@ fn ao_radius(app: &SolveApp) -> f32 {
     if app.preferences.ambient_occlusion && app.ui.visual_style != 2 && size > 0.0 { (size * 0.04).clamp(1e-4, 1e6) as f32 } else { 0.0 }
 }
 
+/// How close a perspective eye may come to the target: a small fraction of the scene, so zoom-in
+/// slows there instead of collapsing the view (#16628).
+pub(crate) fn min_zoom_distance(app: &SolveApp) -> f64 {
+    let b = scene_bounds(app);
+    let r = if b.is_empty() || !b.diagonal().is_finite() { 50.0 } else { b.diagonal() * 0.5 };
+    (r * 0.02).clamp(1e-3, 1e6)
+}
+
 pub fn scene_radius(app: &SolveApp) -> f64 {
     let b = scene_bounds(app);
     let r = if b.is_empty() { 50.0 } else { b.diagonal() * 0.5 + b.center().dist(app.cam.target) };
@@ -519,7 +547,8 @@ pub fn projection(app: &SolveApp, rect: Rect) -> Proj {
         cam.fov = app.view_fov();
     }
     let aspect = rect.width() as f64 / rect.height().max(1.0) as f64;
-    Proj { cam, vp: cam.view_proj_bounds(aspect, &solidcraft_engine::render::view_bounds(&scene_bounds(app))), rect }
+    let bounds = scene_bounds(app);
+    Proj { cam, vp: cam.view_proj_bounds(aspect, &solidcraft_engine::render::view_bounds(&bounds)), rect, bounds: Some(bounds) }
 }
 
 /// The far plane the picture's projection uses: the grid's fade ends before that plane cuts the
@@ -5525,27 +5554,29 @@ fn build_highlight_with_projection(app: &SolveApp, projection: impl FnOnce() -> 
     // pointer is lit: the face a pick there lies on (#11476).
     let lit = crate::snap_wake::lit_face(app);
     match lit.as_ref().or(hover) {
-        Some(Hit::Face { body, index, .. })
-            if body_hover.as_ref() != Some(body)
-                && !replaced(body)
-                && !sel.iter().any(|x| matches!(x, Sel::Face { body: b, index: i, .. } if b == body && i == index)) =>
-        {
+        Some(Hit::Face { body, index, .. }) if body_hover.as_ref() != Some(body) && !replaced(body) => {
             if let Some(b) = st.body(body) {
                 let k = t.hover_face_lift;
-                let c = body_rgb(app, body);
                 let m = if outlines { shown(b) } else { drawn(b) };
                 let patch = m.surface_patch(*index);
+                let face_selected = |fi: usize| items.iter().any(|x| matches!(x, Sel::Face { body: b, index: i, .. } if b == body && *i == fi));
+                let selected = face_selected(*index);
                 if !(outlines && has_pickable_outline(&m)) {
                     let lit = shown(b);
                     for &f in &patch {
-                        face_tris(&mut feedback, &lit, f, [c.0.saturating_add(k), c.1.saturating_add(k), c.2.saturating_add(k), 255], true);
+                        if !face_selected(f) {
+                            let c = body_rgb(app, body);
+                            face_tris(&mut feedback, &lit, f, [c.0.saturating_add(k), c.1.saturating_add(k), c.2.saturating_add(k), 255], true);
+                        }
                     }
                 }
                 for (e, _) in m.edge_faces.iter().enumerate().filter(|(_, fs)| fs.iter().any(|f| patch.contains(&(*f as usize)))) {
                     if let Some(p) = m.edges.get(e)
                         && m.edge_pickable(e)
                     {
-                        edge_lines(&mut feedback, p, hover_edge, 1.5, &[]);
+                        let edge_sel = selected && items.iter().any(|x| matches!(x, Sel::Edge { body: eb, index: ei, .. } if eb == body && *ei == e));
+                        let (cols, w) = if edge_sel { (selected_edge, 4.0) } else { (hover_edge, 1.5) };
+                        edge_lines(&mut feedback, p, cols, w, &[]);
                     }
                 }
             }
@@ -6616,6 +6647,7 @@ pub fn show(app: &mut SolveApp, ui: &mut egui::Ui) {
     }
     crate::joint_handles::show(app, ui, &painter, &proj);
     overlays(app, &painter, &proj);
+    crate::browser::dims_overlay(app, &painter, &proj);
     paint_device_pivot(app, &painter, &proj);
     draw_notes(app, &painter, &proj);
     crate::dim_view::show(app, ui, &painter, &proj);

@@ -396,6 +396,20 @@ pub struct Extent {
     /// it set, so they keep the bodies they were built with.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub to_body_apart: bool,
+    /// Where each other component stood, relative to this extrude's own, when To / From Object
+    /// was picked (#16732). The pick is measured against the model as it was then, so a joint
+    /// that slides the drawer does not stretch a body that ends at the frame. Designs saved
+    /// before it carry none and keep measuring against the placements shown.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub picked_placements: Vec<PickedPlacement>,
+}
+
+/// A component's placement relative to a feature's own component, as it was when the feature
+/// picked something in it ([`Extent::picked_placements`]).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PickedPlacement {
+    pub component: u64,
+    pub placement: crate::Mat,
 }
 
 /// Thin Extrude: a wall of constant thickness along sketch curves instead of the profiles.
@@ -3292,6 +3306,10 @@ pub struct Feature {
     /// its faces are named after them and references follow them through Update Links (#3330).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub link_faces: Vec<Vec<String>>,
+    /// Cosmetic threads carried with a linked Import, by the file's body index. Their
+    /// coordinates are in the imported geometry's frame; evaluation assigns local identities.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub link_threads: Vec<Vec<crate::ThreadInfo>>,
     /// What a join of this feature makes of pieces that share no face: those that touch along an
     /// edge or at a point become separate bodies and those that touch nothing stay one body (the
     /// default), or every piece stays one body.
@@ -4443,6 +4461,7 @@ impl Document {
             pattern_names_in_order: false,
             inserted: false,
             link_faces: Vec::new(),
+            link_threads: Vec::new(),
             touching: Touching::Separate,
             kind,
         };
