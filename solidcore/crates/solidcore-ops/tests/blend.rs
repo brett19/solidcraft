@@ -1875,16 +1875,18 @@ fn drafted_corner_plate(kink: f64, draft: f64) -> (Body, [usize; 2]) {
     (b, edges)
 }
 
-/// #16627: chamfers joined at a near-straight corner leave the shared section `o * a` off, `o`
-/// their offset from the face the two share and `a` the angle between the side faces, not their
-/// setback times `a`. A chamfer of setbacks `d` on one face and `d'` on the other of a wedge of
-/// angle `w` stands `(d' - d cos w) / sin w` off the first: on a 120 degree wedge setbacks 1
-/// stand sqrt 3 off. The Join is bounded by the largest offset, so chamfers of setbacks 1,
-/// 1 x 0.5 and 0.5 x 1 on wedges of 60 and 120 degrees (walls drafted 30 degrees either way)
-/// pass the check at 0.97, 1.03 and 1.5 of the kink where that offset times `a` reaches the
-/// intersection tolerance 2e-5. Bounded by the setbacks, the setbacks 1 on the 120 degree wedge
-/// would be joined at 1.5 (`a` 1.73e-5 rad), leaving the vertex sqrt 3 * a = 3.0e-5 off: forced
-/// to the Join at 2e-3 degrees, the check finds it 5.2359878e-5 off, sqrt 3 * a to eight digits.
+/// #16627: chamfers joined at a near-straight corner leave the shared section `2 o tan(a / 2)`
+/// off, `o` their offset from the side faces and `a` the angle between those faces (the corner
+/// of each chamfer's offset planes lies on its side face's offset at `o`; the shared one where
+/// the two offsets cross), not their setbacks. A chamfer of setbacks `d` on one face and `d'`
+/// on the other of a wedge of angle `w` stands `(d' - d cos w) / sin w` off the first: on a 120
+/// degree wedge setbacks 1 stand sqrt 3 off. The Join is bounded by the largest offset, so
+/// chamfers of setbacks 1, 1 x 0.5 and 0.5 x 1 on wedges of 60 and 120 degrees (walls drafted
+/// 30 degrees either way) pass the check at 0.97, 1.03 and 1.5 of the kink where that offset
+/// reaches the intersection tolerance 2e-5. Bounded by the setbacks, the setbacks 1 on the 120
+/// degree wedge would be joined at 1.5 (`a` 1.73e-5 rad), leaving the vertex sqrt 3 * a =
+/// 3.0e-5 off: forced to the Join at 2e-3 degrees, the check finds it 5.2359878e-5 off,
+/// sqrt 3 * a to eight digits.
 #[test]
 fn chamfers_join_at_a_near_straight_corner_within_their_offsets() {
     all_fixes();
@@ -1896,7 +1898,7 @@ fn chamfers_join_at_a_near_straight_corner_within_their_offsets() {
         for (top, side) in [(1.0, 1.0), (1.0, 0.5), (0.5, 1.0)] {
             let offsets = [(side - cw * top) / sw, (top - cw * side) / sw];
             let size = offsets[0].max(offsets[1]);
-            let a_max = 2e-5 / size;
+            let a_max = 2.0 * (2e-5 / (2.0 * size)).atan();
             let k_max = ((a_max.cos() - d.sin().powi(2)) / d.cos().powi(2))
                 .acos()
                 .to_degrees();

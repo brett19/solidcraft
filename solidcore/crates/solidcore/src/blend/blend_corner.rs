@@ -316,24 +316,33 @@ pub fn classify(
 /// The angle (degrees) below which two blends of sizes up to `size` may share one section (a
 /// Join) in a B-rep of intersection tolerance `xsect_tol` (#16627).
 ///
-/// At the joint vertex the shared section leaves the two blends `o * a` apart, `a` the angle
-/// at which the side edge's faces meet at the vertex and `o` the blends' offset from the face
-/// they share (a round's radius; a chamfer's `(d' - d cos w) / sin w` for setbacks `d` on that
-/// face and `d'` on the side at a wedge of angle `w`), at any wedge angle: measured to eight
-/// digits on rounds and on equal and unequal chamfers at wedges of 60, 90 and 120 degrees (not
-/// derived here). `size` is the largest offset of either surface of either blend, so `size *
-/// a` bounds it. Not the setbacks: on a 120 degree wedge a chamfer of setbacks 1 stands
-/// `sqrt 3` off its faces and leaves `sqrt 3 * a`. The check holds every vertex strictly within
-/// the B-rep's intersection tolerance of each of its faces
-/// (`SmVertex::IsWithinXSectTol3dOfFaces`, `gap < XSectTol3d`, twice the B-rep's zone
-/// tolerance). So a Join needs `size * a < xsect_tol`.
+/// The gap (#16627). Look along the side edge at the joint vertex `v`: its two faces are two
+/// lines through `v` meeting at `pi - a`, `a` the angle between their normals (the angle
+/// `check_tangential_edgeuse_at_vertex` compares). Each blend's section centre (a round's ball
+/// centre, the corner of a chamfer's two offset planes) stands off its side face by that
+/// blend's offset `o` there, so it lies on that face's offset line, at the foot `C_i = v + o
+/// n_i` of the vertex's normal. The shared section's centre lies on both offset lines: at
+/// their crossing `P`, which stands `o tan(a / 2)` from each foot (the offset lines meet at
+/// `pi - a`, and `P`, `C_i` and `v` make a right triangle with its angle `a / 2` at `v`). So
+/// the shared section stands at most `|C_1 P| + |P C_2| = 2 o tan(a / 2)` off the blends.
+/// MEASURED to match: forced to the Join on rounds and on equal and unequal chamfers at
+/// wedges of 60, 90 and 120 degrees, the check's vertex offset was `o a` to eight digits, which
+/// `2 o tan(a / 2)` equals to `a^2 / 12` relative (1e-10 here). The offset is a round's radius
+/// on any wedge, and a chamfer's `(d' - d cos w) / sin w` off the face with setback `d` (`d'`
+/// on the other, wedge angle `w`), not its setback: on a 120 degree wedge setbacks 1 stand
+/// `sqrt 3` off, and a bound on the setbacks (or on a round's reach `r cot(w / 2)`, 1 / sqrt 3
+/// there) understates the gap. `size` is the largest offset of either surface of either blend.
+/// The check holds every vertex strictly within the B-rep's intersection tolerance of each of
+/// its faces (`SmVertex::IsWithinXSectTol3dOfFaces`, `gap < XSectTol3d`, twice the B-rep's
+/// zone tolerance). So a Join needs `2 size tan(a / 2) < xsect_tol`: `a < 2 atan(xsect_tol /
+/// (2 size))`.
 ///
 /// The budget is shrunk for the rounding of the angle `check_tangential_edgeuse_at_vertex`
 /// compares: `8 eps` absolute plus `8 eps` relative in the angle between the two normals, and
-/// five more roundings in this budget, its quotient by `size` and the conversion to degrees and
-/// back (`16 eps` relative and `8 eps * size` absolute in all). That margin takes the normals as
-/// unit vectors correct to rounding; the error of a face normal evaluated on a curved surface
-/// is not bounded here.
+/// six more roundings in this budget, its quotient by `2 size`, the arctangent and the
+/// conversion to degrees and back (`16 eps` relative and `8 eps * size` absolute in all). That
+/// margin takes the normals as unit vectors correct to rounding; the error of a face normal
+/// evaluated on a curved surface is not bounded here.
 ///
 /// Never above the solvers' tangency tolerance; that tolerance where `size` is not a positive
 /// length (no offset for the sections to stand apart by). 0 (no Join at any angle the strict
@@ -350,7 +359,7 @@ pub fn join_within_xsect_tolerance_deg(size: f64, xsect_tol: f64, tangency_tol_d
     let eps = f64::EPSILON;
     let budget = xsect_tol * (1.0 - 16.0 * eps) - 8.0 * eps * size;
     if budget > 0.0 {
-        join_tolerance_deg(size, budget, tangency_tol_deg)
+        crate::math::rad_to_deg(2.0 * (budget / (2.0 * size)).atan()).min(tangency_tol_deg)
     } else {
         0.0
     }
@@ -953,16 +962,21 @@ mod tests {
         assert_eq!(join_tolerance_deg(2.0, 0.0, 10.0), 10.0);
     }
 
-    /// #16627: in a B-rep of intersection tolerance 2e-5 blends of size 1 join only below 2e-5
-    /// rad, less the rounding margin (8 eps absolute in the angle, 1e-10 of it here), and never
-    /// at 2e-5 itself. No budget (a size so large that rounding eats it, a tolerance not a
+    /// #16627: in a B-rep of intersection tolerance 2e-5 blends of size 1 join only below
+    /// `2 atan(1e-5)` rad, where `2 tan(a / 2)` reaches 2e-5, less the rounding margin (8 eps
+    /// absolute in the angle, 1e-10 of it here), and never at that angle itself. No budget (a size so large that rounding eats it, a tolerance not a
     /// positive finite length, or a non-finite size) admits no Join; no size keeps the tangency
     /// tolerance.
     #[test]
     fn blends_join_only_below_the_intersection_tolerance() {
         let deg = join_within_xsect_tolerance_deg(1.0, 2e-5, 10.0);
-        let bound = crate::math::rad_to_deg(2e-5);
+        let bound = crate::math::rad_to_deg(2.0 * 1e-5_f64.atan());
         assert!(deg < bound, "{deg} not below {bound}");
+        let a = deg.to_radians();
+        assert!(
+            2.0 * (a / 2.0).tan() < 2e-5,
+            "{a}: the gap reaches the tolerance"
+        );
         assert!(deg > bound * (1.0 - 1e-9), "{deg} far below {bound}");
         assert_eq!(join_within_xsect_tolerance_deg(1e12, 1e-5, 10.0), 0.0);
         assert_eq!(join_within_xsect_tolerance_deg(1.0, 0.0, 10.0), 0.0);

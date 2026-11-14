@@ -561,12 +561,14 @@ pub(super) fn primary_eu(pseudo: &FilletBrep, e: EdgeId, op: &'static str) -> Re
         .ok_or_else(|| SolidError::blend_missing(op, "the edge's primary edge use"))
 }
 
-/// The largest offset of `solver`'s surfaces: how far its section's point (a round's ball
-/// centre, a chamfer's corner of its offset planes) stands off each face, a round's radius
-/// and a chamfer's `(d' - d cos w) / sin w` for setbacks `d` on this face and `d'` on the
-/// other at a wedge of angle `w`, not its setbacks (#16627: the Join's gap is the offset from
-/// the shared face times the side faces' angle, at any wedge;
-/// `blend_corner::join_within_xsect_tolerance_deg`). `0` where it has no offset surface yet.
+/// The largest offset of `solver`'s surfaces: how far its section's centre (a round's ball
+/// centre, the corner of a chamfer's offset planes) stands off each face, a round's radius
+/// and a chamfer's `(d' - d cos w) / sin w` off the face with setback `d` (`d'` on the other,
+/// wedge angle `w`), not its setbacks. #16627: the centre lies on its side face's offset at
+/// this distance, so where the side faces meet at an angle `a` the shared section of a Join
+/// stands at most `2 size tan(a / 2)` off the blends
+/// (`blend_corner::join_within_xsect_tolerance_deg` derives it). `0` where it has no offset
+/// surface yet.
 ///
 /// # Errors
 ///
