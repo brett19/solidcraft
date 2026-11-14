@@ -1252,11 +1252,12 @@ fn gap_closure(
             side.trim_ends = if side.same { [p0, p1] } else { [p1, p0] };
             side.edge_ends = if side.same { [ea, eb] } else { [eb, ea] };
             // pieces between the grid's points and the trim's knots
+            // a trim without knots (a B-spline missing its NURB) is malformed: its error
+            // is the volume's
             let mut breaks: Vec<f64> = side
                 .trim
-                .knots(k, None)
-                .map(|(knots, _)| knots)
-                .unwrap_or_default()
+                .knots(k, None)?
+                .0
                 .into_iter()
                 .filter(|&t| t > c0 && t < c1)
                 .collect();
