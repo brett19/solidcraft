@@ -52,6 +52,11 @@
 //!   `DoIntersection` together after [`MAX_START_LOOP_TRACE_STEPS`] steps (HANG-52),
 //!   the same way. `DoLawIntersection`'s span
 //!   subdivision stops at [`MAX_LAW_POINTS`] points the same way.
+//! - **Certified snapped spans (#16669, not upstream).** Before `TraceCurve` adds a
+//!   point `TestPoint` snapped to a start, through or end point, the span to it must
+//!   certify on a sphere ([`SurfaceIntersector::span_images_certified`]); traced points
+//!   toward it are added first, at most [`MAX_APPROACH_POINTS`], past which the trace
+//!   refuses with `IntersectFailed` (`approach_certified`).
 //! - **Recursion.** `DoPointIntersection` retries once from a singular end point
 //!   through itself, guarded by the function-static `bInsideMe` (set for the nested
 //!   call by an `SmTemporaryChangeValue`); here the flag is a parameter of the
@@ -121,6 +126,7 @@ use super::p2::{compute_law_point_values_with, LawGuess, LawPointOptions, TsectC
 use super::p3::{split_span_with, test_point_with, NextPoint};
 
 const OP_TRACE: &str = "intersect::surface_intersector::p4::SurfaceIntersector::trace_curve";
+const OP_APPROACH: &str = "intersect::surface_intersector::p4::approach_certified";
 const OP_FIC: &str = "intersect::surface_intersector::p4::SurfaceIntersector::find_interior_curves";
 const OP_DPI: &str =
     "intersect::surface_intersector::p4::SurfaceIntersector::do_point_intersection";
@@ -1091,6 +1097,91 @@ fn trace_step<'s, V: IntersectorVirtuals<'s> + ?Sized>(
     }
 }
 
+/// Not upstream (#16669): the most traced points [`approach_certified`] puts before a
+/// snapped point.
+pub const MAX_APPROACH_POINTS: usize = 16;
+
+/// Not upstream (#16669): makes the span from the curve's last point `tsp` to `next` one
+/// whose UV images are certified ([`SurfaceIntersector::span_images_certified`]), by
+/// tracing points toward `next` and adding them to the curve. `TestPoint` snaps an
+/// accepted point to a start, through or end point the span passed, and the span then
+/// ends at that point's position and tangents, which no span test has seen: next to a
+/// sphere's pole a seam crossing's exact UV tangent is many times the span's UV length,
+/// and the UV image of a long span to it left the domain and missed the 3D span by 0.66.
+/// Each added point is a trace step from the last one half way to `next` (shortened by the
+/// trace's factor 1.5 until its span passes [`SurfaceIntersector::test_span_accuracy`] and
+/// ends before `next`). A span that passes as it is adds nothing.
+///
+/// # Errors
+///
+/// `IntersectFailed` when the span does not certify after [`MAX_APPROACH_POINTS`] points,
+/// or no step toward `next` passes before the trace's step floor (`100 SM_EFF_ZERO`) or
+/// [`MAX_STEP_TRIES`]; those of the trace steps.
+fn approach_certified<'s, V: IntersectorVirtuals<'s> + ?Sized>(
+    v: &mut V,
+    k: &Kernel,
+    tsp: TsectId,
+    next: TsectId,
+    uv_tol: [f64; 2],
+) -> Result<()> {
+    let refuse = |why: &'static str| SolidError::intersect_failed(OP_APPROACH, why);
+    let mut from = tsp;
+    for _ in 0..MAX_APPROACH_POINTS {
+        let (a, b) = {
+            let base = v.intersector();
+            (base.point(from)?.clone(), base.point(next)?.clone())
+        };
+        let span = b.curve_parameter - a.curve_parameter;
+        // a span this short passes the span test as it is
+        if span <= EFF_ZERO * 100.0 || v.intersector().span_images_certified(&a, &b, span) {
+            return Ok(());
+        }
+        let mut step_size = span / 2.0;
+        let mut st = Step {
+            found_good_point: false,
+            deviation: 0.0,
+            angle_found: 0.0,
+            clipped: false,
+            hit_boundary: false,
+        };
+        let mut tries = 0usize;
+        let mid = loop {
+            tries += 1;
+            if tries > MAX_STEP_TRIES || step_size < EFF_ZERO * 100.0 {
+                return Err(refuse("no trace step toward the snapped point passes"));
+            }
+            let mut fresh = TsectPnt::zeroed();
+            fresh.point_type = IntersectionPointType::Unknown;
+            let mid = v.intersector_mut().alloc_point(fresh);
+            let ok = trace_step(v, k, from, step_size, mid, &mut st)?;
+            let before = {
+                let p = v.intersector().point(mid)?;
+                a.curve_parameter < p.curve_parameter && p.curve_parameter < b.curve_parameter
+            };
+            if ok && st.found_good_point && before {
+                break mid;
+            }
+            step_size /= 1.5;
+        };
+        v.intersector().check_in_domains(mid, uv_tol)?;
+        v.intersector_mut().point_mut(mid)?.deviation = st.deviation;
+        v.intersector_mut().add_point_to_curve(mid)?;
+        from = mid;
+    }
+    let (a, b) = {
+        let base = v.intersector();
+        (base.point(from)?.clone(), base.point(next)?.clone())
+    };
+    if v.intersector()
+        .span_images_certified(&a, &b, b.curve_parameter - a.curve_parameter)
+    {
+        return Ok(());
+    }
+    Err(refuse(
+        "the span to the snapped point does not certify within the bound",
+    ))
+}
+
 /// `TestPoint(next, bDone)`: `done` keeps its value when upstream leaves it.
 fn trace_test<'s, V: IntersectorVirtuals<'s> + ?Sized>(
     v: &mut V,
@@ -1281,6 +1372,7 @@ pub fn trace_curve_with<'s, V: IntersectorVirtuals<'s> + ?Sized>(
             {
                 break;
             }
+            approach_certified(v, k, tsp, next, uv_tol)?;
             v.intersector_mut().add_point_to_curve(next)?;
             if done {
                 break;
@@ -1337,6 +1429,7 @@ pub fn trace_curve_with<'s, V: IntersectorVirtuals<'s> + ?Sized>(
                             return Ok(());
                         }
                         // an end condition: done tracing
+                        approach_certified(v, k, tsp, next, uv_tol)?;
                         v.intersector_mut().add_point_to_curve(next)?;
                         return Ok(());
                     }
@@ -1417,6 +1510,7 @@ pub fn trace_curve_with<'s, V: IntersectorVirtuals<'s> + ?Sized>(
         if !done {
             trace_test(v, k, next, &mut done)?;
             v.intersector_mut().point_mut(next)?.deviation = st.deviation;
+            approach_certified(v, k, tsp, next, uv_tol)?;
             v.intersector_mut().add_point_to_curve(next)?;
         }
 
