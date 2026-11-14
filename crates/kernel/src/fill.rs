@@ -21,7 +21,7 @@ use solidcraft_geom::brep::eval::SurfaceEval;
 use solidcraft_geom::bspline::{HPoint, SplineError};
 use solidcraft_geom::fill_general::{Across, MAX_FILL_POINTS, Station};
 use solidcraft_geom::fill_iso::{IsoEdge, IsoFill, IsoSpec};
-use solidcraft_geom::fill_matched::{MatchedFill, MatchedSpec};
+use solidcraft_geom::fill_matched::{MatchedFill, MatchedSpec, SideBounds};
 use solidcraft_geom::prelude::*;
 
 use crate::body::Body;
@@ -232,11 +232,58 @@ pub(crate) fn matched_patch(body: &Body, chain: &[(usize, bool)], curvature_tol:
             .collect()
     };
     let spec = MatchedSpec { tol: face_tolerance(body), angle_tol: PATCH_ANGLE_TOL_DEG.to_radians(), curvature_tol };
-    let fill = solidcraft_geom::fill_matched::fill_matched(n, &mut stations, &spec).map_err(spline_error)?;
+    let bounds: Vec<SideBounds> = chain.iter().map_while(|&(e, _)| side_bounds(&record, e)).collect();
+    let fill = solidcraft_geom::fill_matched::fill_matched_certified(n, &mut stations, &spec, &bounds).map_err(spline_error)?;
     let projection = Projection { origin: fill.fill.origin, axes: fill.fill.axes };
     let surface = crate::surfaces::spline_surface(&fill.fill.surface);
     let made = patch_body(body, &record, chain, surface, fill.fill.counter_clockwise, &Pcurves::Projected(&projection), face_tolerance(body))?;
     Ok((made, fill))
+}
+
+/// Bounds along edge `e` over the matched patch's station parameter (its interval taken as
+/// `[0, 1]`) that certify the patch between stations (`fill_matched_certified`): the edge's speed and
+/// acceleration bounds from its B-spline form (`curve_bounds`), and the face beside it, a plane
+/// (its normal fixed, no curvature) or a cylinder of radius `r`, whose normal turns at most `1/r`
+/// per length: `|N''| ≤ A/r + 2S²/r²`, the leave direction `w = T × N` turns at most
+/// `A/S_min + S/r`, and its normal curvature `−(w·e_θ)²/r` moves at most `2(|w'| + S/r)/r`.
+/// `None` (no certificate) for any other edge or face.
+fn side_bounds(record: &b::Brep, e: usize) -> Option<SideBounds> {
+    let edge = record.edges.get(e)?;
+    let v3 = |p: &[f64; 3]| Vec3::new(p[0], p[1], p[2]);
+    let (degree, knots, h): (usize, Vec<f64>, Vec<HPoint>) = match edge.parameters() {
+        b::Curve::Line { start, end } => (1, vec![0.0, 0.0, 1.0, 1.0], vec![HPoint::weighted(v3(start), 1.0), HPoint::weighted(v3(end), 1.0)]),
+        b::Curve::Spline { knots, points } => {
+            (knots.len().checked_sub(points.len() + 1)?, knots.clone(), points.iter().map(|p| HPoint::weighted(v3(p), 1.0)).collect())
+        }
+        b::Curve::RationalSpline { knots, homogeneous } => (
+            knots.len().checked_sub(homogeneous.len() + 1)?,
+            knots.clone(),
+            homogeneous.iter().map(|q| HPoint { x: q[0], y: q[1], z: q[2], w: q[3] }).collect(),
+        ),
+        _ => return None,
+    };
+    let [speed, accel, least] = solidcraft_geom::fill_matched::curve_bounds(degree, &knots, &h)?;
+    let [a, z] = edge.interval;
+    let len = (z - a).abs();
+    let (s, acc, turn) = (speed * len, accel * len * len, accel * len / least);
+    let [u] = edge.uses.as_slice() else { return None };
+    match &record.faces.get(u.face as usize)?.surface {
+        b::Surface::Plane { .. } | b::Surface::PlaneThrough { .. } => {
+            Some(SideBounds { speed: s, accel: acc, normal_accel: 0.0, leave_rate: turn, curvature_rate: 0.0 })
+        }
+        b::Surface::Cylinder { radius, .. } if *radius > 0.0 => {
+            let r = *radius;
+            let leave_rate = turn + s / r;
+            Some(SideBounds {
+                speed: s,
+                accel: acc,
+                normal_accel: acc / r + 2.0 * s * s / (r * r),
+                leave_rate,
+                curvature_rate: 2.0 * (leave_rate + s / r) / r,
+            })
+        }
+        _ => None,
+    }
 }
 
 /// A piece of a loop edge as the general fill takes it: record edge `edge` over `interval` (in

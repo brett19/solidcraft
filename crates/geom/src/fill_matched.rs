@@ -24,27 +24,27 @@
 //!   Each row is weighed to a length on the grid's scale (the G1 rows times a cell, the G2 rows
 //!   times a cell squared), and the heights minimise their squared misfit plus a small multiple
 //!   of the thin-plate energy ([`FAIRNESS`]), which decides what the conditions leave free.
-//! - **At a corner** of the loop the corner's own station holds the position only. The faces'
-//!   curvatures across it can differ (a round ending on a plane), so no surface is G2 to both
-//!   there; what the surface's curvature is at the corner is set by the two curves alone
-//!   ([`corner_hessian`]). The G2 rows fade in over [`FADE_SHARE`] of the run from each corner to
-//!   the next ([`fade`]) and, within that stretch, ask for a curvature passing from the corner's
-//!   to the face's ([`ramp`]), rows a surface can meet; at a corner with no curvature of its own
-//!   (no jets, or faces that disagree) they ask for the face's own.
-//! - **Grids** of 4 spans across the box's longer side, doubling, then [`MAX_MATCHED_SPANS`], are
-//!   tried in turn, with denser sampling (up to [`MAX_MATCHED_POINTS`] stations) when a grid's
-//!   cells are finer than twice the stations' step. The fill is the first whose surface is within
-//!   `tol` of every station, whose normal is within `angle_tol` of the face's at every G1/G2
-//!   station, whose normal curvature across the loop is within `curvature_tol` of the face's at
-//!   every G2 station clear of the corners' fades (all three sampled at the stations), and which,
-//!   by its Bézier hulls over the loop, reaches no further than `tol` past the plane of any planar
-//!   neighbour ([`past_planes`]). Otherwise "not supported yet", with how close the best grid came.
+//! - **At a corner** of the loop the corner's own station holds the position only, and the G2
+//!   rows fade in over [`FADE_SHARE`] of the run from each corner to the next ([`fade`]).
+//! - **Grids** of 4 spans across the box's longer side, doubling to 128, are tried in turn, with
+//!   denser sampling when a grid's cells are finer than twice the stations' step. The fill is the
+//!   first whose surface is within `tol` of every station, whose normal is within `angle_tol` of
+//!   the face's at every G1/G2 station, and whose normal curvature across the loop is within
+//!   `curvature_tol` of the face's at every G2 station clear of the corners' fades. Otherwise
+//!   "not supported yet", with how close the best grid came.
+//! - **Certified path** ([`fill_matched_certified`]), only for a loop the grids above refuse and
+//!   whose caller bounds every side ([`SideBounds`]): the rows near a corner ask for a curvature
+//!   passing from the corner's own ([`corner_hessian`]) to the face's ([`ramp`]), the ladder ends
+//!   at [`MAX_MATCHED_SPANS`], and a grid is accepted only if, besides the station checks, it
+//!   stays within `tol` of every planar neighbour's plane by its Bézier hulls ([`past_planes`])
+//!   and the gap, angle and curvature are bounded within their tolerances between the stations
+//!   ([`certify`]).
 //!
 //! A loop that is not the boundary of a height field over its plane, or a face beside it that
 //! stands along the plane's normal, is refused, never filled with wrong geometry. Input is
 //! hostile: sizes are capped and every evaluation checked; nothing here panics.
 
-use crate::bspline::{HPoint, SplineError, SplineResult, basis_bezier, invalid, subdivide};
+use crate::bspline::{HPoint, SplineError, SplineResult, basis_bezier, bezier_segment, invalid, segment, subdivide};
 use crate::fill::{Band, Grid, LoopFill, LoopFrame, MAX_LOOP_POINTS, SMOOTHNESS, check_projectable, inside_loop, loop_frame, segment_meets_rect};
 use crate::fill_general::Station;
 use crate::prelude::*;
@@ -54,8 +54,10 @@ use solidcore_record::Vec3;
 /// face's side short against the loop (0.9 of 5 for r3 rounds set back 3.5595), whose fades 128
 /// spans cross in 3.5 cells. Its band takes 150 MB and four times the 128 grid's solve.
 pub const MAX_MATCHED_SPANS: usize = 181;
-/// Most stations the fill samples: twice [`MAX_LOOP_POINTS`], as the last grid's cells, finer
-/// than the 128 grid's, need the stations twice as close.
+/// The last grid of the uncertified path.
+const PLAIN_SPANS: usize = 128;
+/// Most stations the certified path samples: twice [`MAX_LOOP_POINTS`] (the other path's cap),
+/// as the last grid's cells, finer than the 128 grid's, need the stations twice as close.
 pub const MAX_MATCHED_POINTS: usize = 2 * MAX_LOOP_POINTS;
 /// Fewest spans (the first grid tried).
 const MIN_SPANS: usize = 4;
@@ -105,14 +107,61 @@ pub struct MatchedFill {
     pub stations: usize,
 }
 
+/// Bounds on one side of the loop over its station parameter `t` (0 to 1), from the caller, who
+/// knows the edge and the face beside it: they certify a fill between the stations.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SideBounds {
+    /// `|p'(t)|` and `|p''(t)|` of the loop's point.
+    pub speed: f64,
+    pub accel: f64,
+    /// `|N''(t)|` of the face's unit normal along the side.
+    pub normal_accel: f64,
+    /// `|w'(t)|` of the leave direction.
+    pub leave_rate: f64,
+    /// `|κ'(t)|` of the face's normal curvature along the leave direction.
+    pub curvature_rate: f64,
+}
+
 /// Fill the closed loop of `sides` sides with one height field meeting each station's face as
 /// its `across` asks (see the module documentation). `stations(k, ts)` samples side `k` at the
 /// parameters `ts` (0 at its start, which is where side `k − 1` ends, towards 1 at its end); a
-/// station at `t = 0` marked `corner` is a corner of the loop.
+/// station at `t = 0` marked `corner` is a corner of the loop. Accepted on the station checks
+/// alone, with each face's own curvature asked near the corners and grids up to 128 spans.
 pub fn fill_matched(
     sides: usize,
     stations: &mut dyn FnMut(usize, &[f64]) -> Result<Vec<Station>, String>,
     spec: &MatchedSpec,
+) -> SplineResult<MatchedFill> {
+    ladder(sides, stations, spec, None)
+}
+
+/// [`fill_matched`], and where it refuses and `bounds` holds one [`SideBounds`] per side, the
+/// certified path: the corners' own curvature asked near them ([`corner_hessian`], [`ramp`]),
+/// grids up to [`MAX_MATCHED_SPANS`] over up to [`MAX_MATCHED_POINTS`] stations, and a grid
+/// accepted only when, besides the station checks, its Bézier hulls stay within `tol` of every
+/// planar neighbour ([`past_planes`]) and the gap to the loop, the angle and the curvature are
+/// bounded within their tolerances between the stations ([`certify`]). If that path refuses too,
+/// the refusal is [`fill_matched`]'s.
+pub fn fill_matched_certified(
+    sides: usize,
+    stations: &mut dyn FnMut(usize, &[f64]) -> Result<Vec<Station>, String>,
+    spec: &MatchedSpec,
+    bounds: &[SideBounds],
+) -> SplineResult<MatchedFill> {
+    match ladder(sides, stations, spec, None) {
+        Err(SplineError::Unsupported(why)) if bounds.len() == sides => {
+            ladder(sides, stations, spec, Some(bounds)).map_err(|_| SplineError::Unsupported(why))
+        }
+        other => other,
+    }
+}
+
+/// The grid ladder, uncertified (`bounds` `None`) or certified.
+fn ladder(
+    sides: usize,
+    stations: &mut dyn FnMut(usize, &[f64]) -> Result<Vec<Station>, String>,
+    spec: &MatchedSpec,
+    bounds: Option<&[SideBounds]>,
 ) -> SplineResult<MatchedFill> {
     if sides == 0 || sides.saturating_mul(16) > MAX_LOOP_POINTS / 2 {
         return Err(SplineError::TooLarge(format!("a loop of {sides} sides (at most {})", MAX_LOOP_POINTS / 32)));
@@ -156,7 +205,7 @@ pub fn fill_matched(
                 all.push((*b, false));
             }
         }
-        match fit_round(&all, &ends, spec, level)? {
+        match fit_round(&all, &ends, spec, level, bounds)? {
             Round::Done(fill) => return Ok(*fill),
             Round::Denser(s, at) => {
                 best = best.min(s);
@@ -167,14 +216,14 @@ pub fn fill_matched(
                 break;
             }
         }
-        if all.len() * 2 > MAX_MATCHED_POINTS {
+        if all.len() * 2 > if bounds.is_some() { MAX_MATCHED_POINTS } else { MAX_LOOP_POINTS } {
             break;
         }
         fit = fit.iter().zip(&check).map(|(f, c)| f.iter().zip(c).flat_map(|(a, b)| [*a, *b]).collect()).collect();
         per *= 2;
     }
     Err(SplineError::Unsupported(format!(
-        "filling this loop with one surface meeting its neighbours: the closest fit stays {:e} off the loop or past a planar neighbour's plane (tolerance {:e}), turns {:.4}° from \
+        "filling this loop with one surface meeting its neighbours: the closest fit stays {:e} off the loop (tolerance {:e}), turns {:.4}° from \
          its neighbours (tolerance {:.4}°) and misses their curvature by {:e} (tolerance {:e})",
         best.deviation,
         spec.tol,
@@ -239,7 +288,7 @@ struct Row {
 /// The stations in the plane `f`'s terms, with their distances to the corners along the loop.
 /// `ends` are the sides' ends (each where the next side starts), `all` the sides' stations in
 /// order, as many on each.
-fn rows(all: &[(Station, bool)], ends: &[Station], f: &LoopFrame, curvature_tol: f64) -> SplineResult<Vec<Row>> {
+fn rows(all: &[(Station, bool)], ends: &[Station], f: &LoopFrame, corner_curvature: Option<f64>) -> SplineResult<Vec<Row>> {
     let m = all.len();
     let sides = ends.len();
     if sides == 0 || !m.is_multiple_of(sides) {
@@ -268,7 +317,10 @@ fn rows(all: &[(Station, bool)], ends: &[Station], f: &LoopFrame, curvature_tol:
     for &k in &at_corner {
         let before = ends.get((k / per_side + sides - 1) % sides);
         let (Some((after, _)), Some(before)) = (all.get(k), before) else { return invalid("stations") };
-        hessians.push(corner_hessian(before, after, f, curvature_tol)?);
+        hessians.push(match corner_curvature {
+            Some(tol) => corner_hessian(before, after, f, tol)?,
+            None => None,
+        });
     }
     // The share of the run between the two corners around `x` from the nearer one, and that one.
     let nearest = |list: &[f64], x: f64| -> (f64, usize) {
@@ -296,35 +348,38 @@ fn rows(all: &[(Station, bool)], ends: &[Station], f: &LoopFrame, curvature_tol:
         let own = hessians.get(near).copied().flatten();
         let d = st.p - f.o;
         let q = [d.dot(f.x), d.dot(f.y)];
-        let mut gradient = None;
-        let mut curvature = None;
-        if let Some(a) = st.across {
-            let normal = a.normal.normalized().ok_or_else(|| SplineError::Invalid("a neighbour's normal has no direction".into()))?;
-            let side = if normal.dot(f.n) >= 0.0 { 1.0 } else { -1.0 };
-            let nn = normal * side;
-            let c = nn.dot(f.n);
-            if !(c > MIN_NORMAL_COS) {
-                return Err(SplineError::Unsupported("filling a loop beside a face that stands along the fill's normal".into()));
-            }
-            gradient = Some(([-nn.dot(f.x) / c, -nn.dot(f.y) / c], nn));
-            if let Some(bend) = a.bend {
-                let kappa = bend.dot(nn);
-                let w = a.leave;
-                let ab = [w.dot(f.x), w.dot(f.y)];
-                let second = match own {
-                    Some([huu, huv, hvv]) => {
-                        let blend = ramp(to_corner);
-                        let from = ab[0] * ab[0] * huu + 2.0 * ab[0] * ab[1] * huv + ab[1] * ab[1] * hvv;
-                        (1.0 - blend) * from + blend * (kappa / c)
-                    }
-                    None => kappa / c,
-                };
-                curvature = Some((ab, second, kappa));
-            }
-        }
+        let (gradient, bend) = face_terms(st, f)?;
+        let curvature = bend.map(|(ab, kappa, c)| {
+            let second = match own {
+                Some([huu, huv, hvv]) => {
+                    let blend = ramp(to_corner);
+                    let from = ab[0] * ab[0] * huu + 2.0 * ab[0] * ab[1] * huv + ab[1] * ab[1] * hvv;
+                    (1.0 - blend) * from + blend * (kappa / c)
+                }
+                None => kappa / c,
+            };
+            (ab, second, kappa)
+        });
         out.push(Row { q, h: d.dot(f.n), fitted: *fitted, gradient, curvature, to_corner, corner: st.corner });
     }
     Ok(out)
+}
+
+type FaceTerms = (Option<([f64; 2], Vec3)>, Option<([f64; 2], f64, f64)>);
+
+/// What the face beside station `st` asks, in the plane `f`'s terms: the gradient the height
+/// field needs for G1 and the face's unit normal on `n`'s side, and for G2 the leave direction's
+/// plane components, the face's normal curvature along it and `N·n`.
+fn face_terms(st: &Station, f: &LoopFrame) -> SplineResult<FaceTerms> {
+    let Some(a) = st.across else { return Ok((None, None)) };
+    let normal = a.normal.normalized().ok_or_else(|| SplineError::Invalid("a neighbour's normal has no direction".into()))?;
+    let nn = if normal.dot(f.n) >= 0.0 { normal } else { normal * -1.0 };
+    let c = nn.dot(f.n);
+    if !(c > MIN_NORMAL_COS) {
+        return Err(SplineError::Unsupported("filling a loop beside a face that stands along the fill's normal".into()));
+    }
+    let bend = a.bend.map(|b| ([a.leave.dot(f.x), a.leave.dot(f.y)], b.dot(nn), c));
+    Ok((Some(([-nn.dot(f.x) / c, -nn.dot(f.y) / c], nn)), bend))
 }
 
 /// The second derivatives `[h_uu, h_uv, h_vv]` of the height field over the plane `f` at a
@@ -476,22 +531,7 @@ fn past_planes(grid: &Grid, heights: &[f64], f: &LoopFrame, planes: &[Plane], po
     let spans = [cu - 3, cv - 3];
     let (Some(&lo0), Some(&lo1)) = (grid.knots[0].first(), grid.knots[1].first()) else { return invalid("grid") };
     let (lo, cell) = ([lo0, lo1], [grid.cell(0), grid.cell(1)]);
-    // Each span's four basis functions in Bernstein form, per direction.
-    let mut bezier: [Vec<[[f64; 4]; 4]>; 2] = [Vec::new(), Vec::new()];
-    for (d, out) in bezier.iter_mut().enumerate() {
-        let kn = &grid.knots[d];
-        for s in 0..spans[d] {
-            let (Some(&a), Some(&b)) = (kn.get(s + 3), kn.get(s + 4)) else { return invalid("grid") };
-            let mut m = [[0.0; 4]; 4];
-            for (i, row) in m.iter_mut().enumerate() {
-                let support = kn.get(s + i..s + i + 5).ok_or_else(|| SplineError::Invalid("grid".into()))?;
-                for (slot, c) in row.iter_mut().zip(basis_bezier(support, a, b)?) {
-                    *slot = c;
-                }
-            }
-            out.push(m);
-        }
-    }
+    let bezier = span_bezier(grid)?;
     // The loop's sides (chords between stations), each with how far the loop can bow off it
     // (twice the sagitta `c²κ/8` of the circle through its end's neighbours, at an end not a
     // corner), by the spans their grown boxes reach, for the meet test.
@@ -529,22 +569,13 @@ fn past_planes(grid: &Grid, heights: &[f64], f: &LoopFrame, planes: &[Plane], po
         let mut splits = 0usize;
         for sj in 0..spans[1] {
             for si in 0..spans[0] {
-                let (Some(mu), Some(mv)) = (bezier[0].get(si), bezier[1].get(sj)) else { return invalid("grid") };
                 let (u0, v0) = (lo[0] + cell[0] * si as f64, lo[1] + cell[1] * sj as f64);
+                let (hs, mags) = cell_net(grid, heights, &bezier, si, sj)?;
                 // net[l][k]: the distance's Bézier coefficient k along u, l along v.
                 let mut net = [[0.0; 4]; 4];
                 let mut slack = 0.0f64;
-                for (l, row) in net.iter_mut().enumerate() {
-                    for (k, slot) in row.iter_mut().enumerate() {
-                        let (mut h, mut mag) = (0.0, 0.0);
-                        for (b, wv) in mv.iter().enumerate() {
-                            for (a, wu) in mu.iter().enumerate() {
-                                let c = wu.get(k).copied().unwrap_or(0.0) * wv.get(l).copied().unwrap_or(0.0);
-                                let x = heights.get((sj + b) * cu + si + a).copied().unwrap_or(f64::NAN);
-                                h += c * x;
-                                mag += (c * x).abs();
-                            }
-                        }
+                for (l, (row, (hrow, mrow))) in net.iter_mut().zip(hs.iter().zip(&mags)).enumerate() {
+                    for (k, (slot, (&h, &mag))) in row.iter_mut().zip(hrow.iter().zip(mrow)).enumerate() {
                         let (u, v) = (u0 + cell[0] * k as f64 / 3.0, v0 + cell[1] * l as f64 / 3.0);
                         *slot = a0 + u * ax + v * ay + h * an;
                         // The terms' rounding, and that of `ax`, `ay`, `an`, `a0` (dot products of unit vectors).
@@ -591,6 +622,255 @@ fn past_planes(grid: &Grid, heights: &[f64], f: &LoopFrame, planes: &[Plane], po
         }
     }
     Ok(worst)
+}
+
+/// Each span's four basis functions in Bernstein form, per direction (`[span][basis][k]`).
+fn span_bezier(grid: &Grid) -> SplineResult<[Vec<[[f64; 4]; 4]>; 2]> {
+    let mut bezier: [Vec<[[f64; 4]; 4]>; 2] = [Vec::new(), Vec::new()];
+    for (out, (kn, count)) in bezier.iter_mut().zip(grid.knots.iter().zip(grid.count)) {
+        for s in 0..count.saturating_sub(3) {
+            let (Some(&a), Some(&b)) = (kn.get(s + 3), kn.get(s + 4)) else { return invalid("grid") };
+            let mut m = [[0.0; 4]; 4];
+            for (i, row) in m.iter_mut().enumerate() {
+                let support = kn.get(s + i..s + i + 5).ok_or_else(|| SplineError::Invalid("grid".into()))?;
+                for (slot, c) in row.iter_mut().zip(basis_bezier(support, a, b)?) {
+                    *slot = c;
+                }
+            }
+            out.push(m);
+        }
+    }
+    Ok(bezier)
+}
+
+/// The height field's Bézier net on span `(si, sj)` (`[l][k]`, k along u), and each
+/// coefficient's sum of absolute terms (for its rounding).
+fn cell_net(grid: &Grid, heights: &[f64], bezier: &[Vec<[[f64; 4]; 4]>; 2], si: usize, sj: usize) -> SplineResult<([[f64; 4]; 4], [[f64; 4]; 4])> {
+    let (Some(mu), Some(mv)) = (bezier[0].get(si), bezier[1].get(sj)) else { return invalid("grid") };
+    let (mut net, mut mags) = ([[0.0; 4]; 4], [[0.0; 4]; 4]);
+    for (l, (row, mrow)) in net.iter_mut().zip(mags.iter_mut()).enumerate() {
+        for (k, (slot, mag)) in row.iter_mut().zip(mrow.iter_mut()).enumerate() {
+            for (b, wv) in mv.iter().enumerate() {
+                for (a, wu) in mu.iter().enumerate() {
+                    let c = wu.get(k).copied().unwrap_or(0.0) * wv.get(l).copied().unwrap_or(0.0);
+                    let x = heights.get((sj + b) * grid.count[0] + si + a).copied().unwrap_or(f64::NAN);
+                    *slot += c * x;
+                    *mag += (c * x).abs();
+                }
+            }
+        }
+    }
+    Ok((net, mags))
+}
+
+/// Bounds over the part `[u0, u1] × [v0, v1]` (shares of the span, 0 to 1) of the Bézier net
+/// `net` of a span `du × dv` of `|∇h|`, of the Hessian's norm and of the third derivatives'
+/// (`|h_u| + |h_v|`, `|h_uu| + 2|h_uv| + |h_vv|`, `|h_uuu| + 3|h_uuv| + 3|h_uvv| + |h_vvv|`): the
+/// part's net (de Casteljau), then the Bernstein coefficients of each partial (its hodographs).
+fn net_bounds(net: &[[f64; 4]; 4], [du, dv]: [f64; 2], [u0, u1]: [f64; 2], [v0, v1]: [f64; 2]) -> SplineResult<[f64; 3]> {
+    let piece = |row: &[f64; 4], a: f64, b: f64| -> SplineResult<[f64; 4]> {
+        let h: Vec<HPoint> = row.iter().map(|&x| HPoint::weighted(Vec3::new(x, 0.0, 0.0), 1.0)).collect();
+        let mut out = [0.0; 4];
+        out.iter_mut().zip(bezier_segment(&h, a, b)?).for_each(|(o, p)| *o = p.x);
+        Ok(out)
+    };
+    let mut part = [[0.0; 4]; 4];
+    for (o, row) in part.iter_mut().zip(net) {
+        *o = piece(row, u0, u1)?;
+    }
+    let mut cols = transpose(part);
+    for c in cols.iter_mut() {
+        *c = piece(c, v0, v1)?;
+    }
+    let part = transpose(cols);
+    let (du, dv) = (du * (u1 - u0), dv * (v1 - v0));
+    // The largest |Δ^i_u Δ^j_v| of the part's net, times the partial's factor.
+    let top = |i: usize, j: usize| {
+        let diff = |row: &[f64], n: usize| {
+            (0..n).fold(row.to_vec(), |r, _| {
+                r.windows(2).map(|w| w.get(1).copied().unwrap_or(0.0) - w.first().copied().unwrap_or(0.0)).collect::<Vec<f64>>()
+            })
+        };
+        let rows: Vec<Vec<f64>> = part.iter().map(|r| diff(r, i)).collect();
+        let cols = (0..4 - i).map(|k| diff(&rows.iter().map(|r| r.get(k).copied().unwrap_or(0.0)).collect::<Vec<_>>(), j));
+        let falling = |n: usize| (0..n).fold(1.0, |f, m| f * (3 - m) as f64);
+        cols.flatten().fold(0.0f64, |m, x| m.max(x.abs())) * falling(i) * falling(j) / (du.powi(i as i32) * dv.powi(j as i32))
+    };
+    let gradient = top(1, 0) + top(0, 1);
+    let hessian = top(2, 0) + 2.0 * top(1, 1) + top(0, 2);
+    let third = top(3, 0) + 3.0 * top(2, 1) + 3.0 * top(1, 2) + top(0, 3);
+    let inflate = 1.0 + 1e-9;
+    let out = [gradient * inflate, hessian * inflate, third * inflate];
+    if out.iter().all(|x| x.is_finite()) { Ok(out) } else { invalid("the fit is not finite") }
+}
+
+/// Upper bounds on the gap between the height field and the loop, on the angle between their
+/// normals, and on the curvature miss clear of the corners' fades, between the stations, from
+/// the side `bounds` and the span bounds ([`net_bounds`]) over where the loop can be between two
+/// stations (within `speed·δ/2` of one, `δ` their parameter step). The gap `f = h(q) − H` and the
+/// normals' difference `D` are `W^{2,∞}` along a side, so each is at most the larger of its
+/// values at the two stations plus `M₂ δ²/8`, with `M₂` a bound on its second derivative:
+/// `|f''| ≤ ‖∇²h‖ S² + (|∇h| + 1) A`; for the graph's normal `N = m/|m|`, `m = (−h_u, −h_v, 1)`,
+/// `|N''| ≤ 2|m''| + 3|m'|²` with `|m'| ≤ ‖∇²h‖ S`, `|m''| ≤ ‖∇³h‖ S² + ‖∇²h‖ A`, plus the face's
+/// `|N''|`. The angle is `2 asin(|D|/2)`. The curvature `k = aᵀ∇²h a / (W B)` (`W = |m|`,
+/// `B = |a|² + (a·∇h)²`) is only Lipschitz (the third derivatives jump at knots): its miss is at
+/// most the larger station value plus `L δ/2` (`L δ` from the one station clear of a fade), with
+/// `L ≥ |k'| + |κ'|` from the quotient rule. Rounding: every span bound is raised by 1e-9 of it.
+fn certify(grid: &Grid, heights: &[f64], f: &LoopFrame, rows: &[Row], ends: &[Station], bounds: &[SideBounds]) -> SplineResult<[f64; 3]> {
+    let sides = ends.len();
+    let per = rows.len() / sides.max(1);
+    if sides == 0 || per == 0 || bounds.len() != sides {
+        return invalid("stations");
+    }
+    let delta = 1.0 / per as f64;
+    let spans = [grid.count[0] - 3, grid.count[1] - 3];
+    let (Some(&lo0), Some(&lo1)) = (grid.knots[0].first(), grid.knots[1].first()) else { return invalid("grid") };
+    let bezier = span_bezier(grid)?;
+    let mut nets: Vec<Option<[[f64; 4]; 4]>> = vec![None; spans[0] * spans[1]];
+    // One station's gap, normals' difference, curvature miss and `B`, and whether it is clear.
+    let sample = |q: [f64; 2],
+                  h: f64,
+                  nn: Option<Vec3>,
+                  bend: Option<([f64; 2], f64)>,
+                  clear: bool|
+     -> SplineResult<(f64, Option<f64>, Option<(f64, f64)>, bool)> {
+        let Some([z, hu, hv, huu, huv, hvv]) = derivatives(grid, heights, q) else { return invalid("the fit is not finite") };
+        let up = (1.0 + hu * hu + hv * hv).sqrt();
+        let normal = (f.n - f.x * hu - f.y * hv) * (1.0 / up);
+        let curvature = bend.map(|([a, b], kappa)| {
+            let big_b = a * a + b * b + (a * hu + b * hv) * (a * hu + b * hv);
+            ((a * a * huu + 2.0 * a * b * huv + b * b * hvv) / up / big_b - kappa, big_b)
+        });
+        Ok((z - h, nn.map(|n| (normal - n).len()), curvature, clear))
+    };
+    let mut out = [0.0f64; 3];
+    for (k, b) in bounds.iter().enumerate() {
+        let side = rows.get(k * per..(k + 1) * per).ok_or_else(|| SplineError::Invalid("stations".into()))?;
+        let mut pts = Vec::with_capacity(per + 1);
+        for r in side {
+            pts.push((r.q, sample(r.q, r.h, r.gradient.map(|g| g.1), r.curvature.map(|c| (c.0, c.2)), r.to_corner >= FADE_SHARE)?));
+        }
+        let end = ends.get(k).ok_or_else(|| SplineError::Invalid("stations".into()))?;
+        let d = end.p - f.o;
+        let q = [d.dot(f.x), d.dot(f.y)];
+        let (gradient, bend) = face_terms(end, f)?;
+        let clear = rows.get(((k + 1) % sides) * per).is_some_and(|r| r.to_corner >= FADE_SHARE);
+        pts.push((q, sample(q, d.dot(f.n), gradient.map(|g| g.1), bend.map(|c| (c.0, c.1)), clear)?));
+        let (s, a) = (b.speed, b.accel);
+        let reach = s * delta / 2.0;
+        for pair in pts.windows(2) {
+            let [(q0, (f0, d0, e0, c0)), (q1, (f1, d1, e1, c1))] = pair else { continue };
+            // The spans the loop can cross between the two stations.
+            let mut patch = [0.0f64; 3];
+            let range = |dim: usize, lo: f64| {
+                let at = |x: f64| (((x - lo) / grid.cell(dim)).floor().max(0.0) as usize).min(spans[dim] - 1);
+                at(q0[dim].min(q1[dim]) - reach)..=at(q0[dim].max(q1[dim]) + reach)
+            };
+            let cells = [grid.cell(0), grid.cell(1)];
+            let (lo, hi) = ([q0[0].min(q1[0]) - reach, q0[1].min(q1[1]) - reach], [q0[0].max(q1[0]) + reach, q0[1].max(q1[1]) + reach]);
+            for sj in range(1, lo1) {
+                for si in range(0, lo0) {
+                    let slot = nets.get_mut(sj * spans[0] + si).ok_or_else(|| SplineError::Invalid("grid".into()))?;
+                    let net = match slot {
+                        Some(x) => *x,
+                        None => *slot.insert(cell_net(grid, heights, &bezier, si, sj)?.0),
+                    };
+                    // The box's share of the span each way.
+                    let share = |d: usize, base: f64, i: usize| {
+                        let start = base + cells[d] * i as f64;
+                        [((lo[d] - start) / cells[d]).clamp(0.0, 1.0), ((hi[d] - start) / cells[d]).clamp(0.0, 1.0)]
+                    };
+                    let (su, sv) = (share(0, lo0, si), share(1, lo1, sj));
+                    let got = if su[0] < su[1] && sv[0] < sv[1] { net_bounds(&net, cells, su, sv)? } else { [0.0; 3] };
+                    for (p, g) in patch.iter_mut().zip(got) {
+                        *p = p.max(g);
+                    }
+                }
+            }
+            let [g, h2, t3] = patch;
+            let second = delta * delta / 8.0;
+            out[0] = out[0].max(f0.abs().max(f1.abs()) + (h2 * s * s + (g + 1.0) * a) * second);
+            if let (Some(d0), Some(d1)) = (d0, d1) {
+                let m2 = 2.0 * (t3 * s * s + h2 * a) + 3.0 * (h2 * s).powi(2) + b.normal_accel;
+                out[1] = out[1].max(2.0 * ((d0.max(*d1) + m2 * second) / 2.0).min(1.0).asin());
+            }
+            if let (Some((e0, b0)), Some((e1, b1))) = (e0, e1) {
+                if !(*c0 || *c1) {
+                    continue;
+                }
+                let lr = b.leave_rate;
+                let db = 2.0 * lr + 2.0 * g * (g * lr + h2 * s);
+                let least = b0.min(*b1) - db * delta / 2.0;
+                if !(least > 0.0) {
+                    return Ok([out[0], out[1], f64::INFINITY]);
+                }
+                let lip = (2.0 * lr * h2 + t3 * s + h2 * (g * h2 * s + db / least)) / least + b.curvature_rate;
+                let miss = match (c0, c1) {
+                    (true, true) => e0.abs().max(e1.abs()) + lip * delta / 2.0,
+                    (true, false) => e0.abs() + lip * delta,
+                    _ => e1.abs() + lip * delta,
+                };
+                out[2] = out[2].max(miss);
+            }
+        }
+    }
+    let out = out.map(|x| x * (1.0 + 1e-9));
+    Ok(if out.iter().all(|x| x.is_finite()) { out } else { [f64::INFINITY; 3] })
+}
+
+/// The pieces [`curve_bounds`] cuts each span of a curve into.
+const CURVE_PIECES: usize = 16;
+
+/// Bounds on a B-spline curve (degree, knots, homogeneous control points) over its domain, per
+/// unit of its parameter: `[largest speed, largest acceleration, least speed]`, from each span's
+/// Bézier hodographs: with `P` the weighted points less the first point times the weight and `w`
+/// the weights, `p' = (P' − (p − c) w')/w` and `p'' = (P'' − 2 p' w' − (p − c) w'')/w`, each
+/// hodograph's coefficients bounding it; the least speed from `p'·d` along the span's chord
+/// direction `d`. `None` where a weight is not positive or a span's speed has no positive lower
+/// bound so (a hull that turns too far). Rounding: raised (lowered) by 1e-9 of each.
+pub fn curve_bounds(degree: usize, knots: &[f64], ctrl: &[HPoint]) -> Option<[f64; 3]> {
+    let (&first, &last) = (knots.get(degree)?, knots.get(ctrl.len())?);
+    let mut breaks: Vec<f64> = knots.iter().copied().filter(|k| *k >= first && *k <= last).collect();
+    breaks.dedup();
+    let (mut speed, mut accel, mut least) = (0.0f64, 0.0f64, f64::INFINITY);
+    let p = degree as f64;
+    // Each span in `CURVE_PIECES` pieces, whose hulls hug the curve closer.
+    let pieces = breaks.windows(2).flat_map(|w| {
+        let (lo, hi) = (w.first().copied().unwrap_or(0.0), w.last().copied().unwrap_or(0.0));
+        (0..CURVE_PIECES).map(move |i| {
+            (
+                lo + (hi - lo) * i as f64 / CURVE_PIECES as f64,
+                if i + 1 == CURVE_PIECES { hi } else { lo + (hi - lo) * (i + 1) as f64 / CURVE_PIECES as f64 },
+            )
+        })
+    });
+    for (a, b) in pieces {
+        let (_, bez) = segment(degree, knots, ctrl, a, b).ok()?;
+        if !bez.iter().all(|h| h.w > 0.0) {
+            return None;
+        }
+        let c = bez.first()?.project()?;
+        let pts: Vec<Vec3> = bez.iter().map(|h| h.project()).collect::<Option<_>>()?;
+        let hod = |v: &[Vec3], f: f64| v.windows(2).map(|w| if let [x, y] = w { (*y - *x) * (f / (b - a)) } else { Vec3::ZERO }).collect::<Vec<_>>();
+        let hods = |v: &[f64], f: f64| v.windows(2).map(|w| if let [x, y] = w { (y - x) * f / (b - a) } else { 0.0 }).collect::<Vec<_>>();
+        let num: Vec<Vec3> = bez.iter().map(|h| h.xyz() - c * h.w).collect();
+        let wts: Vec<f64> = bez.iter().map(|h| h.w).collect();
+        let (n1, w1) = (hod(&num, p), hods(&wts, p));
+        let (n2, w2) = (hod(&n1, p - 1.0), hods(&w1, p - 1.0));
+        let big = |v: &[Vec3]| v.iter().fold(0.0f64, |m, x| m.max(x.len()));
+        let bigs = |v: &[f64]| v.iter().fold(0.0f64, |m, x| m.max(x.abs()));
+        let reach = pts.iter().fold(0.0f64, |m, x| m.max((*x - c).len()));
+        let (wmin, wmax) = wts.iter().fold((f64::INFINITY, 0.0f64), |(lo, hi), w| (lo.min(*w), hi.max(*w)));
+        let s = (big(&n1) + reach * bigs(&w1)) / wmin;
+        let acc = (big(&n2) + 2.0 * s * bigs(&w1) + reach * bigs(&w2)) / wmin;
+        let dir = (*pts.last()? - *pts.first()?).normalized()?;
+        let low = (n1.iter().fold(f64::INFINITY, |m, x| m.min(x.dot(dir))) - reach * bigs(&w1)) / wmax;
+        if !(low > 0.0 && s.is_finite() && acc.is_finite()) {
+            return None;
+        }
+        (speed, accel, least) = (speed.max(s), accel.max(acc), least.min(low));
+    }
+    (least.is_finite()).then_some([speed * (1.0 + 1e-9), accel * (1.0 + 1e-9), least * (1.0 - 1e-9)])
 }
 
 /// Each row of a Bézier net split at its middle (de Casteljau, [`subdivide`]): the halves' nets.
@@ -731,12 +1011,13 @@ fn achieved(grid: &Grid, heights: &[f64], rows: &[Row], f: &LoopFrame) -> Spline
 }
 
 /// One round: the grids from `level` up, on these stations.
-fn fit_round(all: &[(Station, bool)], ends: &[Station], spec: &MatchedSpec, level: usize) -> SplineResult<Round> {
+fn fit_round(all: &[(Station, bool)], ends: &[Station], spec: &MatchedSpec, level: usize, bounds: Option<&[SideBounds]>) -> SplineResult<Round> {
+    let last = if bounds.is_some() { MAX_MATCHED_SPANS } else { PLAIN_SPANS };
     let fitted: Vec<Vec3> = all.iter().filter(|(_, f)| *f).map(|(s, _)| s.p).collect();
     let frame = loop_frame(&fitted)?;
     let points: Vec<Vec3> = all.iter().map(|(s, _)| s.p).collect();
-    let rows = rows(all, ends, &frame, spec.curvature_tol)?;
-    let planes = planes(all, ends, spec.tol)?;
+    let rows = rows(all, ends, &frame, bounds.map(|_| spec.curvature_tol))?;
+    let planes = if bounds.is_some() { planes(all, ends, spec.tol)? } else { Vec::new() };
     let corners: Vec<bool> = rows.iter().map(|r| r.corner).collect();
     let uv: Vec<[f64; 2]> = rows.iter().map(|r| r.q).collect();
     check_projectable(&points, &uv)?;
@@ -769,7 +1050,7 @@ fn fit_round(all: &[(Station, bool)], ends: &[Station], spec: &MatchedSpec, leve
     let longer = extent[0].max(extent[1]);
     let mut best = Shortfall::default();
     let mut level = level;
-    while level <= MAX_MATCHED_SPANS {
+    while level <= last {
         let spans = [0, 1].map(|d| ((extent[d] / longer * level as f64).ceil() as usize).clamp(1, level));
         let holds = (0..2).all(|d| extent[d] / spans[d] as f64 >= 2.0 * step[d]);
         if !holds && level > MIN_SPANS {
@@ -780,9 +1061,18 @@ fn fit_round(all: &[(Station, bool)], ends: &[Station], spec: &MatchedSpec, leve
         let heights = solve(&grid, &rows, cell)?;
         let [dev, ang, ang_all, cur, cur_all] = achieved(&grid, &heights, &rows, &frame)?;
         let stations_hold = dev <= spec.tol && ang <= spec.angle_tol && cur <= spec.curvature_tol && holds;
-        let past = if stations_hold { past_planes(&grid, &heights, &frame, &planes, &uv, &corners, spec.tol)? } else { f64::NEG_INFINITY };
-        best = best.min(Shortfall { deviation: dev.max(past), angle: ang, curvature: cur });
-        if stations_hold && past <= spec.tol {
+        best = best.min(Shortfall { deviation: dev, angle: ang, curvature: cur });
+        let accepted = stations_hold
+            && match bounds {
+                None => true,
+                Some(b) => {
+                    past_planes(&grid, &heights, &frame, &planes, &uv, &corners, spec.tol)? <= spec.tol && {
+                        let [gap, angle, curvature] = certify(&grid, &heights, &frame, &rows, ends, b)?;
+                        gap <= spec.tol && angle <= spec.angle_tol && curvature <= spec.curvature_tol
+                    }
+                }
+            };
+        if accepted {
             let surface = grid.surface(&heights, frame.o, frame.x, frame.y, frame.n)?;
             let fill = LoopFill {
                 surface,
@@ -809,10 +1099,10 @@ fn fit_round(all: &[(Station, bool)], ends: &[Station], spec: &MatchedSpec, leve
         if !holds {
             return Ok(Round::Denser(best, level));
         }
-        if level == MAX_MATCHED_SPANS {
+        if level == last {
             break;
         }
-        level = (level * 2).min(MAX_MATCHED_SPANS);
+        level = (level * 2).min(last);
     }
     Ok(Round::Exhausted(best))
 }
