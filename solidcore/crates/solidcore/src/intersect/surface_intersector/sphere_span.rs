@@ -16,8 +16,10 @@
 //! | `net_box` (private)        | none     |
 //!
 //! Deviations: the bisection of the span's parameter is bounded at [`MAX_DEPTH`] levels (at
-//! most `2^MAX_DEPTH` pieces, an explicit stack, no recursion). A span the bisection does not
+//! most `2^MAX_DEPTH` pieces, an explicit queue, no recursion). A span the bisection does not
 //! certify by then is not certified, and the trace shortens its step.
+
+use std::collections::VecDeque;
 
 use crate::blend::fillet_section::interval::Ivl;
 use crate::blend::fillet_section::station::{ders_basis, Nurbs};
@@ -49,16 +51,21 @@ pub enum SpanImage {
 /// zero); the derivatives are those the trace scales by its step, as its span test does.
 ///
 /// Both spans are cubic Bezier curves (their control points enclosed in rounded intervals
-/// from the Hermite data). On each piece `[a, b]` of the parameter the difference
-/// `D(t) = S(N(t)) − H(t)` is enclosed by the mean value form `D(m) + D'([a, b]) [−r, r]`,
-/// `m` the piece's middle and `r` its half width. `D(m)` evaluates the sphere's rational net
-/// at an enclosure of `N(m)`, and `D'` is `S_u N_u' + S_v N_v' − H'` with the net's first
-/// derivatives enclosed over the UV box `N([a, b])` and the spans' derivatives over the
-/// piece. `Surface::evaluate` evaluates a sphere through that net (its `SmBSplineSurface`
-/// base), and a box past the net's knots uses its end patches continued, as the evaluator's
-/// span search does. The bound is the length of the enclosure's farthest corner, rounded up.
-/// Pieces that do not certify are bisected, at most [`MAX_DEPTH`] times. PROVEN: the mean
-/// value theorem per component, and outward rounding throughout.
+/// from the Hermite data). On each piece `[a, b]` of the parameter, of length `w`, the
+/// difference `D(t) = S(N(t)) − H(t)` is, per component, its linear interpolant between
+/// `D(a)` and `D(b)` plus the interpolation remainder `D''(ξ) (t − a)(t − b) / 2`, so it lies
+/// in `hull(D(a), D(b)) + D''([a, b]) [−w²/8, 0]` (`piece_bound`). `D(a)` and `D(b)`
+/// evaluate the sphere's rational net at enclosures of `N(a)` and `N(b)`;
+/// `D'' = S_uu N_u'² + 2 S_uv N_u' N_v' + S_vv N_v'² + S_u N_u'' + S_v N_v'' − H''` takes the
+/// net's first and second derivatives over the UV box `N([a, b])` (the hull of the piece's
+/// control points) and the spans' derivatives over the piece. `Surface::evaluate`
+/// evaluates a sphere through that net (its `SmBSplineSurface` base), and a box past the
+/// net's knots uses its end patches continued, as the evaluator's span search does. The
+/// bound is the length of the enclosure's farthest corner, rounded up. Pieces that do not
+/// certify are bisected, at most [`MAX_DEPTH`] times; a point where `|D|` lies wholly over
+/// `tol` ends the search (the image is off the curve there). PROVEN: the remainder of
+/// linear interpolation per component (Rolle's theorem), the convex hull property, and
+/// outward rounding throughout.
 ///
 /// [`SpanImage::NotASphere`] for any other surface kind; [`SpanImage::NotCertified`] when a
 /// piece at the deepest level does not certify, or a weight's enclosure is not positive.
@@ -86,16 +93,51 @@ fn certify(surface: &Surface, n: [Iv3; 4], h: [Iv3; 4], tol: f64) -> SpanImage {
     let SurfaceKind::Sphere(sphere) = surface.kind() else {
         return SpanImage::NotASphere;
     };
-    let Ok(net) = Nurbs::of(sphere.base().base()) else {
+    let Ok(nurbs) = Nurbs::of(sphere.base().base()) else {
         return SpanImage::NotCertified;
     };
-    let dn = derivative(&n);
-    let dh = derivative(&h);
+    // both sides moved by the 3D span's start, so the enclosures of the net's quotients
+    // are not widened by the size of the coordinates
+    let [cx, cy, cz] = h[0].map(Ivl::mid);
+    let origin = [Ivl::from(cx), Ivl::from(cy), Ivl::from(cz)];
+    let mut pw = Vec::new();
+    for c in nurbs.pw.chunks_exact(4) {
+        if let [x, y, z, w] = *c {
+            let w = Ivl::from(w);
+            pw.extend([
+                Ivl::from(x) - origin[0] * w,
+                Ivl::from(y) - origin[1] * w,
+                Ivl::from(z) - origin[2] * w,
+                w,
+            ]);
+        }
+    }
+    let net = Shifted { nurbs, pw };
+    let h = h.map(|q| [q[0] - origin[0], q[1] - origin[1], q[2] - origin[2]]);
+    let curves = Curves {
+        dn: derivative(&n),
+        ddn: derivative(&derivative(&n)),
+        ddh: derivative(&derivative(&h)),
+        n: n.to_vec(),
+        h: h.to_vec(),
+    };
+    let ends = (
+        point_value(&net, &curves, 0.0),
+        point_value(&net, &curves, 1.0),
+    );
+    let (Some(d0), Some(d1)) = ends else {
+        return SpanImage::NotCertified;
+    };
+    if off(d0, tol) || off(d1, tol) {
+        return SpanImage::NotCertified;
+    }
     let mut worst = 0.0_f64;
-    let mut stack = vec![(0.0_f64, 1.0_f64, 0_u32)];
-    while let Some((a, b, depth)) = stack.pop() {
+    // breadth first: a span off the curve is found at a coarse piece's middle before the
+    // pieces of a level are refined
+    let mut queue = VecDeque::from([(0.0_f64, d0, 1.0_f64, d1, 0_u32)]);
+    while let Some((a, da, b, db, depth)) = queue.pop_front() {
         // a missing bound (an enclosure that failed) does not certify
-        if let Some(bound) = piece_bound(&net, &n, &h, &dn, &dh, a, b) {
+        if let Some(bound) = piece_bound(&net, &curves, a, da, b, db) {
             if bound <= tol {
                 worst = worst.max(bound);
                 continue;
@@ -105,10 +147,51 @@ fn certify(surface: &Surface, n: [Iv3; 4], h: [Iv3; 4], tol: f64) -> SpanImage {
             return SpanImage::NotCertified;
         }
         let m = 0.5 * (a + b);
-        stack.push((m, b, depth + 1));
-        stack.push((a, m, depth + 1));
+        let Some(dm) = point_value(&net, &curves, m) else {
+            return SpanImage::NotCertified;
+        };
+        if off(dm, tol) {
+            return SpanImage::NotCertified;
+        }
+        queue.push_back((a, da, m, dm, depth + 1));
+        queue.push_back((m, dm, b, db, depth + 1));
     }
     SpanImage::Certified(worst)
+}
+
+/// The sphere's net moved by `−c`: its homogeneous control points `(x w − c_x w, …, w)`,
+/// enclosed.
+struct Shifted {
+    nurbs: Nurbs,
+    pw: Vec<Ivl>,
+}
+
+/// The two spans' Bezier control points and those of the UV span's first and second
+/// derivatives and the 3D span's second.
+struct Curves {
+    n: Vec<Iv3>,
+    h: Vec<Iv3>,
+    dn: Vec<Iv3>,
+    ddn: Vec<Iv3>,
+    ddh: Vec<Iv3>,
+}
+
+/// Whether the enclosure `d` of a difference lies wholly over `tol` in length.
+fn off(d: Iv3, tol: f64) -> bool {
+    let mut least = Ivl::from(0.0);
+    for c in d {
+        let low = Ivl::from(c.mig());
+        least = least + low * low;
+    }
+    least.sqrt().lo > tol
+}
+
+/// An enclosure of `D(t) = S(N(t)) − H(t)` at `t`.
+fn point_value(net: &Shifted, c: &Curves, t: f64) -> Option<Iv3> {
+    let nt = blossom(&c.n, &[t; 3])?;
+    let ht = blossom(&c.h, &[t; 3])?;
+    let s = net_box(net, nt[0], nt[1], 0)?.s;
+    Some([s[0] - ht[0], s[1] - ht[1], s[2] - ht[2]])
 }
 
 /// The cubic Bezier control points of the Hermite span `[p0, d0, p1, d1]` (from `p0` with
@@ -128,17 +211,22 @@ fn bezier([p0, d0, p1, d1]: [Vec3; 4]) -> [Iv3; 4] {
     [q0, third(q0, iv(d0), 1.0), third(q3, iv(d1), -1.0), q3]
 }
 
-/// The control points of a cubic Bezier curve's derivative (a quadratic).
-fn derivative(q: &[Iv3; 4]) -> [Iv3; 3] {
-    let three = Ivl::from(3.0);
-    let diff = |a: Iv3, b: Iv3| {
-        [
-            three * (b[0] - a[0]),
-            three * (b[1] - a[1]),
-            three * (b[2] - a[2]),
-        ]
-    };
-    [diff(q[0], q[1]), diff(q[1], q[2]), diff(q[2], q[3])]
+/// The control points of a Bezier curve's derivative (one degree lower).
+fn derivative(q: &[Iv3]) -> Vec<Iv3> {
+    // (a cubic at most: the degree is exact)
+    let degree = Ivl::from(f64::from(
+        u8::try_from(q.len().saturating_sub(1)).unwrap_or(0),
+    ));
+    q.windows(2)
+        .filter_map(|w| match w {
+            [a, b] => Some([
+                degree * (b[0] - a[0]),
+                degree * (b[1] - a[1]),
+                degree * (b[2] - a[2]),
+            ]),
+            _ => None,
+        })
+        .collect()
 }
 
 /// The blossom (polar form) of the Bezier curve `q` at the arguments `ts` (as many as its
@@ -181,32 +269,30 @@ fn piece_hull(q: &[Iv3], a: f64, b: f64) -> Option<Iv3> {
     out
 }
 
-/// The bound of `|S(N(t)) − H(t)|` over `[a, b]` ([`sphere_span_image`]), rounded up.
-fn piece_bound(
-    net: &Nurbs,
-    n: &[Iv3; 4],
-    h: &[Iv3; 4],
-    dn: &[Iv3; 3],
-    dh: &[Iv3; 3],
-    a: f64,
-    b: f64,
-) -> Option<f64> {
-    let m = 0.5 * (a + b);
-    let r = Ivl::from(b - m).hull(Ivl::from(m - a)).hi;
-    let nm = blossom(n, &[m; 3])?;
-    let hm = blossom(h, &[m; 3])?;
-    let (sm, _, _) = net_box(net, nm[0], nm[1])?;
-    let nbox = piece_hull(n, a, b)?;
-    let dnbox = piece_hull(dn, a, b)?;
-    let dhbox = piece_hull(dh, a, b)?;
-    let (_, su, sv) = net_box(net, nbox[0], nbox[1])?;
-    let spread = Ivl::new(-r, r);
+/// The bound of `|S(N(t)) − H(t)|` over `[a, b]` ([`sphere_span_image`]) from its
+/// enclosures `da` and `db` at the ends, rounded up: per component
+/// `hull(D(a), D(b)) + D''([a, b]) [−w²/8, 0]`, `w = b − a`. `None` where an enclosure
+/// failed.
+fn piece_bound(net: &Shifted, c: &Curves, a: f64, da: Iv3, b: f64, db: Iv3) -> Option<f64> {
+    let w = Ivl::from(b) - Ivl::from(a);
+    let sag = Ivl::new(-(w * w * Ivl::from(0.125)).hi, 0.0);
+    let nbox = piece_hull(&c.n, a, b)?;
+    let dnbox = piece_hull(&c.dn, a, b)?;
+    let ddnbox = piece_hull(&c.ddn, a, b)?;
+    let ddhbox = piece_hull(&c.ddh, a, b)?;
+    let over = net_box(net, nbox[0], nbox[1], 2)?;
+    let two = Ivl::from(2.0);
+    let (nu, nv) = (dnbox[0], dnbox[1]);
     let mut sum = Ivl::from(0.0);
     for i in 0..3 {
-        let d0 = *sm.get(i)? - *hm.get(i)?;
-        let d1 = *su.get(i)? * dnbox[0] + *sv.get(i)? * dnbox[1] - *dhbox.get(i)?;
-        let c = Ivl::from((d0 + d1 * spread).mag());
-        sum = sum + c * c;
+        let d2 = *over.suu.get(i)? * nu * nu
+            + two * *over.suv.get(i)? * nu * nv
+            + *over.svv.get(i)? * nv * nv
+            + *over.su.get(i)? * ddnbox[0]
+            + *over.sv.get(i)? * ddnbox[1]
+            - *ddhbox.get(i)?;
+        let e = Ivl::from((da.get(i)?.hull(*db.get(i)?) + d2 * sag).mag());
+        sum = sum + e * e;
     }
     let bound = sum.sqrt().hi;
     bound.is_finite().then_some(bound)
@@ -230,24 +316,46 @@ fn spans_meeting(knots: &[f64], deg: usize, count: usize, x: Ivl) -> Vec<usize> 
     out
 }
 
-/// Enclosures of the sphere net's point and first derivatives over the UV box `u` × `v`:
-/// the hull over every polynomial patch the box meets, each evaluated over the box's part
-/// in it (the end patches continued past the knots' range). `None` where a weight's
-/// enclosure is not positive or no patch meets the box.
-fn net_box(net: &Nurbs, u: Ivl, v: Ivl) -> Option<(Iv3, Iv3, Iv3)> {
-    let mut out: Option<(Iv3, Iv3, Iv3)> = None;
-    for ku in spans_meeting(&net.u, net.p, net.nu, u) {
-        let uu = clip(&net.u, net.p, net.nu, ku, u)?;
-        for kv in spans_meeting(&net.v, net.q, net.nv, v) {
-            let vv = clip(&net.v, net.q, net.nv, kv, v)?;
-            let patch = patch_box(net, ku, kv, uu, vv)?;
+/// Enclosures of the sphere net's point and its first and second derivatives.
+#[derive(Clone, Copy)]
+struct Ders {
+    s: Iv3,
+    su: Iv3,
+    sv: Iv3,
+    suu: Iv3,
+    suv: Iv3,
+    svv: Iv3,
+}
+
+impl Ders {
+    /// The componentwise hull of two enclosures.
+    fn hull(self, o: Self) -> Self {
+        Self {
+            s: hull3(self.s, o.s),
+            su: hull3(self.su, o.su),
+            sv: hull3(self.sv, o.sv),
+            suu: hull3(self.suu, o.suu),
+            suv: hull3(self.suv, o.suv),
+            svv: hull3(self.svv, o.svv),
+        }
+    }
+}
+
+/// Enclosures of the sphere net's point and derivatives over the UV box `u` × `v`: the hull
+/// over every polynomial patch the box meets, each evaluated over the box's part in it (the
+/// end patches continued past the knots' range). `None` where a weight's enclosure is not
+/// positive or no patch meets the box. Derivatives past `order` are not computed and must
+/// not be read.
+fn net_box(net: &Shifted, u: Ivl, v: Ivl, order: usize) -> Option<Ders> {
+    let mut out: Option<Ders> = None;
+    for ku in spans_meeting(&net.nurbs.u, net.nurbs.p, net.nurbs.nu, u) {
+        let uu = clip(&net.nurbs.u, net.nurbs.p, net.nurbs.nu, ku, u)?;
+        for kv in spans_meeting(&net.nurbs.v, net.nurbs.q, net.nurbs.nv, v) {
+            let vv = clip(&net.nurbs.v, net.nurbs.q, net.nurbs.nv, kv, v)?;
+            let patch = patch_box(net, ku, kv, uu, vv, order)?;
             out = Some(match out {
                 None => patch,
-                Some(o) => (
-                    hull3(o.0, patch.0),
-                    hull3(o.1, patch.1),
-                    hull3(o.2, patch.2),
-                ),
+                Some(o) => o.hull(patch),
             });
         }
     }
@@ -275,42 +383,80 @@ fn hull3(a: Iv3, b: Iv3) -> Iv3 {
     [a[0].hull(b[0]), a[1].hull(b[1]), a[2].hull(b[2])]
 }
 
-/// The point and first derivatives of the net's patch `(ku, kv)` over `u` × `v`, enclosed:
-/// the homogeneous sums and the quotient rule `S_u = (A_u − w_u S) / w`.
-fn patch_box(net: &Nurbs, ku: usize, kv: usize, u: Ivl, v: Ivl) -> Option<(Iv3, Iv3, Iv3)> {
-    let nu = ders_basis(&net.u, ku, net.p, u, 1);
-    let nv = ders_basis(&net.v, kv, net.q, v, 1);
+/// The point and derivatives of the net's patch `(ku, kv)` over `u` × `v`, enclosed: the
+/// homogeneous sums `A` (weight `w`) and the quotient rule, `S = A / w`,
+/// `S_u = (A_u − w_u S) / w`, `S_uu = (A_uu − 2 w_u S_u − w_uu S) / w` and
+/// `S_uv = (A_uv − w_u S_v − w_v S_u − w_uv S) / w`; the
+/// derivatives past `order` are not computed and must not be read.
+fn patch_box(net: &Shifted, ku: usize, kv: usize, u: Ivl, v: Ivl, order: usize) -> Option<Ders> {
+    let order = order.min(2);
+    let nu = ders_basis(&net.nurbs.u, ku, net.nurbs.p, u, order);
+    let nv = ders_basis(&net.nurbs.v, kv, net.nurbs.q, v, order);
     let basis = |m: &Vec<Vec<Ivl>>, a: usize, i: usize| m.get(a).and_then(|r| r.get(i)).copied();
-    let mut h = [[[Ivl::from(0.0); 4]; 2]; 2];
+    let mut h = [[[Ivl::from(0.0); 4]; 3]; 3];
     for (a, row) in h.iter_mut().enumerate() {
         for (b, hab) in row.iter_mut().enumerate() {
-            for i in 0..=net.p {
-                for j in 0..=net.q {
+            if a + b > order {
+                continue;
+            }
+            for i in 0..=net.nurbs.p {
+                for j in 0..=net.nurbs.q {
                     let li = 4
-                        * ((ku + i).checked_sub(net.p)? * net.nv + (kv + j).checked_sub(net.q)?);
+                        * ((ku + i).checked_sub(net.nurbs.p)? * net.nurbs.nv
+                            + (kv + j).checked_sub(net.nurbs.q)?);
                     let c = basis(&nu, a, i)? * basis(&nv, b, j)?;
                     for (e, he) in hab.iter_mut().enumerate() {
-                        *he = *he + c * Ivl::from(*net.pw.get(li + e)?);
+                        *he = *he + c * *net.pw.get(li + e)?;
                     }
                 }
             }
         }
     }
-    let [[h00, h01], [h10, _]] = h;
+    let [[h00, h01, h02], [h10, h11, _], [h20, _, _]] = h;
     let w = h00[3];
     let positive = w.lo > 0.0;
     if !positive {
         return None;
     }
-    let point = [h00[0] / w, h00[1] / w, h00[2] / w];
-    let rate = |d: [Ivl; 4]| {
+    let two = Ivl::from(2.0);
+    let s = [h00[0] / w, h00[1] / w, h00[2] / w];
+    let first = |d: [Ivl; 4]| {
         [
-            (d[0] - d[3] * point[0]) / w,
-            (d[1] - d[3] * point[1]) / w,
-            (d[2] - d[3] * point[2]) / w,
+            (d[0] - d[3] * s[0]) / w,
+            (d[1] - d[3] * s[1]) / w,
+            (d[2] - d[3] * s[2]) / w,
         ]
     };
-    Some((point, rate(h10), rate(h01)))
+    let (su, sv) = (first(h10), first(h01));
+    // (A_ab − w_a S_b − w_b S_a − w_ab S) / w, componentwise
+    let second = |d: [Ivl; 4], wa: Ivl, sa: Iv3, wb: Ivl, sb: Iv3| {
+        let [d0, d1, d2, dw] = d;
+        [
+            (d0 - wa * sb[0] - wb * sa[0] - dw * s[0]) / w,
+            (d1 - wa * sb[1] - wb * sa[1] - dw * s[1]) / w,
+            (d2 - wa * sb[2] - wb * sa[2] - dw * s[2]) / w,
+        ]
+    };
+    // S_uu: w_a = w_b = w_u and S_a = S_b = S_u, the middle terms 2 w_u S_u
+    let pure = |d: [Ivl; 4], wa: Ivl, sa: Iv3| {
+        let [d0, d1, d2, dw] = d;
+        [
+            (d0 - two * wa * sa[0] - dw * s[0]) / w,
+            (d1 - two * wa * sa[1] - dw * s[1]) / w,
+            (d2 - two * wa * sa[2] - dw * s[2]) / w,
+        ]
+    };
+    let suu = pure(h20, h10[3], su);
+    let svv = pure(h02, h01[3], sv);
+    let suv = second(h11, h10[3], su, h01[3], sv);
+    Some(Ders {
+        s,
+        su,
+        sv,
+        suu,
+        suv,
+        svv,
+    })
 }
 
 #[cfg(test)]
