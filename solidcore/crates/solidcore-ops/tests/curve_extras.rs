@@ -1,6 +1,7 @@
 //! An arc about a centre and a curve extended keeping its control points' proportions, through
 //! ops on record curves.
 
+#![allow(clippy::disallowed_methods)] // closed-form oracle, not ops geometry
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
