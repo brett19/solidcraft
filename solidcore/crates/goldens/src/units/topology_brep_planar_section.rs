@@ -649,8 +649,9 @@ impl UnitDiff for Runner {
 mod section_certificate {
     //! WR-723: the section curves of the rows that moved when a face's section became traced
     //! to the face's tolerance are proved within that tolerance of the plane and of a face's
-    //! surface, every curve of every row. Upstream's size default left them up to 1.6e-2 off
-    //! a 1e-5 face tolerance, so this test fails with the size default.
+    //! (untrimmed) surface, every 3D curve of every row. It does not prove a curve lies inside
+    //! its face's trim, nor certify UV curves or op 4's drops and lifts. With upstream's size
+    //! default the test fails.
     //!
     //! - **Plane:** a NURBS curve with positive weights lies in the hull of its Euclidean
     //!   control points, so the largest `|e . (P_i - p0)|` bounds its distance from the plane
@@ -671,16 +672,30 @@ mod section_certificate {
     use solidcore::topology::face::p2 as face2;
     use solidcore::topology::FaceId;
 
-    /// The rows whose section moved (`planar_section_face_tolerance` retired).
-    const MOVED: [&str; 15] = [
-        "cone_slant", "faces_fillet_box_y98", "fillet_box_y98_uv_unforced", "fillet_box_y_forced",
-        "gen0015", "gen0025", "gen0038", "gen0056", "gen0070", "gen0071", "gen0073", "gen0074",
-        "gen0089", "gen0093", "nurb_fillet_section",
+    /// The rows whose section moved (`planar_section_face_tolerance` retired), each with the
+    /// number of 3D section curves its call traces (89 in all), so no row passes by certifying
+    /// fewer curves than it has.
+    const MOVED: [(&str, usize); 15] = [
+        ("cone_slant", 1),
+        ("faces_fillet_box_y98", 12),
+        ("fillet_box_y98_uv_unforced", 4),
+        ("fillet_box_y_forced", 8),
+        ("gen0015", 6),
+        ("gen0025", 5),
+        ("gen0038", 4),
+        ("gen0056", 4),
+        ("gen0070", 4),
+        ("gen0071", 5),
+        ("gen0073", 8),
+        ("gen0074", 4),
+        ("gen0089", 9),
+        ("gen0093", 10),
+        ("nurb_fillet_section", 5),
     ];
 
     /// Stations per curve for the surface certificate, more where fewer do not prove it (each
     /// piece's correspondence starts as the line between two projected nodes; `span_bound`
-    /// halves it where needed). One curve (gen0025's fourth) needs the last.
+    /// halves it where needed).
     const STATIONS: [usize; 4] = [1024, 8192, 65536, 262_144];
 
     /// A certified bound on the distance of the curve's NURB (positive weights) from the
@@ -707,10 +722,17 @@ mod section_certificate {
         Some(worst)
     }
 
-    /// The curves of the row and the face each belongs to where the call says.
+    /// The 3D curves of the row and the face each belongs to where the call says, from the
+    /// same call `run_rust` makes (op 3 and op 4 both section each face with
+    /// `face_planar_section_curves`; op 4's drops and lifts, and every row's UV curves, are not
+    /// certified here).
     fn section(k: &Kernel, b: &mut Brep, i: &Inputs) -> SolidResult<Vec<(Curve, Option<FaceId>)>> {
         let (point, normal) = (v(i.point), v(i.normal));
-        if i.faces {
+        let faces: Vec<_> = b.faces().ids().collect();
+        for f in faces {
+            b.sync_face_surface_tolerance(f)?;
+        }
+        if i.faces || i.forced {
             let mut out = Vec::new();
             for f in brep1::faces(b, None)? {
                 let dom = face2::uv_domain(b, f)?;
@@ -728,7 +750,8 @@ mod section_certificate {
         let opts = PlanarSectionOptions {
             approx_tol_3d: i.tol,
             ang_tol_rad: i.ang_tol,
-            outputs: SectionOutputs { curves_3d: i.want_3d, uv_curves: i.want_uv, faces: i.want_faces },
+            // the 3D curves are traced whether or not the row records them
+            outputs: SectionOutputs { curves_3d: true, uv_curves: i.want_uv, faces: i.want_faces },
             force_uv_classify: i.force_uv_classify,
         };
         let s = create_planar_section_curves(k, b, point, normal, &opts)?;
@@ -737,7 +760,8 @@ mod section_certificate {
 
     /// The certified bound of a curve against the surface of the face it lies on (its own
     /// face where the call says, else the face whose surface is nearest the curve's middle),
-    /// that face's tolerance, and a note of the surface's kind and definition bound.
+    /// that face's tolerance, and a note of the face's index, the surface's kind and its
+    /// definition bound. The bound is to the face's whole (untrimmed) surface.
     fn surface_bound(
         k: &Kernel,
         b: &Brep,
@@ -770,7 +794,8 @@ mod section_certificate {
             solidcore::surface::surface::SurfaceKind::ProceduralBlend(pb) => pb.bound(),
             _ => 0.0,
         };
-        let kind = format!("{}", s.type_code());
+        let index = brep1::faces(b, None).map_err(|e| e.to_string())?.iter().position(|&f| f == face);
+        let kind = format!("face {index:?} surface type {}", s.type_code());
         // The nodes are not trusted (the bound holds for any correspondence); they are chosen
         // so the correspondence runs in step with the curve: where the projection's foot is
         // ambiguous (a pole, where every `u` is the same point) the previous node's parameter
@@ -849,7 +874,7 @@ mod section_certificate {
                 break;
             }
         }
-        Ok((worst, tol, format!("surface type {kind} definition bound {slack:.3e}")))
+        Ok((worst, tol, format!("{kind} definition bound {slack:.3e}")))
     }
 
     #[test]
@@ -858,32 +883,63 @@ mod section_certificate {
         let cases = Runner.cases(&ctx).unwrap();
         let mut report = Vec::new();
         let mut failed = Vec::new();
-        for name in MOVED {
+        let mut total = 0;
+        for (name, count) in MOVED {
             let case = cases.iter().find(|c| c.name == name).unwrap_or_else(|| panic!("case {name}"));
             let i: Inputs = case.parse().unwrap();
             let mut k = Kernel::default();
             let mut b = build(&mut k, &i).unwrap().unwrap();
             assert!(i.translate.is_none() && i.plane_walk.is_none(), "{name}: not covered");
+            println!(
+                "row {name}: api {} faces {} forced {} want_3d {} want_uv {} want_faces {} force_uv {}",
+                i.api, i.faces, i.forced, i.want_3d, i.want_uv, i.want_faces, i.force_uv_classify
+            );
             let curves = section(&k, &mut b, &i).unwrap();
+            if curves.len() != count {
+                failed.push(format!("{name}: {} section curves, the row has {count}", curves.len()));
+            }
+            total += curves.len();
             for (ci, (c, own)) in curves.iter().enumerate() {
-                let tol = own.map_or(1e-5, |f| face2::tolerance(&b, f).unwrap());
                 let nurb = match c.kind() {
                     CurveKind::Line(l) => l.base_with_nurb().ok().and_then(|x| x.gw_nurb().cloned()),
                     _ => c.b_spline_base().and_then(|x| x.gw_nurb().cloned()),
                 };
                 let plane = nurb.as_ref().and_then(|n| plane_bound(n, v(i.point), v(i.normal)));
                 let surf = surface_bound(&k, &b, c, *own);
+                // both bounds against the chosen face's tolerance
+                let ok = match (&plane, &surf) {
+                    (Some(p), Ok((s, tol, _))) => p < tol && s < tol,
+                    _ => false,
+                };
                 let line = format!("{name} c{ci} type {} plane {plane:?} surface {surf:?}", c.type_code());
-                let ok = plane.is_some_and(|p| p < tol) && surf.as_ref().is_ok_and(|(s, t, _)| s < t);
                 if !ok {
                     failed.push(line.clone());
                 }
                 report.push(line);
             }
+            // The sampled measurement's off-face samples (gen0089 c7 after; gen0038 c0, c3
+            // before): each face's surface foot and the face's UV box, to see which face the
+            // sampler (nearest face, UV grid inside the face's box) measured.
+            for (row, ci, t) in [("gen0089", 7, 1.0 / 400.0), ("gen0038", 0, 0.5), ("gen0038", 3, 0.125)] {
+                let Some((c, _)) = curves.get(ci).filter(|_| row == name) else { continue };
+                let q = c.evaluate_point(&k, c.natural_interval().evaluate(t)).unwrap();
+                for (fi, f) in brep1::faces(&b, None).unwrap().into_iter().enumerate() {
+                    let Some(s) = face2::surface(&b, f).unwrap() else { continue };
+                    let foot = node_on(&k, s, q);
+                    let dom = face2::uv_domain(&b, f).unwrap();
+                    println!(
+                        "probe {row} c{ci} t={t}: face {fi} type {} node_on {foot:?} face uv box {:?}..{:?}",
+                        s.type_code(),
+                        dom.evaluate(0.0, 0.0),
+                        dom.evaluate(1.0, 1.0)
+                    );
+                }
+            }
         }
         for l in &report {
             println!("{l}");
         }
+        println!("{total} section curves in {} rows", MOVED.len());
         assert!(failed.is_empty(), "not proved within tolerance:\n{}", failed.join("\n"));
     }
 }

@@ -9,12 +9,14 @@ original record no longer exists. Removed: the field, SolidCraft's preset line, 
 `wr698_gn_round_is_its_definition.rs`.
 
 - **Defaults:** SolidCraft's preset had the flag on, so the app's results don't change. `Kernel::default()` changes.
-- **Goldens:** 15 `topology.brep_planar_section` rows move: cone_slant, nurb_fillet_section, the three fillet_box_y98
-  cases and faces_fillet_box_y98, and gen0015/0025/0038/0056/0070/0071/0073/0074/0089/0093. In every row the section
-  curves keep their count, type and topology; only the traced points move. Every section curve of the 15 rows (85
-  curves) is proved within its face's 1e-5 tolerance of the plane (the hull of its control points) and of a face's
-  surface (`nurbs::certificate::span_bound`), rounding counted:
-  `topology_brep_planar_section::section_certificate`. With the size default, 27 of those curves in 8 rows are not
-  proved; sampled, they lay up to 1.6e-2 off. No other row of any unit moves.
+- **Goldens:** 15 `topology.brep_planar_section` rows move: cone_slant, nurb_fillet_section, the three fillet box
+  rows (fillet_box_y_forced, fillet_box_y98_uv_unforced, faces_fillet_box_y98), and
+  gen0015/0025/0038/0056/0070/0071/0073/0074/0089/0093. In every row the section curves keep their count, type and
+  topology; only the traced points move. `topology_brep_planar_section::section_certificate` repeats each row's call
+  and proves every 3D section curve it traces (89 curves) within the face's 1e-5 tolerance of the plane (the hull of
+  its control points) and of a face's untrimmed surface (`nurbs::certificate::span_bound`), rounding counted. It does
+  not prove that a curve lies inside its face's trim, and it does not certify the rows' UV curves (gen0038 records
+  only UV curves). With the size default, 30 of those curves in 9 rows are not proved; sampled, they lay up to 1.6e-2
+  off. No other row of any unit moves.
 - **Tests:** `a_plane_section_of_a_round_is_within_its_tolerance` runs on the default kernel; the certificate
   above is new.
