@@ -48,6 +48,12 @@
 //!   `FlushCurve` makes to the geometry, its rails and their mate edge uses go to
 //!   the pseudo B-rep ([`FilletBrep`]) its caller passes (upstream reaches it through
 //!   the geometry pointer).
+//! - **Flush outcome (not upstream, tangency-labs/solidcraft#16686).** `FlushCurve`
+//!   notes what it did to its fillet geometry in [`FlushOutcome`], which the solver's
+//!   trace reads after each pass ([`FilletIntersector::take_flush_outcome`]): `made`
+//!   once it saved the surface, centre line and rails, `unmade` on any error exit
+//!   (where upstream leaves the geometry without curves, or partly written, and only
+//!   notes a skinning or smoothing failure in the solver's status).
 //! - **Virtual overrides.** `ComputeNextPoint`, `FlushCurve`, `ComputePointValues`,
 //!   `ComputePointValuesDelta`, `EvaluateLawPoint` and `TestSpanAccuracy` are
 //!   inherent methods here that take the solver; [`FilletDispatch`] implements the
@@ -922,9 +928,9 @@ pub struct FilletIntersector<'s, 't, O, G> {
 /// did to their fillet geometry.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct FlushOutcome {
-    /// A flush could not make its fillet geometry (the surface not skinned, or the
-    /// self-intersection not smoothed). Upstream only notes it in the solver's sticky
-    /// status.
+    /// A flush could not make its fillet geometry: it failed, possibly part-way through
+    /// writing it (the surface not skinned, the self-intersection not smoothed, or any
+    /// other error). Upstream notes the first two only in the solver's sticky status.
     pub unmade: bool,
     /// A flush made its fillet geometry (saved its surface, centre line and rails).
     pub made: bool,
@@ -1749,9 +1755,26 @@ impl<'s, 't, O: SolutionObject + 't, G: Clone> FilletIntersector<'s, 't, O, G> {
     ///
     /// `SM_ERR_NULL_POINTER` without curve points; `SM_ERR` when a mid point has no
     /// solution or the handler or surface generator fails (after setting the solver
-    /// status); those of the solver and the curve construction.
-    #[allow(clippy::too_many_lines)]
+    /// status); those of the solver and the curve construction. Any of them notes the
+    /// geometry as unmade ([`FlushOutcome::unmade`]): the flush may have written part of
+    /// it.
     pub fn flush_curve<S: FilletSolverOps<FilletGeom = G>>(
+        &mut self,
+        solver: &mut S,
+        k: &Kernel,
+        pseudo: &mut FilletBrep,
+        out: &mut TsectCurves,
+    ) -> Result<()> {
+        let flushed = self.flush_curve_steps(solver, k, pseudo, out);
+        if flushed.is_err() {
+            self.flush_outcome.unmade = true;
+        }
+        flushed
+    }
+
+    /// The steps of [`Self::flush_curve`].
+    #[allow(clippy::too_many_lines)]
+    fn flush_curve_steps<S: FilletSolverOps<FilletGeom = G>>(
         &mut self,
         solver: &mut S,
         k: &Kernel,
@@ -2108,7 +2131,6 @@ impl<'s, 't, O: SolutionObject + 't, G: Clone> FilletIntersector<'s, 't, O, G> {
                 );
                 if keep_unported(smoothed)?.is_none() {
                     solver.set_status(FilStatus::SelfIntHandlingFailure)?;
-                    self.flush_outcome.unmade = true;
                     return Err(SolidError::blend_failed(
                         OP_FLUSH,
                         "the self-intersecting fillet could not be smoothed",
@@ -2148,7 +2170,6 @@ impl<'s, 't, O: SolutionObject + 't, G: Clone> FilletIntersector<'s, 't, O, G> {
             );
             let Some(s) = keep_unported(created)? else {
                 solver.set_status(FilStatus::SurfSkinningFailure)?;
-                self.flush_outcome.unmade = true;
                 return Err(SolidError::blend_failed(
                     OP_FLUSH,
                     "the fillet surface could not be skinned",

@@ -2988,7 +2988,55 @@ mod tests_c4 {
         assert!(fi.self_intersect());
     }
 
-    /// tangency-labs/solidcraft#16686: a failed flush is spent only when a later flush
+    /// tangency-labs/solidcraft#16686, two passes through `c4_trace`: the first pass's
+    /// flush left its geometry unmade and point 1 is missed, so the next pass would start
+    /// from the cusp recovery, which reads that geometry's (stale or missing) centre line.
+    /// The trace fails with the first pass's error before the recovery runs.
+    #[test]
+    fn an_unmade_geometry_is_refused_before_the_cusp_recovery() {
+        use crate::blend::fillet_geom::p1::FilletGeom;
+        use crate::blend::fillet_intersector::FlushOutcome;
+
+        let k = Kernel::default();
+        let mut solver = FilletSolver::new(1.0e-5, 0.01, 0.01);
+        solver.extend_before = true;
+        solver.extend_after = false;
+        let mut target = Brep::new();
+        let mut fillets = FilletBrep::new();
+        let g = fillets.add_geom(FilletGeom::new(&k, None, FilletGeomType::Default).unwrap());
+        solver.fillet_geoms.push(g);
+        let mut cx = Cx {
+            k: &k,
+            target: &mut target,
+            fillets: &mut fillets,
+            solvers: GeometrySolvers::Indexed(&[]),
+            error_info: None,
+        };
+        let mut st = state(&[0.0, -1.0, 1.0]);
+        st.trace.reverse_tracing = true;
+        st.trace.extend_before = true;
+        st.trace.extend_after = false;
+        let s = surfaces();
+        let d = Extent2d::from_bounds(-1.0, -1.0, 2.0, 2.0);
+        let mut fi: TraceIntersector<'_> =
+            FilletIntersector::new(&k, &s[0], &d, &s[1], &d, None).unwrap();
+        // as the first pass's flush would leave it
+        fi.set_flush_outcome(FlushOutcome {
+            unmade: true,
+            made: false,
+        });
+        let e = c4_trace(&mut solver, &mut cx, &mut st, &mut fi).unwrap_err();
+        // the pass's own error, not the recovery's missing centre line
+        assert_ne!(e, SolidError::blend_missing(OP, "the fillet surface"));
+        assert!(!e.is_unported_or_cancelled(), "{e:?}");
+        // the missed point was dropped (RemoveAt(0, 1)), the recovery never ran
+        assert_eq!(st.tsect_pnts.len(), 2);
+        assert!(!fi.self_intersect());
+    }
+
+    /// The pass sequences of `UnmadeGeometry` (the coverage of the multi-pass cases: no
+    /// `c4_trace` fixture here makes a pass that returns Ok without flushing, or a flush
+    /// that succeeds). tangency-labs/solidcraft#16686: a failed flush is spent only when a later flush
     /// makes the geometry (each pass flushes into the same one), and is refused before a
     /// cusp recovery would read its stale centre line, or at the end.
     #[test]
