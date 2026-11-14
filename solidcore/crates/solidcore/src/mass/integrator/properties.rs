@@ -40,6 +40,12 @@
 //! one-sided limit from inside the piece (WR-670, #2091): upstream takes the span above.
 //! An edge's tube area, volume and moments each have an error scale of their own size
 //! (#2887): upstream's are `BIG_DOUBLE`, so only the edge's length was under error control.
+//! Not upstream (#16735): `brep_properties` closes every volume-bounding face onto its
+//! edges' curves and vertices (`gap_closure`: ruled strips from the trims' images to the
+//! edge curves, and fans at the loop corners), so the faces bound one closed surface and
+//! the volume and volume moments do not depend on the origin; upstream integrates each
+//! face over its own trims, and the tolerant edges' gaps leak to first order in the
+//! tolerance.
 use super::{OdeIntegrator, OdeOptions};
 use crate::curve::curve::Curve;
 use crate::error::mass::MassFailure;
@@ -934,6 +940,390 @@ fn add_selected(
         }
     }
 }
+// ---- #16735: closing tolerant edges ------------------------------------------------------
+//
+// A face is integrated over its own UV trims, whose images run within the edge tolerance
+// of the edge curve, not on it. Two faces of an edge therefore leave a gap between them,
+// and the integrand's fields (`(0, 0, z - o_z)` times polynomials) leak through it: the
+// volume is wrong to first order in the tolerance, and differently for every origin.
+// Each face is closed onto its edges' own curves instead. Along every edge use a ruled
+// strip joins the trim's image P to the edge curve E at the nearest point, and at every
+// loop corner a fan of triangles joins the two trims' ends, the two edge curves' ends and
+// the vertex. The faces with their strips and corners then share the edge curves and the
+// vertices exactly, so they bound one closed surface, and the divergence theorem makes
+// every volume integral that of the region it bounds whatever the origin. That region
+// differs from the solid only within each edge's tolerance tube and each vertex's
+// tolerance ball, where the strips and corners lie, so the volume is right to
+// sum(pi tol_e^2 L_e) + sum(4/3 pi tol_v^3), where it was right to O(tol L).
+
+/// The volume group's integrands at `x` (relative to the origin) for the area vector
+/// `n` (per unit parameter area): the volume and the volume moments `4..8`, in the
+/// layout of [`PrecisePropertyLayout`]'s volume terms (see `OdeIsoCurveLength`).
+fn closure_integrands(x: Vec3, n: Vec3, out: &mut [f64; 13]) {
+    let vd = x.z * n.z;
+    let vals = [
+        vd,
+        x.x * vd,
+        x.y * vd,
+        x.z * vd / 2.0,
+        (x.x * x.x) * vd,
+        (x.y * x.y) * vd,
+        (x.z * x.z / 3.0) * vd,
+        (x.y * x.z) * vd / 2.0,
+        (x.z * x.x) * vd / 2.0,
+        (x.x * x.y) * vd,
+        (x.y * x.y + x.z * x.z / 3.0) * vd,
+        (x.x * x.x + x.z * x.z / 3.0) * vd,
+        (x.x * x.x + x.y * x.y) * vd,
+    ];
+    for (o, v) in out.iter_mut().zip(vals) {
+        *o += v;
+    }
+}
+
+/// The volume group over `w` in `[0, 1]` of the ruled patch `X = (1 - w) a + w c` at one
+/// value of its other parameter, `da` and `dc` the rails' derivatives in it, the area
+/// vector `X_t x X_w`, into `out` (with `weight`). The integrands are polynomials of
+/// degree 4 in `w`, which the 3-point Gauss rule integrates exactly.
+fn ruled_column(a: Vec3, da: Vec3, c: Vec3, dc: Vec3, weight: f64, out: &mut [f64; 13]) {
+    let xw = c - a;
+    for (i, &node) in KRONROD_NODES.iter().enumerate() {
+        let wg = GAUSS_WEIGHTS.get(i).copied().unwrap_or(0.0);
+        if wg == 0.0 {
+            continue;
+        }
+        let sides: &[f64] = if i == 0 { &[0.0] } else { &[-1.0, 1.0] };
+        for &side in sides {
+            let w = 0.5 + 0.5 * side * node;
+            let x = a * (1.0 - w) + c * w;
+            let xt = da * (1.0 - w) + dc * w;
+            let mut col = [0.0; 13];
+            closure_integrands(x, xt.cross(xw), &mut col);
+            for (o, v) in out.iter_mut().zip(col) {
+                *o += 0.5 * wg * weight * v;
+            }
+        }
+    }
+}
+
+/// The volume group of the polygon `points` (relative to the origin), its area vector by
+/// the right-hand rule round them: a fan of triangles from their centroid, each the
+/// ruled patch from the centroid to its side, whose integrands are polynomials of
+/// degree 4 in both parameters (3-point Gauss rules, exact).
+fn polygon_closure(points: &[Vec3], out: &mut [f64; 13]) {
+    if points.is_empty() {
+        return;
+    }
+    let (mut centre, mut count) = (Vec3::new(0.0, 0.0, 0.0), 0.0);
+    for p in points {
+        centre += *p;
+        count += 1.0;
+    }
+    let centre = centre * (1.0 / count);
+    let zero = Vec3::new(0.0, 0.0, 0.0);
+    for (i, &p) in points.iter().enumerate() {
+        let q = points
+            .get(i + 1)
+            .or_else(|| points.first())
+            .copied()
+            .unwrap_or(p);
+        let side = q - p;
+        let mut tri = [0.0; 13];
+        for (j, &node) in KRONROD_NODES.iter().enumerate() {
+            let wg = GAUSS_WEIGHTS.get(j).copied().unwrap_or(0.0);
+            if wg == 0.0 {
+                continue;
+            }
+            let sides: &[f64] = if j == 0 { &[0.0] } else { &[-1.0, 1.0] };
+            for &s in sides {
+                let t = 0.5 + 0.5 * s * node;
+                ruled_column(centre, zero, p + side * t, side, 0.5 * wg, &mut tri);
+            }
+        }
+        // the ruled patch's area vector is minus the triangle's right-hand one
+        for (o, v) in out.iter_mut().zip(tri) {
+            *o -= v;
+        }
+    }
+}
+
+/// The parameter of the point of `curve` on `[t0, t1]` nearest `p`, by Gauss-Newton steps
+/// on `(E - p) . E'` from `guess` (each step `(p - E) . E' / |E'|^2`, along the tangent:
+/// Newton's own denominator `|E'|^2 + (E - p) . E''` can vanish or turn negative on a
+/// short, sharply curved knot span, where Gauss-Newton still moves toward `p`).
+fn nearest_on_edge(k: &Kernel, curve: &Curve, t0: f64, t1: f64, p: Vec3, guess: f64) -> f64 {
+    let mut t = guess.clamp(t0, t1);
+    for _ in 0..64 {
+        let Ok(e) = curve.evaluate(k, t, 1, true, false) else {
+            break;
+        };
+        let (Some(&ep), Some(&d1)) = (e.first(), e.get(1)) else {
+            break;
+        };
+        let df = d1.dot(d1);
+        let f = (ep - p).dot(d1);
+        if df.is_nan() || df <= 0.0 || !f.is_finite() {
+            break;
+        }
+        let next = (t - f / df).clamp(t0, t1);
+        let step = (next - t).abs();
+        t = next;
+        if step <= 1e-15 * (1.0 + t.abs()) {
+            break;
+        }
+    }
+    t
+}
+
+/// The grid of nearest points along each strip (see [`gap_closure`]).
+const CLOSURE_GRID: u32 = 64;
+
+/// One edge use of a loop, in the direction of its edge: its UV trim, its edge's curve
+/// on the edge's interval (`None` for an edge without a curve: the vertex), and the
+/// points at the loop's start and end of it.
+struct ClosureSide {
+    trim: Curve,
+    edge: Option<(Curve, f64, f64)>,
+    vertex: Vec3,
+    same: bool,
+    trim_ends: [Vec3; 2],
+    edge_ends: [Vec3; 2],
+}
+
+/// Not upstream (#16735): the volume group of the strips and corners closing face `f`'s
+/// trims onto its edges' curves and vertices (see above), its area vectors the face's
+/// surface normal's way round, relative to `origin`; the strips integrated along the
+/// trims by [`kronrod_integrate`] to `accuracy` with the error scales of the face's own
+/// integration (`estimated_area`, see [`boundary_properties`]).
+///
+/// # Errors
+///
+/// Those of the evaluations; [`SolidError::Mass`] for a missing surface, UV trim or
+/// vertex.
+fn gap_closure(
+    k: &Kernel,
+    b: &mut Brep,
+    f: FaceId,
+    origin: Point3,
+    accuracy: f64,
+    estimated_area: f64,
+) -> Result<PreciseProperties> {
+    use crate::nurbs::b_spline_surface_n_lib::p2::EvaluateFlags;
+    use crate::nurbs::knots::Side;
+    use crate::topology::edgeuse::{p1 as eu1, p3 as eu3};
+    let fu = crate::topology::face::p2::upward_faceuse(b, f)?
+        .ok_or_else(|| SolidError::mass_missing(OP, "the face's faceuse"))?;
+    let mut loops = Vec::new();
+    for lu in eu1::faceuse_loopuses(b, fu, false, None)? {
+        if crate::topology::loopuse::is_vertex_loopuse(b, lu)? {
+            continue;
+        }
+        let mut sides = Vec::new();
+        for eu in eu1::loopuse_edgeuses(b, lu)? {
+            let same = eu1::orientation(b, eu)? == OrientType::Same;
+            if eu1::uv_trim_curve(b, eu)?.0.is_none() {
+                eu3::get_or_create_uv_trim_curve(k, b, eu, false, false, true)?.status?;
+            }
+            let trim = eu1::uv_trim_curve(b, eu)?
+                .0
+                .cloned()
+                .ok_or_else(|| SolidError::mass_missing(OP, "the edge use's UV trim"))?;
+            let vu = b
+                .edgeuse(eu)?
+                .vertexuse
+                .ok_or_else(|| SolidError::mass_missing(OP, "the edge use's vertex use"))?;
+            let v = b
+                .vertexuse(vu)?
+                .vertex
+                .ok_or_else(|| SolidError::mass_missing(OP, "the vertex use's vertex"))?;
+            let vertex = b.vertex(v)?.point;
+            let e = eu1::edge(b, eu)?
+                .ok_or_else(|| SolidError::mass_missing(OP, "the edge use's edge"))?;
+            let ivl = b.edge(e)?.interval;
+            let edge = edge::curve(b, e)?.map(|c| (c.clone(), ivl.min(), ivl.max()));
+            sides.push(ClosureSide {
+                trim,
+                edge,
+                vertex,
+                same,
+                trim_ends: [vertex; 2],
+                edge_ends: [vertex; 2],
+            });
+        }
+        loops.push(sides);
+    }
+    let surface = b
+        .face(f)?
+        .surface
+        .clone()
+        .ok_or_else(|| SolidError::mass_missing(OP, "the face's surface"))?;
+    // the surface as the face's integrand evaluates it (`OdeIsoCurveLength`): the point,
+    // then the u and v derivatives
+    let at = |uv: Vec3| -> Result<(Vec3, Vec3, Vec3)> {
+        let flags = EvaluateFlags {
+            u_side: Side::Left,
+            v_side: Side::Left,
+            only_upper_half: true,
+            non_zero_tangents: true,
+        };
+        let mut pv = [[Vec3::ZERO; 2]; 2];
+        surface.evaluate_simple_first_into(
+            k,
+            crate::geom::vector2d::Point2::new(uv.x, uv.y),
+            flags,
+            &mut pv,
+        )?;
+        let [[p, sv], [su, _]] = pv;
+        Ok((p, su, sv))
+    };
+    let missing = || SolidError::mass_missing(OP, "a curve evaluation");
+    // the face integration's error scales: a length per extra dimension
+    let length = (10.0 * estimated_area.sqrt())
+        .max(face_box(k, b, f)?.min_distance(&Extent3d::from_point(origin)));
+    let area_scale = estimated_area / 10.0;
+    let mut scale = [area_scale * length; 13];
+    for (i, s) in scale.iter_mut().enumerate().skip(1) {
+        *s = area_scale * length.powi(if i <= 3 { 2 } else { 3 });
+    }
+    let accuracy = if accuracy < EFF_ZERO {
+        EFF_ZERO_SQ
+    } else {
+        accuracy
+    };
+    let mut sum = [0.0_f64; 13];
+    for sides in &mut loops {
+        // the strips, each along its edge's direction
+        for side in sides.iter_mut() {
+            let ivl = side.trim.natural_interval();
+            let (c0, c1) = (ivl.min(), ivl.max());
+            let p0 = at(side.trim.evaluate_point(k, c0)?)?.0;
+            let p1 = at(side.trim.evaluate_point(k, c1)?)?.0;
+            let Some((curve, e0, e1)) = &side.edge else {
+                // no edge curve: the strip is the cone from the trim to the vertex
+                let v = side.vertex;
+                side.trim_ends = if side.same { [p0, p1] } else { [p1, p0] };
+                let mut strip = [0.0; 13];
+                kronrod_integrate(k, c0, c1, accuracy, &scale, &mut strip, |t, dy| {
+                    let d = side.trim.evaluate(k, t, 1, true, false)?;
+                    let (Some(&uv), Some(&duv)) = (d.first(), d.get(1)) else {
+                        return Err(missing());
+                    };
+                    let (p, su, sv) = at(uv)?;
+                    let mut col = [0.0; 13];
+                    let zero = Vec3::new(0.0, 0.0, 0.0);
+                    ruled_column(
+                        p - origin,
+                        su * duv.x + sv * duv.y,
+                        v - origin,
+                        zero,
+                        1.0,
+                        &mut col,
+                    );
+                    for (o, c) in dy.iter_mut().zip(col) {
+                        *o = c;
+                    }
+                    Ok(())
+                })?;
+                let sigma = if side.same { 1.0 } else { -1.0 };
+                for (o, v) in sum.iter_mut().zip(strip) {
+                    *o -= sigma * v;
+                }
+                continue;
+            };
+            let (e0, e1) = (*e0, *e1);
+            // The strip's correspondence t(tau) from the trim's parameter to the edge's:
+            // the ends to the ends, and between them on a grid the nearest points,
+            // marched from one to the next; linear between the grid's points, so the
+            // strip is one continuous ruled surface whose derivative is exact, joined to
+            // the edge curve end to end, whatever the nearest points' accuracy.
+            let grid = CLOSURE_GRID;
+            let mut table = vec![(c0, e0)];
+            let mut last = e0;
+            for i in 1..grid {
+                let tau = c0 + (c1 - c0) * f64::from(i) / f64::from(grid);
+                let p = at(side.trim.evaluate_point(k, tau)?)?.0;
+                last = nearest_on_edge(k, curve, e0, e1, p, last);
+                table.push((tau, last));
+            }
+            table.push((c1, e1));
+            let ea = curve.evaluate_point(k, e0)?;
+            let eb = curve.evaluate_point(k, e1)?;
+            side.trim_ends = if side.same { [p0, p1] } else { [p1, p0] };
+            side.edge_ends = if side.same { [ea, eb] } else { [eb, ea] };
+            // pieces between the grid's points and the trim's knots
+            let mut breaks: Vec<f64> = side
+                .trim
+                .knots(k, None)
+                .map(|(knots, _)| knots)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|&t| t > c0 && t < c1)
+                .collect();
+            breaks.extend(table.iter().map(|&(tau, _)| tau));
+            breaks.sort_by(f64::total_cmp);
+            breaks.dedup();
+            let mut strip = [0.0; 13];
+            for piece in breaks.windows(2) {
+                let [lo, hi] = piece else { continue };
+                // the grid segment holding the piece
+                let mid = 0.5 * (lo + hi);
+                let j = table
+                    .partition_point(|&(tau, _)| tau <= mid)
+                    .saturating_sub(1);
+                let (Some(&(ta, sa)), Some(&(tb, sb))) = (table.get(j), table.get(j + 1)) else {
+                    continue;
+                };
+                let slope = if tb > ta { (sb - sa) / (tb - ta) } else { 0.0 };
+                kronrod_integrate(k, *lo, *hi, accuracy, &scale, &mut strip, |tau, dy| {
+                    let d = side.trim.evaluate(k, tau, 1, true, false)?;
+                    let (Some(&uv), Some(&duv)) = (d.first(), d.get(1)) else {
+                        return Err(missing());
+                    };
+                    let (p, su, sv) = at(uv)?;
+                    let dp = su * duv.x + sv * duv.y;
+                    let t = sa + (tau - ta) * slope;
+                    let e = curve.evaluate(k, t, 1, true, false)?;
+                    let (Some(&ep), Some(&de)) = (e.first(), e.get(1)) else {
+                        return Err(missing());
+                    };
+                    let mut col = [0.0; 13];
+                    ruled_column(p - origin, dp, ep - origin, de * slope, 1.0, &mut col);
+                    for (o, c) in dy.iter_mut().zip(col) {
+                        *o = c;
+                    }
+                    Ok(())
+                })?;
+            }
+            // the strip's area vector X_tau x X_w runs against the face's along the trim
+            let sigma = if side.same { 1.0 } else { -1.0 };
+            for (o, v) in sum.iter_mut().zip(strip) {
+                *o -= sigma * v;
+            }
+        }
+        // the corners: from the end of one trim to the start of the next
+        let count = sides.len();
+        for (i, side) in sides.iter().enumerate() {
+            let Some(next) = sides.get((i + 1) % count) else {
+                continue;
+            };
+            let [_, q_end] = side.trim_ends;
+            let [_, e_end] = side.edge_ends;
+            let [q_start, _] = next.trim_ends;
+            let [e_start, _] = next.edge_ends;
+            let polygon = [q_end, e_end, next.vertex, e_start, q_start].map(|p| p - origin);
+            polygon_closure(&polygon, &mut sum);
+        }
+    }
+    let mut out = PreciseProperties::default();
+    let [vol, m4x, m4y, m4z, m5x, m5y, m5z, m6x, m6y, m6z, m7x, m7y, m7z] = sum;
+    out.volume = vol;
+    let [_, _, _, _, m4, m5, m6, m7] = &mut out.moments;
+    *m4 = Vec3::new(m4x, m4y, m4z);
+    *m5 = Vec3::new(m5x, m5y, m5z);
+    *m6 = Vec3::new(m6x, m6y, m6z);
+    *m7 = Vec3::new(m7x, m7y, m7z);
+    Ok(out)
+}
 /// `SmBrep::ComputePreciseProperties`, including density attributes and wire/point solids.
 /// Missing UV trim curves of the integrated faces are made on `b`.
 pub fn brep_properties(
@@ -967,6 +1357,8 @@ pub fn brep_properties(
             .mate
             .ok_or_else(|| SolidError::mass_missing(OP, "the faceuse's mate"))?;
         let mut separating = faceuse_region(b, up)? != faceuse_region(b, mate)?;
+        // the face's closure onto its edges (#16735), made once for both its uses
+        let mut closure: Option<PreciseProperties> = None;
         for (j, fu) in [up, mate].into_iter().enumerate() {
             let mut do_area = false;
             let mut do_volume = false;
@@ -1022,6 +1414,26 @@ pub fn brep_properties(
                     // face between two solid regions bounds both volumes but is no part of
                     // the area
                     add_selected(&mut total, &delta, mass.x, do_volume, do_area);
+                    // Not upstream (#16735): the strips and corners closing the face onto
+                    // its edges, the use's way round as its volume
+                    if do_volume {
+                        if closure.is_none() {
+                            closure = Some(gap_closure(k, b, f, origin, accuracy, estimated)?);
+                        }
+                        if let Some(c) = &closure {
+                            let sign = if orientation == OrientType::Same {
+                                -1.0
+                            } else {
+                                1.0
+                            };
+                            let mut c = c.clone();
+                            c.volume *= sign;
+                            for m in c.moments.iter_mut().skip(4) {
+                                *m *= sign;
+                            }
+                            add_selected(&mut total, &c, mass.x, true, false);
+                        }
+                    }
                 } else {
                     add(&mut total, &delta, mass.x);
                 }
