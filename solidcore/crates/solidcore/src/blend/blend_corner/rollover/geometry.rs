@@ -23,6 +23,7 @@ use crate::kernel::Kernel;
 use crate::math::{Point3, Vec3};
 use crate::nurbs::b_spline_curve::p1::{BSplineCurveForm, CanonicalData, KnotType};
 use crate::nurbs::b_spline_curve::BSplineCurve;
+use crate::nurbs::math::gamma;
 use crate::surface::surface::{Surface, SurfaceKind};
 
 const OP: &str = "blend::blend_corner::rollover::geometry";
@@ -557,7 +558,6 @@ pub fn torus_creases(
 /// profile point and the height, each at most `R + r2 + moved`), doubled. `NaN` never
 /// certifies (the caller's comparison fails).
 fn frame_rounding(frame: &TorusFrame, moved: f64) -> f64 {
-    use crate::nurbs::math::gamma;
     let (u, s, a) = (frame.up, frame.side, frame.axis);
     let defect = [
         (u.dot(u) - 1.0).abs(),
@@ -673,8 +673,15 @@ fn face_pieces(
                 return None;
             }
             let origin = rev.origin() - axis_c * (frame.height(rev.origin()) / cos_t);
-            let sin_t = (1.0 - cos_t * cos_t).max(0.0).sqrt();
-            let tilt = frame.radii.r2 * sin_t / cos_t.abs() + radius * (1.0 / cos_t.abs() - 1.0);
+            let (sin_t, cos_lo) = tilt_sin_cos(z, frame.axis)?;
+            // `r2 tan t + radius (1 / cos t - 1)`, the ellipse's term written without the
+            // cancellation of `1 / cos t - 1`; increasing in the sine and decreasing in the
+            // cosine, so the bounds give a bound. Its own rounding: each term at most five
+            // operations and the sum one (`gamma_6`), and this factor's (the gamma's two, the
+            // `1 +` and the product) four more
+            let tilt = (frame.radii.r2 * sin_t / cos_lo
+                + radius * sin_t * sin_t / (cos_lo * (1.0 + cos_lo)))
+                * (1.0 + gamma(10));
             let actual = frame.local(origin);
             let d_actual = norm2(actual);
             let touches = (d_actual - radius - r1).abs() <= tol && d_actual > 0.0 && radius > 0.0;
@@ -727,6 +734,45 @@ fn face_pieces(
         }
         _ => None,
     }
+}
+
+/// Bounds of the sine (above) and the cosine (below, positive) of the angle `t` between
+/// `a` and `b`, of any non-zero length, with the rounding of computing them counted
+/// (definitions-and-certificates §4.4); `None` where a length is zero or the cosine's
+/// bound is not positive. The sine is taken from the cross product, so a tilt far under
+/// `sqrt(u)` keeps its size (from `1 - cos^2` it rounds to 0 below about `1e-8`).
+///
+/// With `P = |a| |b|`:
+/// - a computed cross product's component is within `gamma_2 (|a_j b_k| + |a_k b_j|) <=
+///   gamma_2 P` of the exact one, so the vector within `sqrt(3) gamma_2 P <= 2 gamma_2 P`; its
+///   computed length `L` (a sum of three squares, `gamma_3`, and a square root) has the
+///   vector's length at most `L (1 + gamma_4)`;
+/// - a computed length is within a factor `(1 + gamma_4)` of the exact one either way, so
+///   the computed `p = fl(|a| |b|)` has `P >= p / (1 + gamma_7)` and `P <= p (1 + gamma_9)`;
+/// - `sin t <= L (1 + gamma_4) / P + 2 gamma_2 <= q (1 + gamma_12) + 2 gamma_2` for the
+///   computed `q = fl(L / p)`, and `q (1 + gamma_12) + 2 gamma_2 <= (q + 2 gamma_2)(1 +
+///   gamma_12)`; evaluating that takes seven roundings (each gamma's two, the sum, the
+///   `1 +`, the product), so `(q + 2 gamma_2)(1 + gamma_19)` computed is above it;
+/// - a computed dot product is within `gamma_3 P` of the exact one, so `|cos t| >=
+///   q' / (1 + gamma_10) - gamma_3 >= q' (1 - gamma_10) - gamma_3` for the computed
+///   `q' = fl(|a . b| / p)`, which `(q' - 2 gamma_3)(1 - gamma_17)` computed is under (its
+///   seven roundings counted as the sine's are; the doubled `gamma_3` covers the product's
+///   `gamma_3 gamma_17`).
+///
+/// A `NaN` fails the positivity tests: `None`.
+fn tilt_sin_cos(a: Vec3, b: Vec3) -> Option<(f64, f64)> {
+    let p = a.length() * b.length();
+    let sized = p > 0.0 && p.is_finite();
+    if !sized {
+        return None;
+    }
+    let sin_t = (a.cross(b).length() / p + 2.0 * gamma(2)) * (1.0 + gamma(19));
+    let cos_lo = (a.dot(b).abs() / p - 2.0 * gamma(3)) * (1.0 - gamma(17));
+    let leans = cos_lo > 0.0 && sin_t.is_finite();
+    if !leans {
+        return None;
+    }
+    Some((sin_t, cos_lo))
 }
 
 #[cfg(test)]
@@ -1006,6 +1052,67 @@ mod tests {
                     .unwrap();
                 let (dx, dz) = (p.x + 2.0, p.z + 1.0);
                 assert!(((dx * dx + dz * dz).sqrt() - 2.0).abs() < 1e-12, "{p:?}");
+                assert!(off_torus(p) <= target, "{p:?} {}", off_torus(p));
+            }
+        }
+    }
+
+    /// A cylinder tilted `5e-10` rad from the torus's axis (its axis `(eps, 1, 0)` through
+    /// `(-2, -1, -1)`, radius 2, touching the round's circle in the centre plane), far under
+    /// the `~1e-8` where `cos t` rounds to 1: its tilt is charged at its size, at least
+    /// `r2 tan t + radius (1 / cos t - 1)` (taken from `1 - cos^2 t` it was 0, and the
+    /// crease's distance off the tilted cylinder, about `|h| t`, went uncounted), and not
+    /// past it by more than the rounding allowance. Its four arcs lie on the tilted
+    /// cylinder within that tilt and within the target of the torus.
+    #[test]
+    fn a_cylinder_tilted_under_root_epsilon_has_its_tilt_charged() {
+        use crate::geom::axis2_placement::Axis2Placement;
+        use crate::surface::cone::Cone;
+        let k = Kernel::default();
+        let torus = planar_torus(&k);
+        let eps = 5e-10;
+        let (origin, radius) = (Point3::new(-2.0, -1.0, -1.0), 2.0);
+        let place =
+            Axis2Placement::new(origin, Vec3::new(0.0, 0.0, 1.0), Vec3::new(1.0, -eps, 0.0));
+        let wall = Surface::from(Cone::create_canonical_cylinder(&k, &place, radius).unwrap());
+        let zhat = Vec3::new(eps, 1.0, 0.0).unitize().unwrap();
+        // the exact bound at t = atan(eps): sin t = eps / sqrt(1 + eps^2), cos t its twin
+        let (sin_t, cos_t) = (
+            eps / (1.0 + eps * eps).sqrt(),
+            1.0 / (1.0 + eps * eps).sqrt(),
+        );
+        let exact = sin_t / cos_t + radius * sin_t * sin_t / (cos_t * (1.0 + cos_t));
+        assert!(exact > 4.9e-10);
+        let mut charged = 0.0_f64;
+        for sign in [1.0, -1.0] {
+            let frame = TorusFrame::new(
+                Point3::new(1.0, -1.0, -1.0),
+                Vec3::new(0.0, sign, 0.0),
+                Vec3::new(1.0, 0.0, 0.0),
+                Radii { r1: 1.0, r2: 1.0 },
+            )
+            .unwrap();
+            let (pieces, _, tilt) = face_pieces(&frame, &wall, 1e-9).unwrap();
+            assert_eq!(pieces.len(), 2);
+            assert!(tilt >= exact, "{tilt} under {exact}");
+            assert!(tilt <= exact * (1.0 + 1e-12) + 1e-14, "{tilt} past {exact}");
+            charged = charged.max(tilt);
+        }
+        let target = 1e-8;
+        let curves = torus_creases(&k, &torus, &wall, 1e-9, target)
+            .unwrap()
+            .unwrap();
+        assert_eq!(curves.len(), 4);
+        for c in &curves {
+            let ivl = c.natural_interval();
+            for i in 0..=64 {
+                let p = c
+                    .evaluate_point(&k, ivl.evaluate(f64::from(i) / 64.0))
+                    .unwrap();
+                let v = p - origin;
+                let off_axis = (v - zhat * v.dot(zhat)).length();
+                let off_wall = (off_axis - radius).abs();
+                assert!(off_wall <= charged + 1e-12, "{p:?} {off_wall}");
                 assert!(off_torus(p) <= target, "{p:?} {}", off_torus(p));
             }
         }
