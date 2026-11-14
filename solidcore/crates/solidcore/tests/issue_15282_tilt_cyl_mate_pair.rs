@@ -27,17 +27,25 @@
 mod offset_fixture;
 
 use offset_fixture::Notifications;
+use solidcore::blend::fillet_section::certificate::NurbsCurve;
+use solidcore::blend::fillet_section::station::Nurbs;
+use solidcore::curve::curve::{Curve, CurveKind};
 use solidcore::geom::attribute::{AttributeStore, ObjectKey};
 use solidcore::geom::object::ObjectRef;
+use solidcore::offset::curve_on_surfaces::curve_on_surfaces;
 use solidcore::offset::offset_executive::p1::{OffsetExecutive, OffsetOperation};
 use solidcore::offset::offset_executive::p2::SolidOffsetOptions;
 use solidcore::query::api_queries::brep_is_manifold_solid;
+use solidcore::surface::surface::p2::SurfaceKind;
+use solidcore::surface::surface::Surface;
 use solidcore::topology::brep::p1 as brep_p1;
 use solidcore::topology::brep::p10::TopologyEnv;
 use solidcore::topology::brep::p7::read_from_file;
 use solidcore::topology::brep::validation::{check_brep, CheckLevel};
 use solidcore::topology::database_io::FileType;
+use solidcore::topology::face::p2 as face_p2;
 use solidcore::topology::topology::NotifyRecords;
+use solidcore::topology::{edge, vertex};
 use solidcore::{Brep, EntityRef, Kernel};
 
 fn tilt_cyl_on_box(k: &mut Kernel) -> Option<Brep> {
@@ -136,6 +144,122 @@ fn assert_one_genus_0_solid(inset: bool) {
         .unwrap()
         .lines();
     assert!(lines.is_empty(), "inset {inset}: {lines:?}");
+
+    // every edge proved within its tolerance of both of its faces' surfaces (a seam edge's
+    // two uses are on one face: its surface is checked for both)
+    for &e in &edges {
+        let curve = edge::curve(&b, e).unwrap().expect("edge curve");
+        let ivl = edge::interval(&b, e).unwrap();
+        let tol = edge::tolerance(&b, e).unwrap();
+        let faces = edge::faces(&b, e, None).unwrap();
+        assert!(
+            matches!(faces.len(), 1 | 2),
+            "inset {inset}: edge {e:?} faces {faces:?}"
+        );
+        let s0 = face_p2::surface(&b, faces[0]).unwrap().expect("surface");
+        let s1 = face_p2::surface(&b, *faces.last().unwrap())
+            .unwrap()
+            .expect("surface");
+        assert!(
+            curve_on_surfaces(&k, curve, ivl, [s0, s1], tol).unwrap(),
+            "inset {inset}: edge {e:?} over {ivl:?} not proved within {tol} of its faces"
+        );
+    }
+
+    // the vertex box, as the goldens row records it
+    let (lo, hi) = vertices.iter().fold(
+        ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]),
+        |(mut lo, mut hi), &v| {
+            let p = vertex::point(&b, v).unwrap();
+            for (i, c) in [p.x, p.y, p.z].into_iter().enumerate() {
+                lo[i] = lo[i].min(c);
+                hi[i] = hi[i].max(c);
+            }
+            (lo, hi)
+        },
+    );
+    let golden = if inset {
+        [
+            -99.44260603027345,
+            -58.78686719970706,
+            -30.262270031738275,
+            99.44260603027342,
+            58.78686719970703,
+            82.07627110765964,
+        ]
+    } else {
+        [
+            -121.54100603027345,
+            -80.88526719970704,
+            -52.36067003173828,
+            121.54100603027345,
+            80.88526719970704,
+            103.9026032099467,
+        ]
+    };
+    for (got, want) in lo.iter().chain(hi.iter()).zip(golden) {
+        assert!(
+            (got - want).abs() <= 1e-9 * got.abs().max(want.abs()),
+            "inset {inset}: vertex box {lo:?} {hi:?}"
+        );
+    }
+}
+
+/// The fixture `tests/data/issue_15282_tilt_cyl_mate_pair.json`, which the unit test
+/// `offset::curve_on_surfaces::tests::tilt_cyl_old_offset_edge_is_off_its_plane_and_the_intersection_is_on_both`
+/// certifies, is the outward offset's mate: its installed intersection is a result edge's curve,
+/// bit for bit, over the fixture's interval, and its two surfaces are that edge's faces'.
+/// A change to the offset that moves either fails here rather than leaving the fixture
+/// stale.
+#[test]
+fn tilt_cyl_fixture_is_this_offsets_mate() {
+    let Some((_, b)) = offset(false) else {
+        return;
+    };
+    let data: serde_json::Value =
+        serde_json::from_str(include_str!("data/issue_15282_tilt_cyl_mate_pair.json")).unwrap();
+    let f64s = |v: &serde_json::Value| -> Vec<f64> { serde_json::from_value(v.clone()).unwrap() };
+    let same_curve = |c: &Curve| match c.kind() {
+        CurveKind::BSpline(bs) => NurbsCurve::of(bs).is_ok_and(|n| {
+            n.p as u64 == data["new"]["p"].as_u64().unwrap()
+                && n.u == f64s(&data["new"]["u"])
+                && n.pw == f64s(&data["new"]["pw"])
+        }),
+        _ => false,
+    };
+    let same_net = |s: &Surface, net: &serde_json::Value| match s.kind() {
+        SurfaceKind::BSpline(bs) => Nurbs::of(bs).is_ok_and(|n| {
+            n.p as u64 == net["p"].as_u64().unwrap()
+                && n.q as u64 == net["q"].as_u64().unwrap()
+                && n.u == f64s(&net["u"])
+                && n.v == f64s(&net["v"])
+                && n.pw == f64s(&net["pw"])
+        }),
+        _ => false,
+    };
+    let edges = brep_p1::edges(&b, None).unwrap();
+    let mated: Vec<_> = edges
+        .iter()
+        .filter(|&&e| same_curve(edge::curve(&b, e).unwrap().expect("edge curve")))
+        .collect();
+    assert_eq!(mated.len(), 1, "edges carrying the fixture's curve");
+    let e = *mated[0];
+    let ivl = edge::interval(&b, e).unwrap();
+    assert_eq!(
+        [ivl.min(), ivl.max()].to_vec(),
+        f64s(&data["new_ivl"]),
+        "interval"
+    );
+    let faces = edge::faces(&b, e, None).unwrap();
+    for net in data["s"].as_array().unwrap() {
+        assert!(
+            faces.iter().any(|&f| same_net(
+                face_p2::surface(&b, f).unwrap().expect("surface"),
+                &net["net"]
+            )),
+            "a fixture surface is not on the mated edge's faces"
+        );
+    }
 }
 
 #[test]

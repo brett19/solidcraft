@@ -2509,8 +2509,10 @@ impl OffsetGeometryCreation {
     /// both extended surfaces by [`crate::offset::curve_on_surfaces::curve_on_surfaces`]:
     /// closed form on planes and cones, interval bounds on B-spline nets and their
     /// offsets), and otherwise installs the intersection, upstream's own path for ends that
-    /// do not match. Each use decides alone, as upstream: a kept edge and an installed
-    /// intersection are then both within the tolerance of both surfaces.
+    /// do not match. Each use decides alone, as upstream, so one use of a pair can keep its
+    /// old curve while the other installs the intersection. A kept edge is proved within
+    /// its tolerance of both surfaces; an installed intersection is upstream's surface
+    /// intersection and is not certified here.
     #[allow(clippy::too_many_arguments)] // `ReplaceEdgeCurves` and the choice above
     fn replace_edge_curves_in<O: ClassObject + SolutionObject>(
         k: &Kernel,
