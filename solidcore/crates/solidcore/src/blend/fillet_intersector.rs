@@ -913,6 +913,10 @@ pub struct FilletIntersector<'s, 't, O, G> {
     curr_fillet_touch_boundary: bool,
     /// `m_bSelfIntersect` (no longer used upstream).
     self_intersect: bool,
+    /// Not upstream (tangency-labs/solidcraft#16686): a [`Self::flush_curve`] could not
+    /// make its fillet geometry (the surface not skinned, or the self-intersection not
+    /// smoothed). Upstream only notes it in the solver's sticky status.
+    geometry_unmade: bool,
 }
 
 impl<'s, 't, O: SolutionObject + 't, G: Clone> FilletIntersector<'s, 't, O, G> {
@@ -943,6 +947,7 @@ impl<'s, 't, O: SolutionObject + 't, G: Clone> FilletIntersector<'s, 't, O, G> {
             curr_fillet_geom,
             curr_fillet_touch_boundary: false,
             self_intersect: false,
+            geometry_unmade: false,
         })
     }
 
@@ -973,6 +978,12 @@ impl<'s, 't, O: SolutionObject + 't, G: Clone> FilletIntersector<'s, 't, O, G> {
     /// `SetSelfIntersect`.
     pub fn set_self_intersect(&mut self, is_self_intersect: bool) {
         self.self_intersect = is_self_intersect;
+    }
+
+    /// Not upstream (tangency-labs/solidcraft#16686): whether a [`Self::flush_curve`]
+    /// since the last call could not make its fillet geometry; clears the flag.
+    pub fn take_geometry_unmade(&mut self) -> bool {
+        std::mem::take(&mut self.geometry_unmade)
     }
 
     /// `IsKindOf`: `SmFilletIntersector_TYPE` or a type the advanced intersector is.
@@ -2080,6 +2091,7 @@ impl<'s, 't, O: SolutionObject + 't, G: Clone> FilletIntersector<'s, 't, O, G> {
                 );
                 if keep_unported(smoothed)?.is_none() {
                     solver.set_status(FilStatus::SelfIntHandlingFailure)?;
+                    self.geometry_unmade = true;
                     return Err(SolidError::blend_failed(
                         OP_FLUSH,
                         "the self-intersecting fillet could not be smoothed",
@@ -2119,6 +2131,7 @@ impl<'s, 't, O: SolutionObject + 't, G: Clone> FilletIntersector<'s, 't, O, G> {
             );
             let Some(s) = keep_unported(created)? else {
                 solver.set_status(FilStatus::SurfSkinningFailure)?;
+                self.geometry_unmade = true;
                 return Err(SolidError::blend_failed(
                     OP_FLUSH,
                     "the fillet surface could not be skinned",

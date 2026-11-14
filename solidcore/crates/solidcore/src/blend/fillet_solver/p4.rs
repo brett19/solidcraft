@@ -14,6 +14,11 @@
 //! | `get_or_create_uv_trim_curve`, `evaluate_binormal` (private) | `SmEdgeuse::GetOrCreateUVTrimCurve` and `SmEdgeuse::EvaluateBinormal` with the defaults `CalcFilletGeom` passes (unit `topology.edgeuse_p3`) |
 //!
 //! Deviations:
+//! - **Unmade fillet geometry (not upstream, tangency-labs/solidcraft#16686).** A trace
+//!   any of whose passes' flush could not make its fillet geometry (its surface not
+//!   skinned, or its self-intersection not smoothed) fails with that pass's error, once
+//!   the passes are done. Upstream only notes it in the solver's sticky status and returns
+//!   success, leaving the geometry without curves (or with an earlier pass's).
 //! - **Object model.** The solver's virtuals are the [`FilletSolverOps`] trait object
 //!   passed in (`this`); `SmContext` arguments are the [`Kernel`]. The filleted edge,
 //!   its edge uses and their UV trim curves belong to the *target* [`Brep`]; rails,
@@ -2535,6 +2540,9 @@ fn c4_trace(
     // ULONG lMaxLoopCount = 10; ULONG lLoopCount = 0; (:2081-2082)
     let max_loop_count: u32 = 10;
     let mut loop_count: u32 = 0;
+    // not upstream (#16686): the first pass whose flush could not make its geometry
+    let mut unmade = None;
+    fi.take_geometry_unmade();
 
     // while (!bFoundAllPoints): the flag starts FALSE, and the only assignment that
     // can leave it TRUE is followed by the `break` at :2278.
@@ -2587,21 +2595,14 @@ fn c4_trace(
         if stat.is_err() && ops.solver().status == FilStatus::Unprocessed {
             ops.solver_mut().set_status(FilStatus::SurfTracingFailure);
         }
+        // the flush that sets the flag fails the pass: that failure is returned once the
+        // passes are done (below)
+        if let (true, Err(e)) = (fi.take_geometry_unmade(), stat) {
+            unmade.get_or_insert(e);
+        }
         // Check all points, after the first one, to make sure
         // that they were properly processed by DoPointIntersection().
         let Some(ii) = c4_first_missed_point(&st.store, cx.fillets, &st.tsect_pnts)? else {
-            // Not upstream (tangency-labs/solidcraft#16686): a flush that could not make
-            // the fillet geometry (its surface not skinned, or its self-intersection not
-            // smoothed) stops before the rails get their curves. Upstream only notes the
-            // status and, every point processed, returns success with a fillet geometry
-            // whose rails have no curves, which the next step to read them dereferences.
-            // That failure is the calculation's.
-            if matches!(
-                ops.solver().status,
-                FilStatus::SurfSkinningFailure | FilStatus::SelfIntHandlingFailure
-            ) {
-                stat?;
-            }
             // quit with success when all FoundPoints have been processed
             break;
         };
@@ -2638,6 +2639,17 @@ fn c4_trace(
         }
     }
 
+    // Not upstream (tangency-labs/solidcraft#16686): a pass whose flush could not make its
+    // fillet geometry (its surface not skinned, or its self-intersection not smoothed)
+    // stops before that geometry gets its surface and rail curves. Upstream only notes the
+    // solver's (sticky, never reset) status and, every point processed, returns success:
+    // the geometry is left without curves, or with an earlier pass's, for later steps to
+    // dereference or merge. Such a trace fails with that pass's error, whatever the later
+    // passes did; the flag is the intersector's own, so a status left by an earlier
+    // solve cannot trip it.
+    if let Some(e) = unmade {
+        return Err(e);
+    }
     Ok(())
 }
 
@@ -2935,11 +2947,12 @@ mod tests_c4 {
     }
 
     /// tangency-labs/solidcraft#16686: with every point processed, a failed
-    /// `DoPointIntersection` is success upstream (it only notes the status), unless the
-    /// flush failed to make the fillet geometry (its surface not skinned): then the rails
-    /// have no curves, and the calculation fails with the flush's error.
+    /// `DoPointIntersection` whose flush made its geometry is success, as upstream, and a
+    /// failure status left by an earlier solve does not fail the trace. (A flush that
+    /// could not make its geometry fails it: `tests/issue_16686_fillet_surface_not_skinned.rs`
+    /// runs a real one.)
     #[test]
-    fn a_fillet_surface_not_skinned_fails_the_trace() {
+    fn a_trace_fails_only_for_its_own_unmade_geometry() {
         use super::super::p1::FilStatus;
         use crate::blend::fillet_geom::p1::FilletGeom;
 
@@ -2967,19 +2980,14 @@ mod tests_c4 {
             let result = c4_trace(&mut solver, &mut cx, &mut st, &mut fi);
             (result, solver.status)
         };
-        // the tracing failure alone: success, as upstream, the status noted
+        // a tracing failure that left no unmade geometry: success, as upstream
         let (result, status) = run(FilStatus::Unprocessed);
         assert!(result.is_ok(), "{result:?}");
         assert_eq!(status, FilStatus::SurfTracingFailure);
-        // the flush could not skin the surface: the calculation fails
-        for failed in [
-            FilStatus::SurfSkinningFailure,
-            FilStatus::SelfIntHandlingFailure,
-        ] {
-            let (result, status) = run(failed);
-            assert!(result.is_err(), "{failed:?}: {result:?}");
-            assert_eq!(status, failed);
-        }
+        // a stale failure status alone does not fail it
+        let (result, status) = run(FilStatus::SurfSkinningFailure);
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(status, FilStatus::SurfSkinningFailure);
     }
 }
 
