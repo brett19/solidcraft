@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 
 use super::profile::{simple_loops, Loop2, Region2, Seg2};
-use super::read::{planar_pieces, Run};
+use super::read::{planar_pieces, principal, Run};
 use crate::error::{Result, SolidError};
 use crate::eval::Frame;
 use crate::kernel::Kernel;
@@ -215,8 +215,10 @@ pub fn sheet_regions(k: &Kernel, b: &Brep, frame: &Frame, tol: f64) -> Result<Sh
 }
 
 /// `regions` in their canonical order, whatever order the sheet's faces, loops and edges came in:
-/// each loop starts at its smallest start point and the holes of a region and the regions are
-/// sorted by that point, the larger loop first where two share it. Points compare by
+/// every arc starts at an angle in (-π, π] (a loop reversed for a face seen from below starts
+/// each arc at its old end, `start + sweep`, which can lie past either end), each loop starts at
+/// its smallest start point and the holes of a region and the regions are sorted by that point,
+/// the larger loop first where two share it. Points compare by
 /// [`point_key`] on the grid of `tol`, so coordinates that differ by rounding only (a vertical
 /// edge whose ends' x differ in the last bits) compare equal and the next coordinate decides.
 fn canonical(regions: &mut Vec<Region2>, tol: f64) -> Result<()> {
@@ -244,11 +246,13 @@ fn canonical(regions: &mut Vec<Region2>, tol: f64) -> Result<()> {
 /// of a cell boundary, a half-odd multiple of `tol` (round coordinates sit at cell centres, not
 /// on boundaries); the exact coordinates then break the tie between points of one cell, which
 /// are within `tol` of each other in both coordinates. A `tol` that is not positive and finite
-/// leaves the exact coordinates alone to decide.
+/// leaves the exact coordinates alone to decide. A coordinate a hair under zero rounds to -0, which
+/// `total_cmp` orders before 0: adding 0 makes every zero cell +0, so the cell at zero is one
+/// cell and points straddling an axis are ordered by the next coordinate.
 fn point_key(p: Point2, tol: f64) -> [f64; 4] {
     let cell = |c: f64| {
         if tol > 0.0 && tol.is_finite() {
-            (c / tol).round()
+            (c / tol).round() + 0.0
         } else {
             0.0
         }
@@ -271,9 +275,16 @@ fn by_key(a: &Key, b: &Key) -> std::cmp::Ordering {
     by_point(&a.0, &b.0).then(b.1.total_cmp(&a.1))
 }
 
-/// Turns `lp` to start at the segment whose start point has the smallest [`point_key`] on the
-/// grid of `tol` (the first such), and returns that key with the size of the loop's area.
+/// Starts each arc of `lp` at its angle in (-π, π] ([`principal`]: one already in range keeps
+/// its bits), then turns `lp` to start at the segment whose start point has the smallest
+/// [`point_key`] on the grid of `tol` (the first such), and returns that key with the size of
+/// the loop's area.
 fn start_at_smallest(lp: &mut Loop2, tol: f64) -> Result<Key> {
+    for s in &mut lp.segs {
+        if let Seg2::Arc { start, .. } = s {
+            *start = principal(*start);
+        }
+    }
     let mut best: Option<(usize, [f64; 4])> = None;
     for (i, s) in lp.segs.iter().enumerate() {
         let k = point_key(s.start(), tol);

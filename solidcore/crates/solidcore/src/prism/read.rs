@@ -526,7 +526,7 @@ fn arc(
 /// The angle `a` in (-π, π]: unchanged when it is already (so an angle in range keeps its bits),
 /// else turned by whole turns (`atan2` answers -π for a point on the negative x axis at y = -0,
 /// and a whole turn's second half starts past π).
-fn principal(a: f64) -> f64 {
+pub(super) fn principal(a: f64) -> f64 {
     if a > -PI && a <= PI {
         return a;
     }
