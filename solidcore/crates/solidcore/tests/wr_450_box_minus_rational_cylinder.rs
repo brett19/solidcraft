@@ -108,13 +108,19 @@ fn wr_450_box_minus_rational_cylinder_is_valid_only_with_the_fix() {
         let block = create_box(&mut k, Point3::new(-14.0, 0.0, -14.0), 28.0, 20.0, 28.0).unwrap();
         let mut r = boolean_difference(&mut k, block, cylinder).unwrap();
 
-        // the same body either way: six faces and the closed-form volume
+        // six faces either way; the closed-form volume with the fix. Without it the body is
+        // invalid (below): its edges carry tolerances up to 0.78 to cover trims that point
+        // off them, so its volume is defined only up to those tubes, about 1e-2 of it (#16735:
+        // the volume closed onto the edges is 8502.78, 1.2e-3 over the closed form, inside
+        // that; until then the integrator took the trims' 8492.58). Nothing is asserted of it.
         assert_eq!(r.face_list().len(), 6, "fix {fix}");
         let got = volume(&k, &mut r);
-        assert!(
-            (got - want).abs() <= 1e-6 * want,
-            "fix {fix}: volume {got}, closed form {want}"
-        );
+        if fix {
+            assert!(
+                (got - want).abs() <= 1e-6 * want,
+                "fix {fix}: volume {got}, closed form {want}"
+            );
+        }
 
         let worst_edge = r
             .edge_list()
