@@ -1052,7 +1052,8 @@ fn polygon_closure(points: &[Vec3], out: &mut [f64; 13]) {
 /// Newton's own denominator `|E'|^2 + (E - p) . E''` can vanish or turn negative on a
 /// short, sharply curved knot span, where Gauss-Newton still moves toward `p`).
 fn nearest_on_edge(k: &Kernel, curve: &Curve, t0: f64, t1: f64, p: Vec3, guess: f64) -> f64 {
-    let mut t = guess.clamp(t0, t1);
+    // (max then min: no panic on an inverted or NaN range)
+    let mut t = guess.max(t0).min(t1);
     for _ in 0..64 {
         let Ok(e) = curve.evaluate(k, t, 1, true, false) else {
             break;
@@ -1065,7 +1066,7 @@ fn nearest_on_edge(k: &Kernel, curve: &Curve, t0: f64, t1: f64, p: Vec3, guess: 
         if df.is_nan() || df <= 0.0 || !f.is_finite() {
             break;
         }
-        let next = (t - f / df).clamp(t0, t1);
+        let next = (t - f / df).max(t0).min(t1);
         let step = (next - t).abs();
         t = next;
         if step <= 1e-15 * (1.0 + t.abs()) {
@@ -1301,11 +1302,7 @@ fn gap_closure(
             }
         }
         // the corners: from the end of one trim to the start of the next
-        let count = sides.len();
-        for (i, side) in sides.iter().enumerate() {
-            let Some(next) = sides.get((i + 1) % count) else {
-                continue;
-            };
+        for (side, next) in sides.iter().zip(sides.iter().cycle().skip(1)) {
             let [_, q_end] = side.trim_ends;
             let [_, e_end] = side.edge_ends;
             let [q_start, _] = next.trim_ends;
