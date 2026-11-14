@@ -2587,10 +2587,21 @@ fn c4_trace(
         if stat.is_err() && ops.solver().status == FilStatus::Unprocessed {
             ops.solver_mut().set_status(FilStatus::SurfTracingFailure);
         }
-
         // Check all points, after the first one, to make sure
         // that they were properly processed by DoPointIntersection().
         let Some(ii) = c4_first_missed_point(&st.store, cx.fillets, &st.tsect_pnts)? else {
+            // Not upstream (tangency-labs/solidcraft#16686): a flush that could not make
+            // the fillet geometry (its surface not skinned, or its self-intersection not
+            // smoothed) stops before the rails get their curves. Upstream only notes the
+            // status and, every point processed, returns success with a fillet geometry
+            // whose rails have no curves, which the next step to read them dereferences.
+            // That failure is the calculation's.
+            if matches!(
+                ops.solver().status,
+                FilStatus::SurfSkinningFailure | FilStatus::SelfIntHandlingFailure
+            ) {
+                stat?;
+            }
             // quit with success when all FoundPoints have been processed
             break;
         };
@@ -2921,6 +2932,54 @@ mod tests_c4 {
         // RemoveAt(0, 1)
         assert_eq!(st.tsect_pnts.len(), 2);
         assert!(fi.self_intersect());
+    }
+
+    /// tangency-labs/solidcraft#16686: with every point processed, a failed
+    /// `DoPointIntersection` is success upstream (it only notes the status), unless the
+    /// flush failed to make the fillet geometry (its surface not skinned): then the rails
+    /// have no curves, and the calculation fails with the flush's error.
+    #[test]
+    fn a_fillet_surface_not_skinned_fails_the_trace() {
+        use super::super::p1::FilStatus;
+        use crate::blend::fillet_geom::p1::FilletGeom;
+
+        let run = |status: FilStatus| {
+            let k = Kernel::default();
+            let mut solver = FilletSolver::new(1.0e-5, 0.01, 0.01);
+            solver.status = status;
+            let mut target = Brep::new();
+            let mut fillets = FilletBrep::new();
+            let g = fillets.add_geom(FilletGeom::new(&k, None, FilletGeomType::Default).unwrap());
+            solver.fillet_geoms.push(g);
+            let mut cx = Cx {
+                k: &k,
+                target: &mut target,
+                fillets: &mut fillets,
+                solvers: GeometrySolvers::Indexed(&[]),
+                error_info: None,
+            };
+            // no point missed: the loop ends after its first pass
+            let mut st = state(&[0.0, 0.5, 1.0]);
+            let s = surfaces();
+            let d = Extent2d::from_bounds(-1.0, -1.0, 2.0, 2.0);
+            let mut fi: TraceIntersector<'_> =
+                FilletIntersector::new(&k, &s[0], &d, &s[1], &d, None).unwrap();
+            let result = c4_trace(&mut solver, &mut cx, &mut st, &mut fi);
+            (result, solver.status)
+        };
+        // the tracing failure alone: success, as upstream, the status noted
+        let (result, status) = run(FilStatus::Unprocessed);
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(status, FilStatus::SurfTracingFailure);
+        // the flush could not skin the surface: the calculation fails
+        for failed in [
+            FilStatus::SurfSkinningFailure,
+            FilStatus::SelfIntHandlingFailure,
+        ] {
+            let (result, status) = run(failed);
+            assert!(result.is_err(), "{failed:?}: {result:?}");
+            assert_eq!(status, failed);
+        }
     }
 }
 
