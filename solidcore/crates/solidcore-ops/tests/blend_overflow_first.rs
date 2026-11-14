@@ -81,18 +81,22 @@ fn rounded(bytes: &[u8], at: &[[f64; 3]], r: f64) -> (usize, f64, Vec<bool>) {
 
 /// The plate's two top edges rounded r 2 in one call: the hole-side edge (-15, 0, 2)
 /// overflows and goes first, the other's round meets it as one blend. 8 faces, the kernel's
-/// two passes' 1681.903764986 (the closed form 1681.903758348; capped, 1682.853610631).
+/// two passes' 1681.903764986 (the closed form 1681.903758348; capped, 1682.853610631) until
+/// `brep_volume` closed tolerant edges' gaps (#16735): the 2.0e-8 excess was its leak, and the
+/// body is now the closed form to 1.2e-11 (MEASURED).
 #[test]
 fn the_plate_s_second_round_meets_the_first() {
     let (faces, v, dropped) = rounded(PLATE, &[[-15.0, 0.0, 2.0], [0.0, 15.5, 2.0]], 2.0);
     assert_eq!(faces, 8, "8 as one blend; 10 with the smooth-vertex caps");
-    assert!((v - 1_681.903_764_986).abs() <= 1e-9 * v, "{v}");
+    assert!((v - 1_681.903_758_348).abs() <= 1e-10 * v, "{v}");
     assert_eq!(dropped, vec![false, false]);
 }
 
 /// The notched block's top outline R8 in one call: the front and right edges (over the
 /// notch) go first, then the back and left meet them. 13 faces, 10198.718249145 (capped, 15
-/// faces and 10320.299091700).
+/// faces and 10320.299091700) until `brep_volume` closed tolerant edges' gaps (#16735): the
+/// 2.1e-8 excess was its leak, and the body is now the closed form 10198.718038816 to 5.8e-12
+/// (MEASURED, `issue_2364_alpha1_ends`).
 #[test]
 fn the_notched_block_s_second_rounds_meet_the_first() {
     let at = [
@@ -103,6 +107,6 @@ fn the_notched_block_s_second_rounds_meet_the_first() {
     ];
     let (faces, v, dropped) = rounded(NOTCHED, &at, 8.0);
     assert_eq!(faces, 13, "13 as one blend; 15 with the smooth-vertex caps");
-    assert!((v - 10_198.718_249_145).abs() <= 1e-9 * v, "{v}");
+    assert!((v - 10_198.718_038_816).abs() <= 1e-10 * v, "{v}");
     assert_eq!(dropped, vec![false; 4]);
 }

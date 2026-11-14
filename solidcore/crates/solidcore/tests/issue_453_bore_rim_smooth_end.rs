@@ -18,7 +18,10 @@
 //! 6316.944421027456, each with 11 faces. They are within the fork's capi test bound (1e-7
 //! of `ops_kernel.cpp`'s Simpson closed form, 6382.568731366 less the end rib's certified
 //! residual, and 6316.944424728): the input cases come from that test (fork capi test of
-//! tangency-labs/solidcore#453, 41a39ec).
+//! tangency-labs/solidcore#453, 41a39ec). The fork's volumes, and this port's until #16735,
+//! leaked through the blends' tolerant edges; since `brep_volume` closes those gaps the
+//! bodies are the closed forms 6382.568731366 and 6316.944424728 to 3e-10 (MEASURED), and
+//! are held to them.
 //!
 //! The touching line is a non-manifold edge of the input: the holed cube is no closed
 //! manifold solid, so `fillet_edges`' check that a solid stays one (WR-212) does not apply.
@@ -118,18 +121,19 @@ fn the_holed_cube_is_the_forks() {
     assert!((v - 6_429.203_673_205_027).abs() <= 1e-9, "{v}");
 }
 
-/// The round ends at the seam on the plane z = 5 and builds the fork's body.
+/// The round ends at the seam on the plane z = 5 and builds the fork's body, of the closed
+/// form's volume.
 #[test]
 fn the_round_builds_as_the_forks() {
     let (v, faces) = blended(1).unwrap();
-    assert!((v - 6_382.568_447_649_069).abs() <= 1e-8, "{v}");
+    assert!((v - 6_382.568_731_366).abs() <= 1e-9, "{v}");
     assert_eq!(faces, 11);
 }
 
-/// The chamfer builds the fork's body.
+/// The chamfer builds the fork's body, of the closed form's volume.
 #[test]
 fn the_chamfer_builds_as_the_forks() {
     let (v, faces) = blended(0).unwrap();
-    assert!((v - 6_316.944_421_027_456).abs() <= 1e-8, "{v}");
+    assert!((v - 6_316.944_424_728).abs() <= 1e-9, "{v}");
     assert_eq!(faces, 11);
 }

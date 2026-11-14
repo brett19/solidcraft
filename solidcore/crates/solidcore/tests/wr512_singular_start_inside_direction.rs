@@ -14,6 +14,10 @@
 //! volume 9531.3100142533 (`SmApiBrepComputeVolume` at 1e-8), the reference below; with
 //! WR-568's span as well, which the default kernel takes, 9531.3100486849. There is
 //! no closed form: the round's ends, on the front round and into the knife edge, are traced.
+//! Both C++ volumes leak through the rounds' tolerant edges (`SmApiBrepComputeVolume` as this
+//! port's integrator did before #16735): with the gaps closed both bodies are
+//! [`BOTH_ROUNDS_CLOSED`], and each test checks that the C++ figure is within the leak's
+//! bound of it.
 //! #1522's second case (a 20 cube, its top back edge rounded r3, then the end face's top
 //! edge r1) builds to the same volume with and without the flag, in the pinned C++ and with
 //! the fix, so it does not reach this guard and is not tested here.
@@ -24,6 +28,8 @@
     clippy::indexing_slicing
 )] // test helpers
 
+#[path = "support/volume_leak.rs"]
+mod volume_leak;
 use solidcore::blend::fillet_executive::api::fillet_edges;
 use solidcore::boolean::api_brep::{boolean_difference, boolean_union};
 use solidcore::geom::attribute::{AttributeStore, ObjectKey};
@@ -54,6 +60,9 @@ const BOTH_ROUNDS: f64 = 9531.3100142533;
 /// in `SmFilletSolver::CalcTorusFilletGeom` (tangency-labs/smlib@985faae) recompiled and
 /// linked ahead too, `SmApiBrepComputeVolume` at 1e-8.
 const BOTH_ROUNDS_SPAN: f64 = 9531.3100486849;
+/// Both bodies' volume with the tolerant edges' gaps closed (#16735; MEASURED, the two agree
+/// to 2e-12): 1.8e-8 and 1.5e-8 over [`BOTH_ROUNDS`] and [`BOTH_ROUNDS_SPAN`].
+const BOTH_ROUNDS_CLOSED: f64 = 9531.310189516603;
 
 /// The plate joined with the corner box less the cylinder, as the fork's capi test builds it.
 fn part(k: &mut Kernel) -> Brep {
@@ -111,9 +120,16 @@ fn assert_refused(r: solidcore::Result<()>) {
     }
 }
 
-/// The arc round built one manifold solid that checks clean, of the C++ volume `want` within
-/// `tol` relative.
-fn assert_built_to(k: &mut Kernel, b: &mut Brep, r: solidcore::Result<()>, tol: f64, want: f64) {
+/// The arc round built one manifold solid that checks clean, of volume `want` within `tol`
+/// relative, and the C++ volume `cpp` is within the old integrator's leak bound of it.
+fn assert_built_to(
+    k: &mut Kernel,
+    b: &mut Brep,
+    r: solidcore::Result<()>,
+    tol: f64,
+    cpp: f64,
+    want: f64,
+) {
     r.unwrap();
     let infinite = b.infinite_region();
     let solids = regions(b, None)
@@ -126,11 +142,12 @@ fn assert_built_to(k: &mut Kernel, b: &mut Brep, r: solidcore::Result<()>, tol: 
     let lines = check_brep(k, b, CheckLevel::Level2).unwrap().lines();
     assert!(lines.is_empty(), "{lines:?}");
     let v = volume(k, b);
-    println!("volume {v:.10} (reference: {want})");
+    println!("volume {v:.10} (reference: {want}, C++ {cpp})");
     assert!(
         (v - want).abs() <= tol * want,
         "volume {v}, expected {want}"
     );
+    volume_leak::assert_moved_by_the_old_leak(k, b, cpp, v, 1e-8);
 }
 
 #[test]
@@ -142,14 +159,21 @@ fn default_kernel_refuses_the_arc_round() {
 }
 
 /// The default kernel with the flag: the C++ body with the fork's line and WR-568's span,
-/// [`BOTH_ROUNDS_SPAN`], to 1e-9 (the gate's tolerance; the same construction and integration
-/// on both sides).
+/// [`BOTH_ROUNDS_SPAN`] (to 1e-9 until #16735, the gate's tolerance; the same construction
+/// and integration on both sides), now [`BOTH_ROUNDS_CLOSED`] to 1e-9.
 #[test]
 fn the_flag_builds_the_arc_round() {
     let mut k = Kernel::default();
     k.fixes.ssi_singular_start_inside_direction = true;
     let (mut b, r) = both_rounds(&mut k);
-    assert_built_to(&mut k, &mut b, r, 1e-9, BOTH_ROUNDS_SPAN);
+    assert_built_to(
+        &mut k,
+        &mut b,
+        r,
+        1e-9,
+        BOTH_ROUNDS_SPAN,
+        BOTH_ROUNDS_CLOSED,
+    );
 }
 
 /// Every fix with the blend corner End: the arc round's end on the front round, where the
@@ -157,7 +181,8 @@ fn the_flag_builds_the_arc_round() {
 /// no End at a smooth vertex (tangency-labs/solidcore#2656: the end arc turns into the wall
 /// away from the top edge continued, so the round run on leaves the part). It runs on as
 /// before smlib#124: without the WR-512 line it is refused as the pinned C++ refuses it,
-/// with it it builds the pinned C++'s body with that line, [`BOTH_ROUNDS`], to 1e-8 (the
+/// with it it builds the pinned C++'s body with that line, [`BOTH_ROUNDS`] (to 1e-8 until
+/// #16735; now [`BOTH_ROUNDS_CLOSED`], to 1e-8) (the
 /// fork's End, tangency-labs/smlib@18e96f1, caps it there instead: 9532.2987121741 with
 /// `SmApiFilletEdges` and `SmApiBrepComputeVolume` at 1e-8, 0.99 more).
 #[test]
@@ -171,7 +196,7 @@ fn the_blend_corner_runs_the_arc_round_on_as_the_pinned_with_wr512() {
         };
         let (mut b, r) = both_rounds(&mut k);
         if wr512 {
-            assert_built_to(&mut k, &mut b, r, 1e-8, BOTH_ROUNDS);
+            assert_built_to(&mut k, &mut b, r, 1e-8, BOTH_ROUNDS, BOTH_ROUNDS_CLOSED);
         } else {
             assert_refused(r);
         }

@@ -14,6 +14,7 @@
 mod common;
 
 use common::{edge_at, kernel_copy, volume};
+use solidcore::mass::integrator::properties::face_area;
 use solidcore::surface::surface::SurfaceKind;
 use solidcore::topology::face::p2 as face;
 use solidcore::topology::vertex::corner;
@@ -82,25 +83,42 @@ fn issue_3012_cut_of_filleted_boxes_a_sliver_apart() {
             let report = r.check(CheckLevel::All).unwrap();
             assert!(report.is_valid(), "dx {dx} reversed {reversed}: {report}");
             assert_eq!(r.solid_count().unwrap(), 1, "dx {dx} reversed {reversed}");
-            // The sliver is dx thick over the 30 of the outline's height, so its volume is
-            // dx * 30 * 10. At each end the fillets of the two bodies cross dx / 2 from their
-            // tangent point and the sliver is cut off there: a triangle of base dx and length
-            // dx / 2 per end, 2 ends x 10 high, so at most 10 dx^2 is missing (measured 5 dx^2:
-            // 4.8e-8 at 1e-4, 5.0e-6 at 1e-3). 1e-8 is the tolerance the volume is asked for.
+            // The sliver is the box's outline less its translate by dx along x: every line
+            // y = const in 0 < y < 30 meets it in exactly dx (the outline is at least 36 wide
+            // there), so its section is 30 dx and its volume dx * 30 * 10. Until `brep_volume`
+            // closed tolerant edges' gaps (#16735) it measured 5 dx^2 less (4.8e-8 at 1e-4,
+            // 5.0e-6 at 1e-3), read then as the ends cut off where the fillets cross: it was the
+            // caps' trims, which enclose dx^2 / 2 less each than their edges (within the edges'
+            // tolerance). Now the closed form to 0.02 dx^2 (measured 2.3e-9 at 1e-4, 6.2e-10
+            // at 1e-3, 1.7e-6 at 1e-2) plus the 1e-8 the volume is asked for.
             let h = 10.0;
             let expected = dx * 30.0 * h;
             let v = volume(&r);
             assert!(
-                (expected - v) > -1e-8 && (expected - v) < 10.0 * dx * dx + 1e-8,
+                (expected - v).abs() < 0.02 * dx * dx + 1e-8,
                 "dx {dx} reversed {reversed}: {v} vs {expected}"
             );
             // Every face of the sliver: the two flat sides (26 x 10 each), the four fillets (a
-            // quarter turn of R2 by 10 each) and the two caps (the sliver's section, V / 10
-            // each). A fillet face the sector skipped and a neighbouring edge put in the wrong
-            // region would add or drop 31.4. Each of the four fillet pieces ends where the two
-            // fillets cross, dx / 2 of arc short, over 10: 20 dx at most. 1e-7 is the area
-            // routine's slack (measured 4e-8).
-            let faces = 2.0 * 26.0 * 10.0 + 4.0 * FRAC_PI_2 * 2.0 * 10.0 + 2.0 * v / h;
+            // quarter turn of R2 by 10 each) and the two caps, measured by their trims as the
+            // body's area is (the sliver's section less dx^2 / 2 each, above; they were V / 10
+            // each until #16735 closed the volume's gaps). A fillet face the sector skipped and
+            // a neighbouring edge put in the wrong region would add or drop 31.4. Each of the
+            // four fillet pieces ends where the two fillets cross, dx / 2 of arc short, over 10:
+            // 20 dx at most. 1e-7 is the area routine's slack (measured 4e-8).
+            let (k, mut brep) = kernel_copy(&r);
+            let mut caps = 0.0;
+            for f in brep.face_list().to_vec() {
+                let plane = matches!(
+                    face::surface(&brep, f).unwrap().unwrap().kind(),
+                    SurfaceKind::Plane(_)
+                );
+                let a = face_area(&k, &mut brep, f, 1e-8).unwrap();
+                // the caps are the planes other than the two 26 x 10 sides
+                if plane && a < 1.0 {
+                    caps += a;
+                }
+            }
+            let faces = 2.0 * 26.0 * 10.0 + 4.0 * FRAC_PI_2 * 2.0 * 10.0 + caps;
             let area = r.area(1e-8).unwrap();
             // The fillets' pieces are each exactly dx / 2 of arc short over 10 (4 x 5 dx = 20 dx),
             // up to a second-order term (measured 0.02 dx^2 at most: the arcs are not straight)
@@ -113,7 +131,6 @@ fn issue_3012_cut_of_filleted_boxes_a_sliver_apart() {
             // lies below XSectTol3d off each of its faces, and none has grown past the 5e-5 the
             // four tangent ends have at dx 1e-4, where nothing is moved (measured): the fix passes
             // the check by moving the vertex, not by growing its tolerance.
-            let (k, mut brep) = kernel_copy(&r);
             let xsect = corner::xsect_tol_3d_of_brep(&k, &brep);
             for v in brep.vertices().ids().collect::<Vec<_>>() {
                 let (_, gap, _) =
