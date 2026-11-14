@@ -24,6 +24,8 @@
 #[path = "support/offset_fixture.rs"]
 mod offset_fixture;
 
+#[path = "support/volume_leak.rs"]
+mod volume_leak;
 use offset_fixture::{planar_faces_at, shell, volume};
 use solidcore::boolean::api_brep as boolean;
 use solidcore::curve::curve::Curve;
@@ -130,7 +132,9 @@ fn solidcraft_fixes() -> UpstreamFixes {
 
 /// The plate shelled 2 inward, open at x = 42.5, under `fixes`: a manifold solid and its
 /// volume.
-fn shelled_volume(fixes: &UpstreamFixes) -> f64 {
+/// `was`: the volume before `brep_volume` closed tolerant edges' gaps (#16735), the move
+/// checked within the old integrator's leak bound on the body.
+fn shelled_volume(fixes: &UpstreamFixes, was: f64) -> f64 {
     let mut k = Kernel {
         fixes: *fixes,
         ..Kernel::default()
@@ -142,7 +146,9 @@ fn shelled_volume(fixes: &UpstreamFixes) -> f64 {
     r.refresh_cached_topology();
     assert_eq!(r.face_list().len(), 16);
     assert!(brep_is_manifold_solid(&r).unwrap());
-    volume(&k, &mut r).unwrap()
+    let v = volume(&k, &mut r).unwrap();
+    volume_leak::assert_moved_by_the_old_leak(&k, &mut r, was, v, 1e-6);
+    v
 }
 
 fn check(v: f64, want: f64, without_flag: f64) {
@@ -172,14 +178,18 @@ fn check(v: f64, want: f64, without_flag: f64) {
 /// moves the volume by 1.5e-12 relative. The shell still runs the flag through the
 /// face-owned surfaces. Since `brep_volume` closes tolerant edges' gaps (#16735), +6.1e-5
 /// from the closed form with and without the flag (it was 10400.212799740975 and
-/// 10400.212799756418, +4.26e-4: the old integrator's leak).
+/// 10400.212799756418, +4.26e-4: the old integrator's leak, each move checked on the body).
 #[test]
 fn shelled_plate_with_solidcraft_fixes() {
     let mut fixes = solidcraft_fixes();
-    let without_flag = shelled_volume(&fixes);
+    let without_flag = shelled_volume(&fixes, 10400.212799740975);
     assert!((without_flag - 10400.212434834208).abs() <= 1e-9 * without_flag);
     fixes.shell_edges_on_analytics_exact = true;
-    check(shelled_volume(&fixes), 10400.212434834219, without_flag);
+    check(
+        shelled_volume(&fixes, 10400.212799756418),
+        10400.212434834219,
+        without_flag,
+    );
 }
 
 /// With only the flag on. Pinned since #2890: against the closed form, without the flag
@@ -187,14 +197,17 @@ fn shelled_plate_with_solidcraft_fixes() {
 /// volume's accuracy. With the flag it was 10400.212413698822 (+3.99e-5) before the
 /// certified offset became the default (#13827), as above; the flag now moves the volume
 /// by 3.1e-10 relative. Since `brep_volume` closes tolerant edges' gaps (#16735), +5.8e-5
-/// and +6.4e-5 (it was 10400.212857439197 and 10400.212854198868); the body without the
-/// flag is `wr_578_offset_closes_loop_gaps`'s, whose move is checked within the old
-/// integrator's leak bound there.
+/// and +6.4e-5 (it was 10400.212857439197 and 10400.212854198868), each move checked
+/// within the old integrator's leak bound on the body ([`shelled_volume`]).
 #[test]
 fn shelled_plate_with_the_flag_alone() {
     let mut fixes = UpstreamFixes::default();
-    let without_flag = shelled_volume(&fixes);
+    let without_flag = shelled_volume(&fixes, 10400.212857439197);
     assert!((without_flag - 10400.212432293585).abs() <= 1e-9 * without_flag);
     fixes.shell_edges_on_analytics_exact = true;
-    check(shelled_volume(&fixes), 10400.212438244882, without_flag);
+    check(
+        shelled_volume(&fixes, 10400.212854198868),
+        10400.212438244882,
+        without_flag,
+    );
 }

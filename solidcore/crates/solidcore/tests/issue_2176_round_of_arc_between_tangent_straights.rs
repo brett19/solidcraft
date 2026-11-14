@@ -220,6 +220,7 @@ fn the_neighbours_keep_their_rounds() {
         let mut k = kernel();
         let mut b = plate(&mut k);
         let before = fine_volume(&k, &mut b);
+        let mut part = b.clone_standing_for_self().unwrap();
         let e = pick(&k, &b, at);
         fillet_edges(&mut k, &mut b, &[e], RADIUS, 1, 1, 1.0).unwrap();
         b.refresh_cached_topology();
@@ -232,8 +233,10 @@ fn the_neighbours_keep_their_rounds() {
             "{at:?}: {removed}"
         );
         if at[1] == -25.0 {
-            let old = before - 7.958_672_926_831_696;
-            volume_leak::assert_moved_by_the_old_leak(&k, &mut b, old, after, 1e-10);
+            let was = 7.958_672_926_831_696;
+            volume_leak::assert_difference_moved_by_the_old_leak(
+                &k, &mut part, &mut b, was, removed, 1e-10,
+            );
         }
     }
 }

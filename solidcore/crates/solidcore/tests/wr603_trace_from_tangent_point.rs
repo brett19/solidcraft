@@ -74,13 +74,21 @@ fn peg() -> (f64, usize) {
     let front_top = nearest_edge(&k, &b, Point3::new(20.0, 0.0, 10.0));
     fillet_edges(&mut k, &mut b, &[front_top], 1.0, 1, 1, 1.0).unwrap();
     let before = volume(&k, &mut b);
+    let mut part = b.clone_standing_for_self().unwrap();
     let arc = nearest_edge(&k, &b, Point3::new(32.0, 8.0, 10.0));
     let chain = nearest_edge(&k, &b, Point3::new(38.0, 0.3, 9.5));
     fillet_edges(&mut k, &mut b, &[arc, chain], 1.0, 1, 1, 1.0).unwrap();
     let after = volume(&k, &mut b);
     // the 4.29958 added before `brep_volume` closed tolerant edges' gaps (#16735), to its
-    // five decimals: the move checked within the old integrator's leak bound
-    volume_leak::assert_moved_by_the_old_leak(&k, &mut b, before + 4.29958, after, 1e-8);
+    // five decimals: the move checked within the two bodies' old leak bounds
+    volume_leak::assert_difference_moved_by_the_old_leak(
+        &k,
+        &mut part,
+        &mut b,
+        -4.29958,
+        before - after,
+        1e-8,
+    );
     (after - before, b.faces().ids().count())
 }
 
