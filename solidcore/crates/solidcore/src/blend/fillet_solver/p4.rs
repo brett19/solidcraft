@@ -15,10 +15,12 @@
 //!
 //! Deviations:
 //! - **Unmade fillet geometry (not upstream, tangency-labs/solidcraft#16686).** A trace
-//!   any of whose passes' flush could not make its fillet geometry (its surface not
-//!   skinned, or its self-intersection not smoothed) fails with that pass's error, once
-//!   the passes are done. Upstream only notes it in the solver's sticky status and returns
-//!   success, leaving the geometry without curves (or with an earlier pass's).
+//!   whose flush could not make its fillet geometry (its surface not skinned, or its
+//!   self-intersection not smoothed) fails with that pass's error: before a cusp recovery
+//!   that would read the geometry's stale centre line, or at the end unless a later pass's
+//!   flush made the geometry (`UnmadeGeometry`). Upstream only notes it in the solver's
+//!   sticky status and returns success, leaving the geometry without curves (or with an
+//!   earlier pass's).
 //! - **Object model.** The solver's virtuals are the [`FilletSolverOps`] trait object
 //!   passed in (`this`); `SmContext` arguments are the [`Kernel`]. The filleted edge,
 //!   its edge uses and their UV trim curves belong to the *target* [`Brep`]; rails,
@@ -2540,8 +2542,8 @@ fn c4_trace(
     // ULONG lMaxLoopCount = 10; ULONG lLoopCount = 0; (:2081-2082)
     let max_loop_count: u32 = 10;
     let mut loop_count: u32 = 0;
-    // not upstream (#16686): the first pass whose flush could not make its geometry
-    let mut unmade = None;
+    // not upstream (#16686): a pass whose flush could not make its geometry
+    let mut unmade = UnmadeGeometry::default();
     fi.take_geometry_unmade();
 
     // while (!bFoundAllPoints): the flag starts FALSE, and the only assignment that
@@ -2595,11 +2597,7 @@ fn c4_trace(
         if stat.is_err() && ops.solver().status == FilStatus::Unprocessed {
             ops.solver_mut().set_status(FilStatus::SurfTracingFailure);
         }
-        // the flush that sets the flag fails the pass: that failure is returned once the
-        // passes are done (below)
-        if let (true, Err(e)) = (fi.take_geometry_unmade(), stat) {
-            unmade.get_or_insert(e);
-        }
+        unmade.after_pass(fi.take_geometry_unmade(), stat);
         // Check all points, after the first one, to make sure
         // that they were properly processed by DoPointIntersection().
         let Some(ii) = c4_first_missed_point(&st.store, cx.fillets, &st.tsect_pnts)? else {
@@ -2635,22 +2633,57 @@ fn c4_trace(
             // The newly created fillet did not trace to surface end - probably a
             // surface cusp: step past where the solver stopped, insert a new TsectPnt
             // and re-trace.
+            unmade.before_cusp_recovery()?;
             c4_cusp_recovery(ops, cx, st, fi)?;
         }
     }
 
-    // Not upstream (tangency-labs/solidcraft#16686): a pass whose flush could not make its
-    // fillet geometry (its surface not skinned, or its self-intersection not smoothed)
-    // stops before that geometry gets its surface and rail curves. Upstream only notes the
-    // solver's (sticky, never reset) status and, every point processed, returns success:
-    // the geometry is left without curves, or with an earlier pass's, for later steps to
-    // dereference or merge. Such a trace fails with that pass's error, whatever the later
-    // passes did; the flag is the intersector's own, so a status left by an earlier
-    // solve cannot trip it.
-    if let Some(e) = unmade {
-        return Err(e);
+    unmade.finish()
+}
+
+/// Not upstream (tangency-labs/solidcraft#16686): the trace's account of a flush that
+/// could not make its fillet geometry (its surface not skinned, or its self-intersection
+/// not smoothed). Such a flush returns before the geometry gets its surface, centre line
+/// and rails; upstream only notes the solver's (sticky, never reset) status, and with
+/// every point processed returns success, leaving the geometry without curves (or with
+/// an earlier pass's) for later steps to dereference or merge.
+///
+/// Every pass flushes into the same geometry (the solver's last), so a later pass whose
+/// flush succeeds overwrites it whole, as upstream: the failure is then spent. But the
+/// cusp recovery that follows a missed point reads that geometry's centre line for where
+/// the pass ran into trouble, and after a failed flush that centre line is an earlier
+/// pass's, or missing: the next pass would start from where an earlier pass stopped,
+/// not this one. So the failure is returned before such a recovery, and at the end if
+/// no later flush made the geometry. After the boundary branch (no centre line read)
+/// a later pass may still make it.
+#[derive(Debug, Default)]
+struct UnmadeGeometry {
+    /// The failure of the latest pass whose flush left the geometry unmade, until a
+    /// later pass's flush makes it.
+    pending: Option<SolidError>,
+}
+
+impl UnmadeGeometry {
+    /// After a pass: `unmade` is the intersector's flag, `stat` the pass's outcome. A
+    /// pass that succeeds made the geometry; one that fails without the flag (a tracing
+    /// failure) leaves the account as it was.
+    fn after_pass(&mut self, unmade: bool, stat: Result<()>) {
+        match (unmade, stat) {
+            (true, Err(e)) => self.pending = Some(e),
+            (_, Ok(())) => self.pending = None,
+            (false, Err(_)) => {}
+        }
     }
-    Ok(())
+
+    /// Before the cusp recovery, which would read the unmade geometry's stale centre line.
+    fn before_cusp_recovery(&mut self) -> Result<()> {
+        self.pending.take().map_or(Ok(()), Err)
+    }
+
+    /// Once the passes are done.
+    fn finish(self) -> Result<()> {
+        self.pending.map_or(Ok(()), Err)
+    }
 }
 
 /// The `RecordFilletError` message at :2103 and :2332.
@@ -2944,6 +2977,40 @@ mod tests_c4 {
         // RemoveAt(0, 1)
         assert_eq!(st.tsect_pnts.len(), 2);
         assert!(fi.self_intersect());
+    }
+
+    /// tangency-labs/solidcraft#16686: a failed flush is spent when a later pass's flush
+    /// makes the geometry (each pass flushes into the same one), and refused before a
+    /// cusp recovery would read its stale centre line, or at the end.
+    #[test]
+    fn an_unmade_geometry_fails_unless_a_later_pass_makes_it() {
+        let skin = || SolidError::blend_failed(OP, "skin");
+        let traced = || SolidError::blend_failed(OP, "traced");
+        // an earlier pass's flush fails, the final pass (after the boundary branch) makes
+        // the geometry: success, its geometry complete
+        let mut u = UnmadeGeometry::default();
+        u.after_pass(true, Err(skin()));
+        u.after_pass(false, Ok(()));
+        assert!(u.finish().is_ok());
+        // the same failure followed by a cusp recovery: refused with it before the recovery
+        let mut u = UnmadeGeometry::default();
+        u.after_pass(true, Err(skin()));
+        assert_eq!(u.before_cusp_recovery().unwrap_err(), skin());
+        // the last pass's flush fails: refused at the end, even after a good pass
+        let mut u = UnmadeGeometry::default();
+        u.after_pass(false, Ok(()));
+        u.after_pass(true, Err(skin()));
+        assert_eq!(u.finish().unwrap_err(), skin());
+        // a later tracing failure (no flush made) does not spend it
+        let mut u = UnmadeGeometry::default();
+        u.after_pass(true, Err(skin()));
+        u.after_pass(false, Err(traced()));
+        assert_eq!(u.finish().unwrap_err(), skin());
+        // tracing failures alone: success, as upstream
+        let mut u = UnmadeGeometry::default();
+        u.after_pass(false, Err(traced()));
+        assert!(u.before_cusp_recovery().is_ok());
+        assert!(u.finish().is_ok());
     }
 
     /// tangency-labs/solidcraft#16686: with every point processed, a failed
