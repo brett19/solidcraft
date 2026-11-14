@@ -939,7 +939,8 @@ mod tests {
             | BlendFailure::StationDidNotConverge { .. }
             | BlendFailure::TrimLoopOpen
             | BlendFailure::TrimLoopDoesNotSeparate
-            | BlendFailure::StageFailed => None,
+            | BlendFailure::StageFailed
+            | BlendFailure::NotCertified { .. } => None,
             BlendFailure::Failed(_) => Some("BlendFailure::Failed("),
             BlendFailure::Missing(_) => Some("BlendFailure::Missing("),
             BlendFailure::InvalidValue(_) => Some("BlendFailure::InvalidValue("),
@@ -959,7 +960,7 @@ mod tests {
     /// sites lowers the pin to the new count, and a new site builds a typed cause.
     #[test]
     fn the_phrase_cause_sites_only_go_down() {
-        const PHRASE_CAUSE_SITES: usize = 1406;
+        const PHRASE_CAUSE_SITES: usize = 1405;
         use crate::blend::fillet_executive::NoRoomReason as R;
         let causes = [
             BlendFailure::NoRoom(R::BallDoesNotFit),
@@ -973,6 +974,10 @@ mod tests {
             BlendFailure::TrimLoopOpen,
             BlendFailure::TrimLoopDoesNotSeparate,
             BlendFailure::StageFailed,
+            BlendFailure::NotCertified {
+                halvings: 0,
+                stations: 0,
+            },
             BlendFailure::Failed("x"),
             BlendFailure::Missing("x"),
             BlendFailure::InvalidValue("x"),
