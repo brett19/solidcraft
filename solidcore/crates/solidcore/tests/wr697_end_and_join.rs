@@ -787,3 +787,108 @@ fn a_near_straight_corner_s_join_is_bounded_by_the_brep_not_the_solvers() {
     round(&mut k, &mut b, &at_edges, 1.0);
     clean(&mut k, &mut b);
 }
+
+/// The plate of [`kinked_plate`] (its outline at z = 0) drafted 2 down z (the sweep runs
+/// against z) with its walls drafted 30 degrees in, its caps on: the walls meet the cap at z = 0
+/// at 60 degrees and the cap at z = -2 at 120.
+/// The two edges at `z` running from the kink, as points halfway along them, and the kink's
+/// vertex there.
+fn drafted_plate(
+    k: &mut Kernel,
+    kink: f64,
+    convex: bool,
+    z: f64,
+) -> (Brep, [[f64; 3]; 2], [f64; 3]) {
+    let t = if convex { -kink } else { kink }.to_radians();
+    let (u, n) = ([t.cos(), t.sin()], [t.sin(), -t.cos()]);
+    let p = [
+        [0.0, 0.0],
+        [50.0, 0.0],
+        [50.0 + 40.0 * u[0], 40.0 * u[1]],
+        [50.0 + 40.0 * u[0] + 30.0 * n[0], 40.0 * u[1] + 30.0 * n[1]],
+        [0.0, -30.0],
+    ];
+    let curves: Vec<solidcore::curve::curve::Curve> = (0..p.len())
+        .map(|i| {
+            let (a, c) = (p[i], p[(i + 1) % p.len()]);
+            solidcore::curve::curve::Curve::from(
+                solidcore::primitive::api_curves::create_line_segment(
+                    Point3::new(a[0], a[1], 0.0),
+                    Point3::new(c[0], c[1], 0.0),
+                )
+                .unwrap(),
+            )
+        })
+        .collect();
+    let refs: Vec<Option<&solidcore::curve::curve::Curve>> = curves.iter().map(Some).collect();
+    let b = solidcore::sweep::api_brep::create_draft_sweep(k, &refs, 2.0, 30.0, false, 3).unwrap();
+    // the kink's vertex at z, and the two edges there leaving it
+    let mut kv = None;
+    let mut ends = Vec::new();
+    for e in get_edges(&b).unwrap() {
+        let v0 = edge::vertex(&b, e).unwrap();
+        let v1 = edge::other_vertex(&b, e, v0).unwrap();
+        let (Some(v0), Some(v1)) = (v0, v1) else {
+            continue;
+        };
+        let (a, c) = (
+            vertex::point(&b, v0).unwrap(),
+            vertex::point(&b, v1).unwrap(),
+        );
+        if (a.z - z).abs() > 1e-9 || (c.z - z).abs() > 1e-9 {
+            continue;
+        }
+        for (q, o) in [(a, c), (c, a)] {
+            if (q.x - 50.0).abs() < 2.0 && q.y.abs() < 2.0 {
+                kv = Some([q.x, q.y, q.z]);
+                ends.push([(q.x + o.x) / 2.0, (q.y + o.y) / 2.0, z]);
+            }
+        }
+    }
+    assert_eq!(ends.len(), 2, "{ends:?}");
+    (b, [ends[0], ends[1]], kv.unwrap())
+}
+
+/// #16627: rounds r 1 joined at the drafted plate's kink leave the shared section `r * a`
+/// off, `a` the angle between the drafted walls (`cos a = cos^2 30 cos kink + sin^2 30`, so
+/// `a` is `cos 30` of the kink), on the 60 degree wedge at z = 0 and the 120 degree one at
+/// z = -2 alike: the radius, the round's offset from the cap they share, not its reach along
+/// the faces (`r cot(w / 2)`, sqrt 3 and 1 / sqrt 3). So the corner is the Join at 0.97 of
+/// the kink where `r * a` reaches the intersection tolerance 2e-5, and the Turn at 1.03, on
+/// both wedges and with the kink either way, and each passes the check. A bound on the reach
+/// fails both ways: at 120 degrees it joins at 1.03, where `r * a` is 2.06e-5 (joined at
+/// 1.925e-3 degrees, the check finds the vertex 2.91e-5 off, `r * a` to eight digits), and at
+/// 60 degrees it turns at 0.97.
+#[test]
+fn a_near_straight_corner_s_join_holds_on_acute_and_obtuse_wedges() {
+    let d = 30.0_f64.to_radians();
+    let a_max = 2e-5_f64;
+    let (c, s) = (d.cos(), d.sin());
+    let k_max = ((a_max.cos() - s * s) / (c * c)).acos().to_degrees();
+    for z in [0.0, -2.0] {
+        for (f, want) in [
+            (0.97, BlendCornerEvent::Join),
+            (1.03, BlendCornerEvent::Turn),
+        ] {
+            for convex in [false, true] {
+                let kink = f * k_max;
+                let mut k = all_fixes();
+                let (mut b, at_edges, kv) = drafted_plate(&mut k, kink, convex, z);
+                assert_eq!(b.tolerance(), 1e-5);
+                let cs = corners(
+                    &mut k,
+                    &mut b.clone_standing_for_self().unwrap(),
+                    &at_edges,
+                    1.0,
+                );
+                assert_eq!(
+                    at(&cs, kv).1.map(|e| e.0),
+                    Some(want),
+                    "edges at z {z}, {kink} degrees (convex {convex})"
+                );
+                round(&mut k, &mut b, &at_edges, 1.0);
+                clean(&mut k, &mut b);
+            }
+        }
+    }
+}

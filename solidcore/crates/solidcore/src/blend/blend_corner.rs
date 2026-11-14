@@ -316,13 +316,16 @@ pub fn classify(
 /// The angle (degrees) below which two blends of sizes up to `size` may share one section (a
 /// Join) in a B-rep of intersection tolerance `xsect_tol` (#16627).
 ///
-/// At the joint vertex the two blends' sections stand at most `size * a` apart, `a` the angle
-/// at which the side edge's faces meet at the vertex: each blend's section points lie at most
-/// `size` from the side edge (a round's centre `size` off the faces; a chamfer's points at its
-/// setbacks, `size` their largest offset), and turning by `a` about the side edge moves a
-/// point at distance `r` from it along an arc of length `r * a`, longer than the chord. The
-/// check holds every vertex strictly within the B-rep's intersection tolerance of each of its
-/// faces (`SmVertex::IsWithinXSectTol3dOfFaces`, `gap < XSectTol3d`, twice the B-rep's zone
+/// At the joint vertex the shared section leaves the two blends `o * a` apart, `a` the angle
+/// at which the side edge's faces meet at the vertex and `o` the blends' offset from the face
+/// they share (a round's radius; a chamfer's `(d' - d cos w) / sin w` for setbacks `d` on that
+/// face and `d'` on the side at a wedge of angle `w`), at any wedge angle: measured to eight
+/// digits on rounds and on equal and unequal chamfers at wedges of 60, 90 and 120 degrees (not
+/// derived here). `size` is the largest offset of either surface of either blend, so `size *
+/// a` bounds it. Not the setbacks: on a 120 degree wedge a chamfer of setbacks 1 stands
+/// `sqrt 3` off its faces and leaves `sqrt 3 * a`. The check holds every vertex strictly within
+/// the B-rep's intersection tolerance of each of its faces
+/// (`SmVertex::IsWithinXSectTol3dOfFaces`, `gap < XSectTol3d`, twice the B-rep's zone
 /// tolerance). So a Join needs `size * a < xsect_tol`.
 ///
 /// The budget is shrunk for the rounding of the angle `check_tangential_edgeuse_at_vertex`

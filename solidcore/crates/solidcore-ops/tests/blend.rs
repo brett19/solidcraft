@@ -1836,3 +1836,95 @@ fn a_round_on_a_revolved_torus_end_edge_survives_reload() {
         );
     }
 }
+
+/// The plate of [`shallow_corner_plate`] drafted `draft` degrees in (its walls meet the cap at
+/// z = 0, its outline, at 90 - `draft` degrees), with the record indices of the two edges of
+/// that cap at the kink.
+fn drafted_corner_plate(kink: f64, draft: f64) -> (Body, [usize; 2]) {
+    let t = kink.to_radians();
+    let (u, n) = ([t.cos(), t.sin()], [t.sin(), -t.cos()]);
+    let p = [
+        [0.0, 0.0],
+        [50.0, 0.0],
+        [50.0 + 40.0 * u[0], 40.0 * u[1]],
+        [50.0 + 40.0 * u[0] + 30.0 * n[0], 40.0 * u[1] + 30.0 * n[1]],
+        [0.0, -30.0],
+    ];
+    let profile: Vec<Curve> = (0..p.len())
+        .map(|i| {
+            let (a, b) = (p[i], p[(i + 1) % p.len()]);
+            Curve::Line {
+                start: [a[0], a[1], 0.0],
+                end: [b[0], b[1], 0.0],
+            }
+        })
+        .collect();
+    let b = extrude(
+        &profile,
+        [0.0, 0.0, 1.0],
+        2.0,
+        draft.to_radians(),
+        DraftCorner::default(),
+        true,
+    )
+    .unwrap();
+    let edges = [
+        edge_at(&b, [25.0, 0.0, 0.0]),
+        edge_at(&b, [50.0 + 20.0 * u[0], 20.0 * u[1], 0.0]),
+    ];
+    (b, edges)
+}
+
+/// #16627: chamfers joined at a near-straight corner leave the shared section `o * a` off, `o`
+/// their offset from the face the two share and `a` the angle between the side faces, not their
+/// setback times `a`. A chamfer of setbacks `d` on one face and `d'` on the other of a wedge of
+/// angle `w` stands `(d' - d cos w) / sin w` off the first: on a 120 degree wedge setbacks 1
+/// stand sqrt 3 off. The Join is bounded by the largest offset, so chamfers of setbacks 1,
+/// 1 x 0.5 and 0.5 x 1 on wedges of 60 and 120 degrees (walls drafted 30 degrees either way)
+/// pass the check at 0.97, 1.03 and 1.5 of the kink where that offset times `a` reaches the
+/// intersection tolerance 2e-5. Bounded by the setbacks, the setbacks 1 on the 120 degree wedge
+/// would be joined at 1.5 (`a` 1.73e-5 rad), leaving the vertex sqrt 3 * a = 3.0e-5 off: forced
+/// to the Join at 2e-3 degrees, the check finds it 5.2359878e-5 off, sqrt 3 * a to eight digits.
+#[test]
+fn chamfers_join_at_a_near_straight_corner_within_their_offsets() {
+    all_fixes();
+    for draft in [30.0_f64, -30.0] {
+        // the walls meet the cap at w: cos w = -n_cap . n_wall
+        let w = (90.0 - draft).to_radians();
+        let (cw, sw) = (w.cos(), w.sin());
+        let d = draft.to_radians();
+        for (top, side) in [(1.0, 1.0), (1.0, 0.5), (0.5, 1.0)] {
+            let offsets = [(side - cw * top) / sw, (top - cw * side) / sw];
+            let size = offsets[0].max(offsets[1]);
+            let a_max = 2e-5 / size;
+            let k_max = ((a_max.cos() - d.sin().powi(2)) / d.cos().powi(2))
+                .acos()
+                .to_degrees();
+            for f in [0.97, 1.03, 1.5] {
+                let kink = f * k_max;
+                let (b, edges) = drafted_corner_plate(kink, draft);
+                let what = format!("chamfer {top} x {side}, draft {draft}, {kink} degrees");
+                if top == side {
+                    blend(&b, Blend::Chamfer, &edges, &[top], &[], Corners::Filled)
+                        .unwrap_or_else(|e| panic!("{what}: {e:?}"));
+                } else {
+                    let along: Vec<usize> = edges
+                        .iter()
+                        .map(|&e| {
+                            let faces = edge_faces_along(&b, e, [0.0, 0.0, -1.0]).unwrap();
+                            if faces[0].1 > faces[1].1 {
+                                faces[0].0
+                            } else {
+                                faces[1].0
+                            }
+                        })
+                        .collect();
+                    chamfer_sides(&b, &edges, &along, top, ChamferSecond::Distance(side))
+                        .unwrap_or_else(|e| panic!("{what}: {e:?}"));
+                }
+                let report = b.check(CheckLevel::All).unwrap();
+                assert!(report.is_valid(), "{what}: {report}");
+            }
+        }
+    }
+}
