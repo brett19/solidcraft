@@ -477,7 +477,9 @@ pub fn fix_boundary_curves_bounded(
         }
     }
     if !upstream_exceeds {
-        ctrl_poly.copy_from_slice(&upstream);
+        for (p, q) in ctrl_poly.iter_mut().zip(upstream) {
+            *p = q;
+        }
         return Ok(upstream_changed);
     }
 
