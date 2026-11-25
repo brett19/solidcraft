@@ -1048,6 +1048,94 @@ fn a_sliver_wider_than_its_tolerance_or_losing_the_larger_tolerance_is_not_colla
     assert_eq!(outcomes, ["collapsed", "would grow"]);
 }
 
+/// A cancellation inside the sliver collapse's gap bound stops the collapse with the
+/// cancellation, never as a refused face: one riser side as the iso line of a bilinear
+/// patch (so the bound polls per cell), cancelled at polls of the uncancelled run.
+#[test]
+fn a_sliver_collapse_cancelled_in_its_gap_bound_stops_cancelled() {
+    use solidcore::heal::tolerance_defects::{Healed, Refusal};
+    use solidcore::topology::{edge, vertex};
+    use solidcore::CancelToken;
+    let set_iso = |b: &mut solidcore::topology::Brep,
+                   env: &mut edge::NotifyEnv<'_>,
+                   side: solidcore::topology::EdgeId|
+     -> solidcore::Result<()> {
+        use solidcore::nurbs::math::CPoint;
+        let (s, t) = edge::start_end_vertices(b, side)?;
+        let (p, q) = (vertex::point(b, s.unwrap())?, vertex::point(b, t.unwrap())?);
+        let off = solidcore::math::Vec3::new(0.0, 0.0, 1.0);
+        let net = vec![
+            vec![CPoint::from_point(p), CPoint::from_point(p + off)],
+            vec![CPoint::from_point(q), CPoint::from_point(q + off)],
+        ];
+        let nurb = solidcore::nurbs::srf_basic::Surface::new(
+            net,
+            1,
+            1,
+            vec![0.0, 0.0, 1.0, 1.0],
+            vec![0.0, 0.0, 1.0, 1.0],
+        )?;
+        let surface = solidcore::surface::surface::p2::Surface::from(
+            solidcore::nurbs::b_spline_surface::BSplineSurface::from_nurb(nurb, false),
+        );
+        let c = solidcore::curve::curve::Curve::from(
+            solidcore::curve::iso_curve::IsoCurve::from_surface(
+                &solidcore::Kernel::default(),
+                surface,
+                solidcore::nurbs::b_spline_surface::SurfParamType::V,
+                0.0,
+                true,
+                false,
+            )?,
+        );
+        let interval = solidcore::curve::curve::p2::CurveEvaluate::natural_interval(&c);
+        let options = edge::SetCurveOptions {
+            delete_old_curve: true,
+            ..edge::SetCurveOptions::default()
+        };
+        edge::set_curve(b, side, Some(c), options, env, [None, None])?;
+        edge::set_interval(b, side, &interval)
+    };
+    let run = |token: CancelToken| {
+        use solidcore::heal::tolerance_defects::collapse_coincident_two_edge_faces;
+        use solidcore::topology::brep::p3::edit_brep;
+        let mut k = solidcore::Kernel::default();
+        let (mut b, _, [_, side]) = squeezed_riser(&mut k);
+        k.set_cancel_token(token);
+        let mut healed = Healed::default();
+        let result = edit_brep(&mut k, &mut b, |k, b, scope| {
+            set_iso(b, scope.env, side)?;
+            collapse_coincident_two_edge_faces(k, b, scope.env, &mut healed)
+        });
+        (result, healed)
+    };
+    // Uncancelled, the iso side is the line it replaces: the riser collapses.
+    let counting = CancelToken::after_polls(u64::MAX);
+    let (result, healed) = run(counting.clone());
+    assert!(result.unwrap(), "{healed:?}");
+    assert_eq!(healed.collapsed.len(), 1, "{healed:?}");
+    let polls = counting.polls().unwrap();
+    assert!(polls > 4, "{polls}");
+    // Most polls are the riser's gap-bound cells; every run is a full heal, so cancel at
+    // fixed polls. A cancelled bound never reads as an unbounded gap (the refusal a failed
+    // bound gets). (Later polls, in the kept edge's face gaps and the zero-area collapse's
+    // loop orientation, read an error as a refusal: #21915.)
+    for n in [1, polls / 4, polls / 2, 3 * polls / 4] {
+        let (result, healed) = run(CancelToken::after_polls(n));
+        assert!(
+            matches!(&result, Err(e) if e.is_cancelled()),
+            "cancelled from poll {n} of {polls}: {result:?}"
+        );
+        assert!(
+            !healed
+                .refused_faces
+                .iter()
+                .any(|(_, r)| matches!(r, Refusal::NotCoincident(d) if d.is_infinite())),
+            "cancelled from poll {n} of {polls}: {healed:?}"
+        );
+    }
+}
+
 /// The squeeze's clusters are found under the kernel's token: a cancelled heal stops there too,
 /// before the squeeze's own edge limit is checked; not cancelled, the hair step's riser ends
 /// squeeze to their targets.

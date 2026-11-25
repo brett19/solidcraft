@@ -903,6 +903,9 @@ pub fn collapse_coincident_two_edge_faces(
                 healed.refused_faces.push((f, Refusal::NotCoincident(d)));
                 continue;
             }
+            // a cancellation (polled per cell by the bound) stops the collapse
+            // a cancellation (polled per cell by the bound) stops the collapse
+            Err(e) if e.is_cancelled() => return Err(e),
             Err(_) => {
                 healed
                     .refused_faces
