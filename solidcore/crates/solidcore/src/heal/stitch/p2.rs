@@ -1232,6 +1232,7 @@ impl Stitch<'_> {
                         Some((
                             edge::tolerance(b, keep)?,
                             super::bounds::curves(
+                                k,
                                 curve_of(b, e)?,
                                 [e_ivl.min(), e_ivl.max()],
                                 curve_of(b, test_e)?,

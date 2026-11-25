@@ -887,6 +887,7 @@ pub fn collapse_coincident_two_edge_faces(
         }
         let (ik, ig) = (edge::interval(b, keep)?, edge::interval(b, gone)?);
         let d = bounds::curves(
+            k,
             curve_of(b, keep)?,
             [ik.min(), ik.max()],
             curve_of(b, gone)?,

@@ -455,7 +455,12 @@ fn a_tangent_field_shared_edge_reports_a_finite_certified_gap() {
         .unwrap()
         .into()
     });
-    closes_shared_edge(k, b, 0.105..f64::MAX);
+    // The closed form in f64 is within a few ulps of the true maximum (each of asin,
+    // sqrt and the divisions rounds once, about 1e-17 here); 1e-12 below it is still a
+    // lower bound on the real gap, so a certified bound must reach it.
+    let pi = std::f64::consts::PI;
+    let peak = (2.0 / pi).asin() / pi - (1.0 - (1.0 - 4.0 / (pi * pi)).sqrt()) / 2.0;
+    closes_shared_edge(k, b, peak - 1e-12..f64::MAX);
 }
 
 /// The edge closures of a report, with their kept and deleted edges.

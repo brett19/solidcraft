@@ -32,7 +32,8 @@
 //! Deviations: the recursion is into a composite's segments and an on-surface or
 //! tangent-field curve's parameter curve, refused past `MAX_GEOMETRY_NESTING` (32)
 //! levels, the construction limit. The centred pair bound encloses at most 4096
-//! cells, halving a starting cell at most 24 times; a surface curve's range is halved
+//! cells, halving a starting cell at most 24 times, and polls the kernel's cancel token
+//! per cell; a surface curve's range is halved
 //! at most 6 times where a rational surface's weight is not proved positive. Other work is bounded by the
 //! stored knot and segment counts and the kernel's NURBS degree limit. Curves without
 //! an implemented exact enclosure, surfaces other than planes and B-splines (and the
@@ -61,6 +62,7 @@ use crate::nurbs::knots::MAX_DEGREE;
 use crate::nurbs::math::{CPoint, NOW, NOZ};
 use crate::surface::plane::Plane;
 use crate::surface::surface::p2::{Surface, SurfaceKind, MAX_GEOMETRY_NESTING};
+use crate::Kernel;
 use crate::{Result, SolidError};
 
 const OP: &str = "heal::stitch::bounds";
@@ -811,13 +813,24 @@ fn surface_parts(knots: &[f64], p: usize, n: usize, t: Ivl) -> Result<Vec<(f64, 
     Ok(parts)
 }
 
+/// Whether the nondegenerate parameter box `t` ends on an inner knot of multiplicity above
+/// the degree `p` (a jump the evaluation takes the piece after on `t.hi`).
+fn ends_on_jump(knots: &[f64], p: usize, n: usize, t: Ivl) -> Result<bool> {
+    let (first, last) = (at(knots, p)?, at(knots, n)?);
+    Ok(t.lo < t.hi
+        && first < t.hi
+        && t.hi < last
+        && knots.iter().filter(|&&x| x == t.hi).count() > p)
+}
+
 /// Encloses a surface's point (and with `partials` its first partials) over the uv box
 /// `u` x `v`, where `Surface::evaluate_point` evaluates it: a B-spline surface (not in
 /// the power-basis form) by its rational pieces ([`nurbs_partials_within_span_centred`], exact
 /// point derivatives at the part's middle and their Taylor enclosure, the weights proved
 /// positive), the extrapolated end pieces included, or `None` where a piece's weight is
-/// not proved positive over the box; a plane by its affine map, on the analytic domain
-/// it clamps to. Other surface kinds are refused.
+/// not proved positive over the box (with `partials`, also where the box ends on a jump,
+/// [`ends_on_jump`]). Its knots are the stored ones the evaluation reads. A plane by its
+/// affine map, on the analytic domain it clamps to. Other surface kinds are refused.
 fn surface_jet(surface: &Surface, u: Ivl, v: Ivl, partials: bool) -> Result<Option<SurfaceJet>> {
     if !finite(u) || !finite(v) {
         return Err(invalid("non-finite surface parameter enclosure"));
@@ -835,7 +848,31 @@ fn surface_jet(surface: &Surface, u: Ivl, v: Ivl, partials: bool) -> Result<Opti
             if cps.iter().any(|c| (c.w != NOW) != rational || c.z == NOZ) {
                 return Err(invalid("mixed homogeneous coordinate storage"));
             }
-            let net = SurfaceNet::of(s).map_err(|_| invalid("invalid surface data"))?;
+            // The counts and degrees first (checked arithmetic, the NURBS degree limit),
+            // so `SurfaceNet::of` sums no unbounded degree.
+            let nurb = s
+                .gw_nurb()
+                .ok_or_else(|| invalid("a B-spline surface without its NURB"))?;
+            nurb.counts_are_valid()
+                .map_err(|_| invalid("invalid surface degrees or counts"))?;
+            let mut net = SurfaceNet::of(s).map_err(|_| invalid("invalid surface data"))?;
+            // The evaluation reads the stored knots; `SurfaceNet::of` reads them merged
+            // within `scaled_zero()`, which collapses a narrow span the evaluation keeps.
+            let (su, sv) = (nurb.u_knots(), nurb.v_knots());
+            if su.len() != net.u.len() || sv.len() != net.v.len() {
+                return Err(invalid("surface knots do not match their counts"));
+            }
+            net.u = su.to_vec();
+            net.v = sv.to_vec();
+            // A partial is a rate only where the surface is continuous over the box: a
+            // nondegenerate box whose upper end is on an inner jump takes the piece after
+            // the jump there, so the mean-value form would not cover the jump.
+            if partials
+                && (ends_on_jump(&net.u, net.p, net.nu, u)?
+                    || ends_on_jump(&net.v, net.q, net.nv, v)?)
+            {
+                return Ok(None);
+            }
             let us = surface_parts(&net.u, net.p, net.nu, u)?;
             let vs = surface_parts(&net.v, net.q, net.nv, v)?;
             let mut out: Option<Partials<Ivl>> = None;
@@ -1125,10 +1162,12 @@ fn spline_rate(n: &Nurbs, t: Ivl) -> Result<Option<Box3>> {
     // Discontinuous where a knot inside the range, or at its upper end (the evaluation
     // takes the next piece there), has multiplicity above the degree; and on an
     // unclamped natural end, where the evaluation fails or is the end control point.
-    if knots
-        .iter()
-        .any(|&k| k > t.lo && k <= t.hi && k < last && multiplicity(k) > p)
-        || (t.lo <= first && multiplicity(first) <= p)
+    // (`validate` proved the knots nondecreasing, so a run of equal knots is a knot's
+    // whole multiplicity: one pass.)
+    if knots.chunk_by(|a, b| a == b).any(|run| {
+        run.first()
+            .is_some_and(|&k| k > t.lo && k <= t.hi && k < last && run.len() > p)
+    }) || (t.lo <= first && multiplicity(first) <= p)
         || (t.hi >= last && multiplicity(last) <= p)
     {
         return Ok(None);
@@ -1350,6 +1389,7 @@ const CENTRED_DEPTH: u32 = 24;
 /// enclosed (a curve without one, or one discontinuous there) takes the plain bound and
 /// is halved like any other.
 fn centred(
+    k: &Kernel,
     first: &Curve,
     a: [f64; 2],
     ar: Ivl,
@@ -1408,6 +1448,8 @@ fn centred(
         // Level by level, so the budget refines the whole range evenly.
         let mut split = Vec::new();
         for (s0, s1) in cells {
+            // At most `CENTRED_BUDGET` cells, each a few span enclosures: poll per cell.
+            k.check_cancelled(OP)?;
             used += 1;
             let (bound, small) = cell(s0, s1)?;
             let m = 0.5 * (s0 + s1);
@@ -1437,7 +1479,13 @@ fn centred(
 }
 
 /// Bounds both directed curve gaps under the stated endpoint correspondence.
-pub(crate) fn curves(first: &Curve, a: [f64; 2], second: &Curve, b: [f64; 2]) -> Result<f64> {
+pub(crate) fn curves(
+    k: &Kernel,
+    first: &Curve,
+    a: [f64; 2],
+    second: &Curve,
+    b: [f64; 2],
+) -> Result<f64> {
     let ar = checked_range(a)?;
     let br = checked_range(b)?;
     // With a common positive rational basis the difference is a convex combination
@@ -1503,7 +1551,7 @@ pub(crate) fn curves(first: &Curve, a: [f64; 2], second: &Curve, b: [f64; 2]) ->
         .iter()
         .any(|c| matches!(c.kind(), CurveKind::CrvOnSurf(_) | CurveKind::Iso(_)))
     {
-        return centred(first, a, ar, second, b, br);
+        return centred(k, first, a, ar, second, b, br);
     }
     // Affine curves attain the maximum norm of their difference at an endpoint.
     // Otherwise enclose every parameter cell, never only its sample stations.
@@ -1598,7 +1646,7 @@ mod tests {
             );
         }
         assert_eq!(bump.evaluate_point(&k, 0.125).unwrap().y, 1.0);
-        let bound = curves(&flat, [0.0, 1.0], &bump, [0.0, 1.0]).unwrap();
+        let bound = curves(&Kernel::default(), &flat, [0.0, 1.0], &bump, [0.0, 1.0]).unwrap();
         assert!((1.0..1.0 + 1e-12).contains(&bound), "{bound}");
         let squeezed =
             curve_to_point(&bump, &Extent1d::from_min_max(0.0, 1.0), Vec3::ZERO).unwrap();
@@ -1614,12 +1662,19 @@ mod tests {
             vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
         );
         let line: Curve = Line::from_points(Vec3::ZERO, Vec3::new(1.0, 0.0, 0.0), 3).into();
-        let bound = curves(&rational, [0.0, 1.0], &line, [0.0, 1.0]).unwrap();
+        let bound = curves(&Kernel::default(), &rational, [0.0, 1.0], &line, [0.0, 1.0]).unwrap();
         assert!((2.0 / 3.0..1.0).contains(&bound), "{bound}");
         let at_mid = point_at_curve(Vec3::new(0.5, 0.0, 0.0), &rational, 0.5).unwrap();
         assert!((2.0 / 3.0..2.0 / 3.0 + 1e-12).contains(&at_mid), "{at_mid}");
         assert_eq!(
-            curves(&rational, [0.0, 1.0], &rational, [0.0, 1.0]).unwrap(),
+            curves(
+                &Kernel::default(),
+                &rational,
+                [0.0, 1.0],
+                &rational,
+                [0.0, 1.0]
+            )
+            .unwrap(),
             0.0
         );
     }
@@ -1636,11 +1691,25 @@ mod tests {
             1,
             vec![0.0, 0.0, 1.0, 1.0],
         );
-        let bound = curves(&forward, [0.25, 0.75], &reverse, [0.75, 0.25]).unwrap();
+        let bound = curves(
+            &Kernel::default(),
+            &forward,
+            [0.25, 0.75],
+            &reverse,
+            [0.75, 0.25],
+        )
+        .unwrap();
         assert!(bound.is_finite() && bound < 0.1, "{bound}");
         let endpoint_bound = point_at_curve(Vec3::ZERO, &forward, 0.75).unwrap();
         assert!((0.75..0.75 + 1e-12).contains(&endpoint_bound));
-        assert!(curves(&forward, [-0.1, 0.75], &reverse, [0.75, 0.25]).is_err());
+        assert!(curves(
+            &Kernel::default(),
+            &forward,
+            [-0.1, 0.75],
+            &reverse,
+            [0.75, 0.25]
+        )
+        .is_err());
     }
 
     #[test]
@@ -1722,7 +1791,7 @@ mod tests {
         second.transform_2d(0.0, crate::math::Point2::new(0.0, d));
         let a: Curve = first.into();
         let b: Curve = second.into();
-        let bound = curves(&a, [-1.0, 3.0], &b, [-1.0, 3.0]).unwrap();
+        let bound = curves(&Kernel::default(), &a, [-1.0, 3.0], &b, [-1.0, 3.0]).unwrap();
         // Closed form: the difference is (d g_x(t), d) with |g_x| <= 1, so its
         // largest norm is d sqrt(2), at t = 0 (g_x = 1).
         let exact = d * core::f64::consts::SQRT_2;
@@ -1730,7 +1799,10 @@ mod tests {
             bound >= exact * (1.0 - 1e-15) && bound <= exact * (1.0 + 1e-12),
             "{bound:e} against {exact:e}"
         );
-        assert_eq!(curves(&a, [-1.0, 3.0], &a, [-1.0, 3.0]).unwrap(), 0.0);
+        assert_eq!(
+            curves(&Kernel::default(), &a, [-1.0, 3.0], &a, [-1.0, 3.0]).unwrap(),
+            0.0
+        );
     }
 
     #[test]
@@ -1862,6 +1934,7 @@ mod tests {
     fn hermite_pair_bound_holds_the_interior_gap_and_proves_identity() {
         let curve = |h: HermiteCurve| -> Curve { h.into() };
         let same = curves(
+            &Kernel::default(),
             &curve(parabola_hermite()),
             [0.0, 1.0],
             &curve(parabola_hermite()),
@@ -1873,6 +1946,7 @@ mod tests {
         // ends agree exactly.
         let chord = hermite([0.0; 3], [1.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 0.0, 0.0]);
         let bound = curves(
+            &Kernel::default(),
             &curve(parabola_hermite()),
             [0.0, 1.0],
             &curve(chord),
@@ -1888,6 +1962,7 @@ mod tests {
             [1.0, -1.0, 0.0],
         );
         let bound = curves(
+            &Kernel::default(),
             &curve(parabola_hermite()),
             [0.0, 1.0],
             &curve(lifted),
@@ -1905,11 +1980,11 @@ mod tests {
         let forward = line([0.0; 3], [1.0, 0.0, 0.0]);
         let backward = line([1.0, 0.0, 0.0], [0.0; 3]);
         for (l, range) in [(&forward, [0.0, 1.0]), (&backward, [1.0, 0.0])] {
-            let bound = curves(&parabola, [0.0, 1.0], l, range).unwrap();
+            let bound = curves(&Kernel::default(), &parabola, [0.0, 1.0], l, range).unwrap();
             assert!((0.25..=1.0 / 3.0 + 1.0e-12).contains(&bound), "{bound}");
-            let bound = curves(l, range, &parabola, [0.0, 1.0]).unwrap();
+            let bound = curves(&Kernel::default(), l, range, &parabola, [0.0, 1.0]).unwrap();
             assert!((0.25..=1.0 / 3.0 + 1.0e-12).contains(&bound), "{bound}");
-            let bound = curves(&curve(chord), [0.0, 1.0], l, range).unwrap();
+            let bound = curves(&Kernel::default(), &curve(chord), [0.0, 1.0], l, range).unwrap();
             // Closed form 0; the bound is only rounding. Each Bernstein coefficient
             // takes under 20 outward-rounded operations on magnitudes at most 3, each
             // widening an end by at most 2.3e-16 * 3 + 1e-300, so under 1.4e-14 per
@@ -1917,7 +1992,14 @@ mod tests {
             assert!(bound < 2.4e-14, "{bound}");
         }
         // The wrong correspondence pairs t with 1 - t on the chord: gap up to 1.
-        let crossed = curves(&curve(chord), [0.0, 1.0], &forward, [1.0, 0.0]).unwrap();
+        let crossed = curves(
+            &Kernel::default(),
+            &curve(chord),
+            [0.0, 1.0],
+            &forward,
+            [1.0, 0.0],
+        )
+        .unwrap();
         assert!(crossed >= 1.0, "{crossed}");
         // Point to curve over the whole curve: the far end is sqrt(2) from (0, 1, 0)
         // ... and the start 1 away.
@@ -2165,9 +2247,9 @@ mod tests {
                 let d = ends[1] - ends[0];
                 let h: Curve = HermiteCurve::new(ends[0], d, ends[1], d, 3).into();
                 let scale = 1.0 + ends[0].length().max(ends[1].length());
-                let bound = curves(&h, [0.0, 1.0], line, range).unwrap();
+                let bound = curves(&Kernel::default(), &h, [0.0, 1.0], line, range).unwrap();
                 assert!(bound < 1e-12 * scale, "{line:?} {range:?}: {bound}");
-                let bound = curves(line, range, &h, [0.0, 1.0]).unwrap();
+                let bound = curves(&Kernel::default(), line, range, &h, [0.0, 1.0]).unwrap();
                 assert!(bound < 1e-12 * scale, "{line:?} {range:?}: {bound}");
             }
         }
@@ -2192,12 +2274,12 @@ mod tests {
             [-1.0, -1.0, 0.0],
         )
         .into();
-        let same = curves(&h, [0.0, 1.0], &back, [1.0, 0.0]).unwrap();
+        let same = curves(&Kernel::default(), &h, [0.0, 1.0], &back, [1.0, 0.0]).unwrap();
         assert!(same < 1e-14, "{same}");
-        let sub = curves(&h, [0.2, 0.6], &back, [0.8, 0.4]).unwrap();
+        let sub = curves(&Kernel::default(), &h, [0.2, 0.6], &back, [0.8, 0.4]).unwrap();
         assert!(sub < 1e-14, "{sub}");
         // Read forward the two run in opposite directions: the ends are 1 apart.
-        let crossed = curves(&h, [0.0, 1.0], &back, [0.0, 1.0]).unwrap();
+        let crossed = curves(&Kernel::default(), &h, [0.0, 1.0], &back, [0.0, 1.0]).unwrap();
         assert!(crossed >= 1.0, "{crossed}");
     }
 
@@ -2372,17 +2454,24 @@ mod tests {
         // Equal curves differ by rounding only: each midpoint box is a few ulps of 1 wide
         // (|x| <= 1) and the derivative term is the rounding of equal rates (a few ulps)
         // times a cell's half-width; 1e-14 is above both by two orders.
-        let gap = curves(&on, [0.0, 1.0], &line(0.0), l0).unwrap();
+        let gap = curves(&Kernel::default(), &on, [0.0, 1.0], &line(0.0), l0).unwrap();
         assert!(gap < 1e-14, "{gap}");
-        let gap = curves(&iso, [0.0, 0.5], &line(0.0), l0).unwrap();
+        let gap = curves(&Kernel::default(), &iso, [0.0, 0.5], &line(0.0), l0).unwrap();
         assert!(gap < 1e-14, "{gap}");
-        let gap = curves(&on, [0.0, 1.0], &reversed, [back[1], back[0]]).unwrap();
+        let gap = curves(
+            &Kernel::default(),
+            &on,
+            [0.0, 1.0],
+            &reversed,
+            [back[1], back[0]],
+        )
+        .unwrap();
         assert!(gap < 1e-14, "{gap}");
         // Lifted by 1/2 the gap is exactly 1/2: the bound holds it and adds rounding only.
-        let lifted = curves(&on, [0.0, 1.0], &line(0.5), l0).unwrap();
+        let lifted = curves(&Kernel::default(), &on, [0.0, 1.0], &line(0.5), l0).unwrap();
         assert!((0.5..0.5 + 1e-14).contains(&lifted), "{lifted}");
         // Read against the line run the other way, the ends are 1 apart.
-        let crossed = curves(&on, [0.0, 1.0], &reversed, back).unwrap();
+        let crossed = curves(&Kernel::default(), &on, [0.0, 1.0], &reversed, back).unwrap();
         assert!(crossed >= 1.0, "{crossed}");
     }
 
@@ -2464,6 +2553,128 @@ mod tests {
         );
         assert!(curve_rate(&uv, Ivl::new(0.2, 0.5), 0).unwrap().is_none());
         assert!(curve_rate(&uv, Ivl::new(0.2, 0.45), 0).unwrap().is_some());
+    }
+
+    #[test]
+    fn a_pair_bound_holds_a_jump_at_a_range_end() {
+        let k = Kernel::default();
+        // The iso follows the left piece (x = 2u/3, z = 0.05) on [0, 0.5) and takes the
+        // right piece's (2/3, 0.5, 0.55) at u = 0.5; the line is the left piece, so the
+        // gap is that jump at the range end and nothing elsewhere.
+        let surface = stepped(vec![0.0, 0.0, 0.5, 0.5, 1.0, 1.0], 1);
+        let iso: Curve = IsoCurve::from_surface(&k, surface, SurfParamType::V, 0.5, true, false)
+            .unwrap()
+            .into();
+        let left: Curve = Line::from_points(
+            Vec3::new(0.0, 0.5, 0.05),
+            Vec3::new(1.0 / 3.0, 0.5, 0.05),
+            3,
+        )
+        .into();
+        let span = [left.natural_interval().min(), left.natural_interval().max()];
+        let jump = iso
+            .evaluate_point(&k, 0.5)
+            .unwrap()
+            .distance(left.evaluate_point(&k, span[1]).unwrap());
+        assert!(jump > 0.6, "{jump}");
+        let gap = curves(&k, &iso, [0.0, 0.5], &left, span).unwrap();
+        assert!(gap >= jump, "{gap} < {jump}");
+        // A rate over a box ending on the jump is refused, one ending short of it kept.
+        let surface = stepped(vec![0.0, 0.0, 0.5, 0.5, 1.0, 1.0], 1);
+        let half = Ivl::from(0.5);
+        assert!(surface_jet(&surface, Ivl::new(0.25, 0.5), half, true)
+            .unwrap()
+            .is_none());
+        assert!(surface_jet(&surface, Ivl::new(0.25, 0.5), half, false)
+            .unwrap()
+            .is_some());
+        assert!(surface_jet(&surface, Ivl::new(0.25, 0.45), half, true)
+            .unwrap()
+            .is_some());
+        assert!(surface_jet(&surface, Ivl::new(0.5, 0.75), half, true)
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn a_surface_jet_reads_the_stored_knots() {
+        use crate::math::Point2;
+        use crate::nurbs::b_spline_surface::BSplineSurface;
+        use crate::nurbs::srf_basic::Surface as NurbSurface;
+        let k = Kernel::default();
+        // A span 2^-44 wide, below `scaled_zero()`, that a borrowed NURB keeps: merged
+        // knots would put the evaluation's span elsewhere.
+        let e = 2.0_f64.powi(-44);
+        let row = |x: f64, z: f64| vec![CPoint::new(x, 0.0, z, NOW), CPoint::new(x, 1.0, z, NOW)];
+        let net = vec![row(0.0, 0.0), row(0.4, 1.0), row(0.6, -1.0), row(1.0, 0.5)];
+        let nurb = NurbSurface::new(
+            net,
+            1,
+            1,
+            vec![0.0, 0.0, 0.5, 0.5 + e, 1.0, 1.0],
+            vec![0.0, 0.0, 1.0, 1.0],
+        )
+        .unwrap();
+        let surface = Surface::from(BSplineSurface::from_nurb(nurb, true));
+        for u in [0.5, 0.5 + 0.5 * e, 0.5 + e, 0.25, 0.75] {
+            let p = surface.evaluate_point(&k, Point2::new(u, 0.5)).unwrap();
+            let jet = surface_jet(&surface, Ivl::from(u), Ivl::from(0.5), false)
+                .unwrap()
+                .unwrap();
+            assert!(contains(jet.value, p), "{u}: {p:?} outside {:?}", jet.value);
+        }
+        let wide = surface_jet(&surface, Ivl::new(0.4, 0.6), Ivl::from(0.5), false)
+            .unwrap()
+            .unwrap();
+        for u in [0.5, 0.5 + 0.5 * e, 0.5 + e] {
+            let p = surface.evaluate_point(&k, Point2::new(u, 0.5)).unwrap();
+            assert!(
+                contains(wide.value, p),
+                "{u}: {p:?} outside {:?}",
+                wide.value
+            );
+        }
+    }
+
+    #[test]
+    fn an_unbounded_surface_degree_is_refused() {
+        use crate::nurbs::b_spline_surface::BSplineSurface;
+        use crate::nurbs::srf_basic::Surface as NurbSurface;
+        let row = |x: f64| vec![CPoint::new(x, 0.0, 0.0, NOW), CPoint::new(x, 1.0, 0.0, NOW)];
+        let nurb = NurbSurface::new(
+            vec![row(0.0), row(1.0)],
+            usize::MAX,
+            1,
+            vec![0.0, 0.0, 1.0, 1.0],
+            vec![0.0, 0.0, 1.0, 1.0],
+        )
+        .unwrap();
+        let surface = Surface::from(BSplineSurface::from_nurb(nurb, true));
+        let half = Ivl::from(0.5);
+        assert!(surface_jet(&surface, half, half, false).is_err());
+        assert!(surface_jet(&surface, half, half, true).is_err());
+    }
+
+    #[test]
+    fn a_cancelled_kernel_stops_the_centred_bound() {
+        use crate::kernel::CancelToken;
+        let mut k = Kernel::default();
+        let surface = stepped(vec![0.0, 0.0, 0.5, 0.5, 1.0, 1.0], 1);
+        let iso: Curve = IsoCurve::from_surface(&k, surface, SurfParamType::V, 0.5, true, false)
+            .unwrap()
+            .into();
+        let left: Curve = Line::from_points(
+            Vec3::new(0.0, 0.5, 0.05),
+            Vec3::new(1.0 / 3.0, 0.5, 0.05),
+            3,
+        )
+        .into();
+        let span = [left.natural_interval().min(), left.natural_interval().max()];
+        assert!(curves(&k, &iso, [0.0, 0.4], &left, span).is_ok());
+        let token = CancelToken::new();
+        token.cancel();
+        k.set_cancel_token(token);
+        assert!(curves(&k, &iso, [0.0, 0.4], &left, span).is_err());
     }
 
     #[test]
